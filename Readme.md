@@ -1,4 +1,4 @@
-# ReconPipe 🔑
+# ReconPipe
 
 **Automated API Key Leak Hunter**
 
