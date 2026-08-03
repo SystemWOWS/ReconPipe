@@ -1,0 +1,413 @@
+min_confidence: 30
+patterns:
+  google_api: 'AIza[0-9A-Za-z\-_]{35}'
+  google_oauth: 'ya29\.[0-9A-Za-z\-_]{20,}'
+  aws_access_key: (?:AKIA|ASIA)[0-9A-Z]{16}
+  aws_secret: '(?i)\baws.{0,20}(?:secret|access_key)?[''\"]?([0-9a-zA-Z\/+]{40})[''\"]?'
+  aws_session_token: '(?i)(?:aws[_-]?session[_-]?token|x-amz-security-token)[''\"]?\s*[=:]\s*[''\"]?([A-Za-z0-9/+=]{100,})[''\"]?'
+  github_pat: ghp_[0-9a-zA-Z]{36}
+  github_fine_pat: github_pat_[0-9a-zA-Z_]{22}_[0-9a-zA-Z_]{59}
+  github_oauth: gho_[0-9a-zA-Z]{36}
+  github_app: (?:ghu|ghs)_[0-9a-zA-Z]{36}
+  gitlab_pat: 'glpat-[A-Za-z0-9_\-]{20,}'
+  stripe_live: sk_live_[0-9a-zA-Z]{24,}
+  stripe_test: sk_test_[0-9a-zA-Z]{24,}
+  stripe_restricted: rk_(?:live|test)_[0-9a-zA-Z]{24,}
+  stripe_publishable: pk_(?:live|test)_[0-9a-zA-Z]{24,}
+  openai_key: sk-proj-[A-Za-z0-9_-]{20,}-[A-Za-z0-9_-]{20,}
+  anthropic_key: sk-ant-api03-[A-Za-z0-9_-]{20,}
+  sendgrid: 'SG\.[a-zA-Z0-9\-_]{22}\.[a-zA-Z0-9\-_]{43}'
+  mailgun: key-[0-9a-zA-Z]{32}
+  twilio_sid: AC[a-z0-9]{32}
+  twilio_token: SK[0-9a-fA-F]{32}
+  slack_token: xox[baprs]-[0-9]{10,}-[0-9a-zA-Z]{10,}
+  slack_webhook: 'https://hooks\.slack\.com/services/T[a-zA-Z0-9_]+/B[a-zA-Z0-9_]+/[a-zA-Z0-9_]+'
+  firebase_url: '[a-z0-9-]+\.firebaseio\.com'
+  firebase_key: AAAA[A-Za-z0-9_-]{7}:[A-Za-z0-9_-]{140}
+  digitalocean_pat: dop_v1_[a-f0-9]{64}
+  npm_token: npm_[A-Za-z0-9]{36}
+  pypi_token: 'pypi-AgEIcHlwaS5vcmc[A-Za-z0-9\-_]{50,}'
+  private_key_pem: '-----BEGIN (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----'
+  uuid_candidate: '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}'
+  jwt: 'eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}'
+  shopify_token: shpat_[a-fA-F0-9]{32}
+  shopify_secret: shpss_[a-fA-F0-9]{32}
+  mailchimp: '[0-9a-f]{32}-us[0-9]{1,2}'
+  discord_token: '(?<![A-Za-z0-9_-])(?:mfa\.[A-Za-z0-9_-]{20,}|[MN][A-Za-z0-9_-]{23,27}\.[A-Za-z0-9_-]{6,7}\.[A-Za-z0-9_-]{27})(?![A-Za-z0-9_-])'
+  discord_webhook: 'https://discord(?:app)?\.com/api/webhooks/[0-9]+/[a-zA-Z0-9_-]+'
+  telegram_bot: '[0-9]{8,10}:[a-zA-Z0-9_-]{35}'
+  mapbox_token: 'pk\.[A-Za-z0-9_-]{20,}'
+  generic_secret: '(?i)(secret|token|password|passwd|api_key|apikey|access_key)[''\"]?\s*[:=]\s*[''\"]([a-zA-Z0-9!@#$%^&*\-_]{16,})[''\"]'
+confidence:
+  google_api: 90
+  google_oauth: 85
+  aws_access_key: 95
+  aws_secret: 90
+  aws_session_token: 88
+  github_pat: 92
+  github_fine_pat: 94
+  github_oauth: 88
+  github_app: 88
+  gitlab_pat: 92
+  stripe_live: 97
+  stripe_test: 85
+  stripe_restricted: 93
+  stripe_publishable: 0
+  openai_key: 94
+  anthropic_key: 94
+  sendgrid: 90
+  mailgun: 85
+  twilio_sid: 80
+  twilio_token: 80
+  slack_token: 88
+  slack_webhook: 92
+  firebase_url: 0
+  firebase_key: 85
+  digitalocean_pat: 92
+  npm_token: 90
+  pypi_token: 92
+  private_key_pem: 98
+  heroku_api: 90
+  uuid_candidate: 20
+  jwt: 60
+  shopify_token: 90
+  shopify_secret: 90
+  mailchimp: 80
+  discord_token: 85
+  discord_webhook: 90
+  telegram_bot: 88
+  mapbox_token: 82
+  generic_secret: 35
+  source_map_exposure: 92
+validators:
+  google_api:
+    url: https://www.googleapis.com/geolocation/v1/geolocate?key={key}
+    method: POST
+    json_body:
+      considerIp: 'true'
+    valid_codes:
+    - 200
+    invalid_codes:
+    - 400
+    restricted_codes:
+    - 403
+    restricted_body_reasons:
+    - API_KEY_HTTP_REFERRER_BLOCKED
+    - API_KEY_IP_ADDRESS_BLOCKED
+    - API_KEY_ANDROID_APP_BLOCKED
+    - API_KEY_IOS_APP_BLOCKED
+    - API_KEY_API_TARGET_BLOCKED
+    - accessNotConfigured
+    - dailyLimitExceeded
+    - userRateLimitExceeded
+    - rateLimitExceeded
+    notes:
+      200: 'VALID: Full access to Geolocation API'
+      403: 'VALID (restricted): Key exists but IP/referer/API restricted'
+  github_pat:
+    url: https://api.github.com/user
+    method: GET
+    headers:
+      Authorization: token {key}
+      Accept: application/vnd.github.v3+json
+    valid_codes:
+    - 200
+    invalid_codes:
+    - 401
+    notes:
+      200: 'VALID: Authenticated GitHub user'
+  github_fine_pat:
+    url: https://api.github.com/user
+    method: GET
+    headers:
+      Authorization: token {key}
+      Accept: application/vnd.github.v3+json
+    valid_codes:
+    - 200
+    invalid_codes:
+    - 401
+    notes:
+      200: 'VALID: Authenticated GitHub fine-grained PAT'
+  github_oauth:
+    url: https://api.github.com/user
+    method: GET
+    headers:
+      Authorization: token {key}
+    valid_codes:
+    - 200
+    invalid_codes:
+    - 401
+  gitlab_pat:
+    url: https://gitlab.com/api/v4/user
+    method: GET
+    headers:
+      Authorization: Bearer {key}
+    valid_codes:
+    - 200
+    invalid_codes:
+    - 401
+    notes:
+      200: 'VALID: Authenticated GitLab user'
+  stripe_live:
+    url: https://api.stripe.com/v1/charges?limit=1
+    method: GET
+    headers:
+      Authorization: Bearer {key}
+    valid_codes:
+    - 200
+    invalid_codes:
+    - 401
+    notes:
+      200: 'VALID LIVE KEY: Active Stripe production key'
+  stripe_test:
+    url: https://api.stripe.com/v1/charges?limit=1
+    method: GET
+    headers:
+      Authorization: Bearer {key}
+    valid_codes:
+    - 200
+    invalid_codes:
+    - 401
+    notes:
+      200: 'VALID TEST KEY: Active Stripe test key'
+  stripe_restricted:
+    url: https://api.stripe.com/v1/charges?limit=1
+    method: GET
+    headers:
+      Authorization: Bearer {key}
+    valid_codes:
+    - 200
+    invalid_codes:
+    - 401
+    notes:
+      200: 'VALID: Active Stripe restricted key'
+  openai_key:
+    url: https://api.openai.com/v1/models
+    method: GET
+    headers:
+      Authorization: Bearer {key}
+    valid_codes:
+    - 200
+    invalid_codes:
+    - 401
+    notes:
+      200: 'VALID: OpenAI API key authenticated'
+  anthropic_key:
+    url: https://api.anthropic.com/v1/models
+    method: GET
+    headers:
+      x-api-key: '{key}'
+      anthropic-version: '2023-06-01'
+    valid_codes:
+    - 200
+    invalid_codes:
+    - 401
+    - 403
+    notes:
+      200: 'VALID: Anthropic API key authenticated'
+  digitalocean_pat:
+    url: https://api.digitalocean.com/v2/account
+    method: GET
+    headers:
+      Authorization: Bearer {key}
+    valid_codes:
+    - 200
+    invalid_codes:
+    - 401
+    notes:
+      200: 'VALID: DigitalOcean PAT authenticated'
+  npm_token:
+    url: https://registry.npmjs.org/-/whoami
+    method: GET
+    headers:
+      Authorization: Bearer {key}
+    valid_codes:
+    - 200
+    invalid_codes:
+    - 401
+    notes:
+      200: 'VALID: npm token authenticated'
+  pypi_token:
+    url: https://upload.pypi.org/legacy/
+    method: POST
+    auth:
+    - __token__
+    - '{key}'
+    valid_codes:
+    - 400
+    invalid_codes:
+    - 401
+    - 403
+    notes:
+      200: 'VALID: PyPI token accepted by upload endpoint'
+      400: 'VALID: PyPI token authenticated (empty upload rejected)'
+  private_key_pem:
+    skip_reason: PEM private key material — high severity, no live API check
+  slack_token:
+    url: https://slack.com/api/auth.test
+    method: POST
+    headers:
+      Authorization: Bearer {key}
+    valid_codes:
+    - 200
+    check_body: true
+    body_ok_field: ok
+  jwt:
+    jwt_inspect: true
+  sendgrid:
+    url: https://api.sendgrid.com/v3/user/profile
+    method: GET
+    headers:
+      Authorization: Bearer {key}
+    valid_codes:
+    - 200
+    invalid_codes:
+    - 401
+    - 403
+  mailgun:
+    url: https://api.mailgun.net/v3/domains
+    method: GET
+    auth:
+    - api
+    - '{key}'
+    valid_codes:
+    - 200
+    invalid_codes:
+    - 401
+  aws_access_key:
+    aws_sts: true
+    valid_codes:
+    - 200
+    invalid_codes:
+    - 403
+    notes:
+      200: 'VALID: STS GetCallerIdentity succeeded'
+  aws_secret:
+    skip_reason: Paired with aws_access_key for STS GetCallerIdentity
+  aws_session_token:
+    skip_reason: Paired with ASIA aws_access_key for STS GetCallerIdentity
+  twilio_sid:
+    twilio_pair: true
+  twilio_token:
+    skip_reason: Paired with twilio_sid for Basic SID:Token validation
+  shopify_token:
+    url: https://{domain}/admin/api/2024-01/shop.json
+    method: GET
+    headers:
+      X-Shopify-Access-Token: '{key}'
+    valid_codes:
+    - 200
+    invalid_codes:
+    - 401
+    - 403
+    needs_domain: true
+  discord_token:
+    url: https://discord.com/api/v10/users/@me
+    method: GET
+    headers:
+      Authorization: '{key}'
+    valid_codes:
+    - 200
+    invalid_codes:
+    - 401
+  telegram_bot:
+    url: https://api.telegram.org/bot{key}/getMe
+    method: GET
+    valid_codes:
+    - 200
+    invalid_codes:
+    - 401
+  mapbox_token:
+    url: https://api.mapbox.com/tokens/v2?access_token={key}
+    method: GET
+    valid_codes:
+    - 200
+    invalid_codes:
+    - 401
+  discord_webhook:
+    url: '{key}'
+    method: GET
+    valid_codes:
+    - 200
+    invalid_codes:
+    - 401
+    - 404
+    webhook: true
+    notes:
+      200: 'VALID: Discord webhook exists'
+  slack_webhook:
+    url: '{key}'
+    method: POST
+    json_body: {}
+    slack_webhook_probe: true
+    webhook: true
+    invalid_codes:
+    - 404
+    - 410
+    notes:
+      200: 'VALID: Slack webhook accepted probe'
+  heroku_api:
+    url: https://api.heroku.com/account
+    method: GET
+    headers:
+      Accept: application/vnd.heroku+json; version=3
+      Authorization: Bearer {key}
+    valid_codes:
+    - 200
+    invalid_codes:
+    - 401
+    - 403
+    notes:
+      200: 'VALID HEROKU KEY: Full account access'
+  uuid_candidate:
+    skip_reason: UUID feeder only — heroku-context matches become heroku_api
+  stripe_publishable:
+    skip_reason: 'Informational: Stripe publishable keys are public-by-design'
+  firebase_url:
+    skip_reason: 'Informational: Firebase URLs are public-by-design'
+  source_map_exposure:
+    skip_reason: Exposure confirmed by fetch — see source_map_exposures.json
+informational_types:
+  stripe_publishable: Public-by-design (Stripe publishable key); not a secret
+  firebase_url: Public-by-design (Firebase RTDB URL); not a secret
+exposure_types:
+  google_api: 90
+  google_oauth: 85
+  aws_access_key: 95
+  aws_secret: 90
+  aws_session_token: 88
+  github_pat: 92
+  github_fine_pat: 94
+  github_oauth: 88
+  github_app: 88
+  gitlab_pat: 92
+  stripe_live: 97
+  stripe_test: 85
+  stripe_restricted: 93
+  stripe_publishable: 0
+  openai_key: 94
+  anthropic_key: 94
+  sendgrid: 90
+  mailgun: 85
+  twilio_sid: 80
+  twilio_token: 80
+  slack_token: 88
+  slack_webhook: 92
+  firebase_url: 0
+  firebase_key: 85
+  digitalocean_pat: 92
+  npm_token: 90
+  pypi_token: 92
+  private_key_pem: 98
+  heroku_api: 90
+  uuid_candidate: 20
+  jwt: 60
+  shopify_token: 90
+  shopify_secret: 90
+  mailchimp: 80
+  discord_token: 85
+  discord_webhook: 90
+  telegram_bot: 88
+  mapbox_token: 82
+  generic_secret: 35
+  source_map_exposure: 92

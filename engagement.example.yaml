@@ -1,0 +1,31 @@
+# Engagement overlay example — merge with:
+#   python reconpipe.py -d target.com --config engagement.example.yaml
+#
+# null removes a built-in pattern/validator. Other keys override or add.
+
+min_confidence: 28
+
+patterns:
+  # Engagement-specific internal API token shape
+  acme_internal_token: 'acme_[A-Za-z0-9]{32}'
+  # Disable a noisy built-in if needed:
+  # generic_secret: null
+
+confidence:
+  acme_internal_token: 88
+
+validators:
+  acme_internal_token:
+    url: https://api.acme.example/v1/me
+    method: GET
+    headers:
+      Authorization: Bearer {key}
+    valid_codes: [200]
+    invalid_codes: [401, 403]
+    notes:
+      200: "VALID: Acme internal token"
+  # Tighten Shopify — still requires --shopify-domain
+  shopify_token:
+    needs_domain: true
+    notes:
+      200: "VALID: Shopify admin API (engagement)"

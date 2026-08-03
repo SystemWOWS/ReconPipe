@@ -1,4 +1,4 @@
-# ReconPipe
+# ReconPipe 🔑
 
 **Automated API Key Leak Hunter**
 
@@ -159,7 +159,7 @@ recon_target_com/
 - **`--headless` flag:** Enables Katana's headless Chrome mode (`-hl -nos`) for targets using React/Angular/Vue SPAs that don't expose endpoints in static HTML.
 
 ---
-![alt text](https://github.com/SystemWOWS/ReconPipe/blob/main/false_positives.png)
+
 ## Install as global command
 
 ```bash

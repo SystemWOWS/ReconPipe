@@ -1,0 +1,230 @@
+patterns:
+  google_api:
+    good:
+    - AIzaAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    junk:
+    - AIzaShort
+    - AIza!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+    - notgoogle
+  google_oauth:
+    good:
+    - ya29.aaaaaaaaaaaaaaaaaaaa
+    junk:
+    - ya29.short
+    - ya28.aaaaaaaaaaaaaaaaaaaa
+  aws_access_key:
+    good:
+    - AKIAIOSFODNN7EXAMPLE
+    - ASIAIOSFODNN7EXAMPLE
+    junk:
+    - AKIASHORT
+    - BKIAIOSFODNN7EXAMPLE
+    - akiaiosfodnn7example
+  aws_secret:
+    good:
+    - AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
+    - aws_secret_key='wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY'
+    junk:
+    - password=hello
+    - aws_key=short
+    - not related text
+  aws_session_token:
+    good:
+    - aws_session_token=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    - 'X-Amz-Security-Token: BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB'
+    junk:
+    - aws_session_token=short
+    - session=hello
+  github_pat:
+    good:
+    - ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    junk:
+    - ghp_short
+    - gho_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  github_fine_pat:
+    good:
+    - github_pat_AAAAAAAAAAAAAAAAAAAAAA_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB
+    junk:
+    - github_pat_short
+    - ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  github_oauth:
+    good:
+    - gho_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+    junk:
+    - ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+  github_app:
+    good:
+    - ghu_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+    - ghs_yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy
+    junk:
+    - ghx_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+  gitlab_pat:
+    good:
+    - glpat-xxxxxxxxxxxxxxxxxxxx
+    junk:
+    - glpat-short
+    - ghp_xxx
+  stripe_live:
+    good:
+    - sk_live_aaaaaaaaaaaaaaaaaaaaaaaa
+    junk:
+    - sk_test_aaaaaaaaaaaaaaaaaaaaaaaa
+    - rk_live_aaaaaaaaaaaaaaaaaaaaaaaa
+  stripe_test:
+    good:
+    - sk_test_aaaaaaaaaaaaaaaaaaaaaaaa
+    junk:
+    - sk_live_aaaaaaaaaaaaaaaaaaaaaaaa
+  stripe_restricted:
+    good:
+    - rk_live_aaaaaaaaaaaaaaaaaaaaaaaa
+    - rk_test_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+    junk:
+    - sk_live_aaaaaaaaaaaaaaaaaaaaaaaa
+  stripe_publishable:
+    good:
+    - pk_live_aaaaaaaaaaaaaaaaaaaaaaaa
+    junk:
+    - sk_live_aaaaaaaaaaaaaaaaaaaaaaaa
+  openai_key:
+    good:
+    - sk-proj-aaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbbbbbb
+    junk:
+    - sk-proj-short
+    - sk_live_xxx
+  anthropic_key:
+    good:
+    - sk-ant-api03-cccccccccccccccccccc
+    junk:
+    - sk-ant-api03-short
+  sendgrid:
+    good:
+    - SG.aaaaaaaaaaaaaaaaaaaaaa.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+    junk:
+    - SG.short.short
+  mailgun:
+    good:
+    - key-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    junk:
+    - key-short
+  twilio_sid:
+    good:
+    - ACaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    junk:
+    - ACaaaaaaaaaa
+    - SKaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  twilio_token:
+    good:
+    - SKaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    junk:
+    - SKzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz
+    - ACaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  slack_token:
+    good:
+    - xoxb-1234567890-abcdefghij
+    junk:
+    - xoxb-short
+    - xoxz-1234567890-abcdefghij
+  slack_webhook:
+    good:
+    - https://hooks.slack.com/services/T01ABC/B01DEF/abcdefghijklmnopqrstuvwx
+    junk:
+    - https://hooks.slack.com/services/nope
+    - https://example.com/hooks
+  firebase_url:
+    good:
+    - my-app-123.firebaseio.com
+    junk:
+    - firebaseio.com
+    - my.firebase.com
+  firebase_key:
+    good:
+    - AAAAaaaaaaa:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+    junk:
+    - AAAA:short
+  digitalocean_pat:
+    good:
+    - dop_v1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    junk:
+    - dop_v1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    - dop_v1_gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg
+  npm_token:
+    good:
+    - npm_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    junk:
+    - npm_short
+  pypi_token:
+    good:
+    - pypi-AgEIcHlwaS5vcmcxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+    junk:
+    - pypi-AgEIcHlwaS5vcmcshort
+  private_key_pem:
+    good:
+    - '-----BEGIN RSA PRIVATE KEY-----'
+    - '-----BEGIN PRIVATE KEY-----'
+    - '-----BEGIN OPENSSH PRIVATE KEY-----'
+    junk:
+    - '-----BEGIN CERTIFICATE-----'
+    - BEGIN PRIVATE KEY
+  uuid_candidate:
+    good:
+    - 550e8400-e29b-41d4-a716-446655440000
+    junk:
+    - 550e8400-e29b-61d4-a716-446655440000
+    - not-a-uuid
+  jwt:
+    good:
+    - eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxIiwiZXhwIjo5OTk5OTk5OTk5fQ.sigsignature1
+    junk:
+    - eyJhbGciOiJIUzI1NiJ9
+    - not.a.jwt
+  shopify_token:
+    good:
+    - shpat_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    junk:
+    - shpat_short
+    - shpss_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  shopify_secret:
+    good:
+    - shpss_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    junk:
+    - shpat_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  mailchimp:
+    good:
+    - aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-us1
+    - bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-us12
+    junk:
+    - aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-eu1
+    - short-us1
+  discord_token:
+    good:
+    - Maaaaaaaaaaaaaaaaaaaaaaaa.bbbbbb.ccccccccccccccccccccccccccc
+    junk:
+    - Xaaaaaaaaaaaaaaaaaaaaaaaa.bbbbbb.ccccccccccccccccccccccccccc
+    - notdiscord
+  discord_webhook:
+    good:
+    - https://discord.com/api/webhooks/123456789012345678/abcdefghijklmnopqrstuvwxyzABCDEFG
+    junk:
+    - https://discord.com/api/webhooks/abc/token
+    - https://example.com/api/webhooks/1/t
+  telegram_bot:
+    good:
+    - 1234567890:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    junk:
+    - 12:short
+    - abcdefghij:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  mapbox_token:
+    good:
+    - pk.eyJ1IjoiYWxpY2UiLCJwYWQiOiJ4eHh4eHh4eHh4In0
+    junk:
+    - pk.shorttoken
+    - pk_live_aaaaaaaaaaaaaaaaaaaaaaaa
+  generic_secret:
+    good:
+    - api_key = "AbCdEfGhIjKlMnOp1234"
+    - 'secret: "Qx9!mK2pL8vN4wR7"'
+    junk:
+    - api_key = "short"
+    - hello world
+    - no assignment here AbCdEfGhIjKlMnOp1234
