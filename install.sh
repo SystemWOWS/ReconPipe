@@ -1,12 +1,10 @@
 #!/bin/bash
-# ─────────────────────────────────────────────────────────────
 #  ReconPipe Installer
 #  Installs all dependencies for reconpipe.py on Kali/Debian/Ubuntu
-# ─────────────────────────────────────────────────────────────
 
 set -e
 
-# ── Colors ───────────────────────────────────────────────────
+# Colors
 RED='\033[91m'; GREEN='\033[92m'; YELLOW='\033[93m'
 CYAN='\033[96m'; BOLD='\033[1m'; DIM='\033[2m'; RESET='\033[0m'
 
@@ -16,7 +14,7 @@ warn()    { echo -e "${DIM}[$(date +%H:%M:%S)]${RESET} ${YELLOW}[!]${RESET} $1";
 error()   { echo -e "${DIM}[$(date +%H:%M:%S)]${RESET} ${RED}[-]${RESET} $1"; }
 header()  { echo -e "\n${CYAN}${BOLD}── $1 ──────────────────────────────────────────${RESET}"; }
 
-# ── Banner ───────────────────────────────────────────────────
+# Banner
 echo -e "${CYAN}${BOLD}"
 echo "  ██████╗ ███████╗ ██████╗ ██████╗ ███╗   ██╗██████╗ ██╗██████╗ ███████╗"
 echo "  ██╔══██╗██╔════╝██╔════╝██╔═══██╗████╗  ██║██╔══██╗██║██╔══██╗██╔════╝"
@@ -27,7 +25,7 @@ echo "  ╚═╝  ╚═╝╚══════╝ ╚═════╝ ╚�
 echo -e "${RESET}${DIM}  Installer — Kali Linux / Debian / Ubuntu${RESET}"
 echo ""
 
-# ── Root check ───────────────────────────────────────────────
+#  Root check
 if [[ $EUID -ne 0 ]]; then
     warn "Not running as root. Some installs may require sudo."
     SUDO="sudo"
@@ -35,15 +33,15 @@ else
     SUDO=""
 fi
 
-# ── Detect OS ────────────────────────────────────────────────
+# Detect OS 
 if ! command -v apt-get &>/dev/null; then
     error "apt-get not found. This installer supports Debian/Ubuntu/Kali only."
     exit 1
 fi
 
-# ─────────────────────────────────────────────────────────────
+
 header "STEP 1: System packages"
-# ─────────────────────────────────────────────────────────────
+
 log "Updating apt..."
 $SUDO apt-get update -qq
 
@@ -59,9 +57,9 @@ $SUDO apt-get install -y -qq \
 
 success "System packages installed"
 
-# ─────────────────────────────────────────────────────────────
+
 header "STEP 2: Go environment"
-# ─────────────────────────────────────────────────────────────
+
 # Ensure GOPATH/GOBIN is in PATH
 export GOPATH="$HOME/go"
 export GOBIN="$HOME/go/bin"
@@ -84,9 +82,8 @@ done
 GO_VERSION=$(go version 2>/dev/null | awk '{print $3}')
 success "Go: $GO_VERSION"
 
-# ─────────────────────────────────────────────────────────────
+
 header "STEP 3: Python dependencies"
-# ─────────────────────────────────────────────────────────────
 
 install_pip() {
     local pkg=$1
@@ -103,9 +100,8 @@ install_pip() {
 install_pip aiohttp
 install_pip waymore
 
-# ─────────────────────────────────────────────────────────────
+
 header "STEP 4: ProjectDiscovery tools (Go)"
-# ─────────────────────────────────────────────────────────────
 
 install_go_tool() {
     local name=$1
@@ -129,9 +125,7 @@ install_go_tool "katana"     "github.com/projectdiscovery/katana/cmd/katana@late
 install_go_tool "subfinder"  "github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest"
 install_go_tool "dnsx"       "github.com/projectdiscovery/dnsx/cmd/dnsx@latest"
 
-# ─────────────────────────────────────────────────────────────
 header "STEP 5: Community tools (Go)"
-# ─────────────────────────────────────────────────────────────
 
 install_go_tool "gau"          "github.com/lc/gau/v2/cmd/gau@latest"
 install_go_tool "gospider"     "github.com/jaeles-project/gospider@latest"
@@ -146,9 +140,7 @@ else
     warn "jsluice failed (optional — katana works without it)"
 fi
 
-# ─────────────────────────────────────────────────────────────
 header "STEP 6: TruffleHog"
-# ─────────────────────────────────────────────────────────────
 if command -v trufflehog &>/dev/null; then
     success "trufflehog already installed"
 else
@@ -166,9 +158,7 @@ else
     fi
 fi
 
-# ─────────────────────────────────────────────────────────────
 header "STEP 7: Verify installs"
-# ─────────────────────────────────────────────────────────────
 echo ""
 TOOLS=(chaos httpx katana subfinder dnsx gau gospider waybackurls jsluice trufflehog anew waymore)
 ALL_OK=true
@@ -183,9 +173,7 @@ for tool in "${TOOLS[@]}"; do
     fi
 done
 
-# ─────────────────────────────────────────────────────────────
 header "STEP 8: ProjectDiscovery API key"
-# ─────────────────────────────────────────────────────────────
 echo ""
 if [[ -z "$PDCP_API_KEY" && -z "$CHAOS_KEY" ]]; then
     warn "No Chaos/PDCP API key found."
@@ -196,7 +184,6 @@ else
     success "API key detected in environment"
 fi
 
-# ─────────────────────────────────────────────────────────────
 echo ""
 echo -e "${CYAN}══════════════════════════════════════════════════════════${RESET}"
 echo -e "${BOLD}  Installation complete!${RESET}"

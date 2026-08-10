@@ -2293,17 +2293,17 @@ def main():
 
     parser = argparse.ArgumentParser(
         prog="reconpipe",
-        description="Automated API Key Leak Hunter — Chaos→httpx→gau→TruffleHog→Validate",
+        description="Automated API Key Leak Hunter — Chaos → httpx → gau → TruffleHog → Validate",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python3 reconpipe.py -d example.com
-  python3 reconpipe.py -d example.com --subdomains my_subs.txt
-  python3 reconpipe.py -d example.com --no-trufflehog
-  python3 reconpipe.py -d example.com --skip-chaos --skip-gau --files urls.txt
-  python3 reconpipe.py -d example.com --concurrency 20 --output /tmp/scan
-  python3 reconpipe.py -d example.com --config engagement.example.yaml
-  python3 reconpipe.py -d example.com --files urls.txt --sarif out.sarif
+  python reconpipe.py -d example.com
+  python reconpipe.py -d example.com --subdomains my_subs.txt
+  python reconpipe.py -d example.com --no-trufflehog
+  python reconpipe.py -d example.com --skip-chaos --skip-gau --files urls.txt
+  python reconpipe.py -d example.com --concurrency 20 --output /tmp/scan
+  python reconpipe.py -d example.com --config engagement.example.yaml
+  python reconpipe.py -d example.com --files urls.txt --sarif out.sarif
         """
     )
     parser.add_argument("-d", "--domain",      required=True,  help="Target domain")

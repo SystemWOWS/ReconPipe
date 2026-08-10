@@ -10,7 +10,7 @@ PyYAML>=6.0
 # boto3>=1.34.0
 # botocore>=1.34.0
 
-# ── Go tools (install via: go install <pkg>@latest) ──────────────
+# Go tools (install via: go install <pkg>@latest)
 # Subdomain discovery
 #   go install -v github.com/projectdiscovery/chaos-client/cmd/chaos@latest
 #
@@ -29,6 +29,6 @@ PyYAML>=6.0
 # TruffleHog secret scanner
 #   curl -sSfL https://raw.githubusercontent.com/trufflesecurity/trufflehog/main/scripts/install.sh | sh -s -- -b /usr/local/bin
 
-# ── Python tools ─────────────────────────────────────────────────
+# Python tools
 # Passive archives (better rate-limit handling than gau + downloads archived responses)
 #   pip3 install waymore
