@@ -18,7 +18,7 @@ pip3 install -r requirements.txt
 python3 reconpipe.py -d target.com
 ```
 
-Or on Kali/Debian/Ubuntu, install Go tools + Python deps with:
+Or on Linux (Debian, Ubuntu, Kali, Fedora, Arch, openSUSE, and derivatives), install system packages + Go tools + Python deps with:
 
 ```bash
 sudo bash install.sh
@@ -235,7 +235,3 @@ reconpipe -d target.com
 ```
 
 ---
-
-## Legal
-
-Only run against targets with **explicit written authorization** (bug bounty programs, pentest engagements).
