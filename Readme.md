@@ -24,6 +24,8 @@ Or on Linux (Debian, Ubuntu, Kali, Fedora, Arch, openSUSE, and derivatives), ins
 sudo bash install.sh
 ```
 
+The installer detects the user behind `sudo`, so Go tools land in `~/go/bin` and pip packages in `~/.local/bin` for *your* account (not root's). Each tool is also symlinked into `/usr/local/bin`, so it works in any shell — including new terminals and `sudo` — without reloading your profile.
+
 ---
 
 ## Installation

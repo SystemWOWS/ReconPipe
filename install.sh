@@ -19,6 +19,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MIN_GO_MAJOR=1
 MIN_GO_MINOR=21
 GO_FALLBACK_VERSION="1.22.10"
+SHARED_BIN="/usr/local/bin"
+
+TOOLS=(chaos httpx katana subfinder dnsx gau gospider waybackurls jsluice trufflehog anew waymore)
 
 # Banner
 echo -e "${CYAN}${BOLD}"
@@ -44,7 +47,55 @@ else
     SUDO=""
 fi
 
-# Detect distro + package manager 
+# Resolve the human user behind a sudo invocation. Go tools and pip --user
+# packages must land in their home, not /root, or the shell won't find them.
+if [[ -n "${SUDO_USER:-}" && "$SUDO_USER" != "root" ]]; then
+    REAL_USER="$SUDO_USER"
+    REAL_HOME="$(getent passwd "$REAL_USER" | cut -d: -f6)"
+else
+    REAL_USER="$(id -un)"
+    REAL_HOME="$HOME"
+fi
+REAL_GROUP="$(id -gn "$REAL_USER" 2>/dev/null || echo "$REAL_USER")"
+[[ -n "$REAL_HOME" ]] || REAL_HOME="/home/$REAL_USER"
+
+GOPATH="$REAL_HOME/go"
+GOBIN="$GOPATH/bin"
+PY_USER_BIN="$REAL_HOME/.local/bin"
+TOOL_PATH="/usr/local/go/bin:$SHARED_BIN:/usr/bin:/bin:$GOBIN:$PY_USER_BIN"
+
+success "Installing for user: $REAL_USER  (home: $REAL_HOME)"
+
+# Run a command as the real user with a predictable Go/Python environment
+run_as_user() {
+    if [[ "$REAL_USER" == "$(id -un)" ]]; then
+        env HOME="$REAL_HOME" GOPATH="$GOPATH" GOBIN="$GOBIN" PATH="$TOOL_PATH:$PATH" "$@"
+    else
+        sudo -u "$REAL_USER" -H env GOPATH="$GOPATH" GOBIN="$GOBIN" PATH="$TOOL_PATH:$PATH" "$@"
+    fi
+}
+
+own_by_user() {
+    [[ -e "$1" ]] || return 0
+    $SUDO chown -R "$REAL_USER":"$REAL_GROUP" "$1" 2>/dev/null || true
+}
+
+# Append a block to the real user's shell rc files, once
+append_rc() {
+    local marker=$1 content=$2 rc
+    for rc in "$REAL_HOME/.bashrc" "$REAL_HOME/.zshrc" "$REAL_HOME/.profile"; do
+        if [[ ! -f "$rc" ]]; then
+            [[ "$rc" == "$REAL_HOME/.bashrc" ]] || continue
+            $SUDO touch "$rc"
+            own_by_user "$rc"
+        fi
+        grep -qF "$marker" "$rc" 2>/dev/null && continue
+        printf '\n%s\n' "$content" | $SUDO tee -a "$rc" >/dev/null
+        own_by_user "$rc"
+    done
+}
+
+# Detect distro + package manager
 detect_os() {
     DISTRO_ID="unknown"
     DISTRO_LIKE=""
@@ -271,28 +322,19 @@ install_go_official() {
     rm -rf "$tmp_dir"
 
     export PATH="/usr/local/go/bin:$PATH"
-    for RC in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile"; do
-        if [[ -f "$RC" ]] || [[ "$RC" == "$HOME/.bashrc" ]]; then
-            touch "$RC"
-            if ! grep -q '/usr/local/go/bin' "$RC" 2>/dev/null; then
-                {
-                    echo ''
-                    echo '# Official Go toolchain'
-                    echo 'export PATH="/usr/local/go/bin:$PATH"'
-                } >> "$RC"
-            fi
-        fi
-    done
+    append_rc '/usr/local/go/bin' '# Official Go toolchain
+export PATH="/usr/local/go/bin:$PATH"'
     success "Go $(go version | awk '{print $3}') installed from go.dev"
 }
 
 setup_go_env() {
     header "STEP 2: Go environment"
 
-    export GOPATH="${GOPATH:-$HOME/go}"
-    export GOBIN="${GOBIN:-$HOME/go/bin}"
-    export PATH="/usr/local/go/bin:$PATH:$GOBIN"
-    mkdir -p "$GOBIN"
+    export PATH="/usr/local/go/bin:$PATH"
+    if [[ ! -d "$GOBIN" ]]; then
+        $SUDO mkdir -p "$GOBIN"
+        own_by_user "$GOPATH"
+    fi
 
     if ! command -v go &>/dev/null; then
         warn "Go not found after package install — installing official toolchain..."
@@ -310,39 +352,23 @@ setup_go_env() {
         exit 1
     fi
 
-    for RC in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile"; do
-        if [[ -f "$RC" ]] || [[ "$RC" == "$HOME/.bashrc" ]]; then
-            touch "$RC"
-            if ! grep -q 'GOBIN' "$RC" 2>/dev/null; then
-                {
-                    echo ''
-                    echo '# Go binaries (ReconPipe)'
-                    echo 'export GOPATH="$HOME/go"'
-                    echo 'export GOBIN="$HOME/go/bin"'
-                    echo 'export PATH="$PATH:$GOBIN"'
-                } >> "$RC"
-                success "Added Go env to $RC"
-            fi
-        fi
-    done
+    append_rc 'GOBIN' '# Go binaries (ReconPipe)
+export GOPATH="$HOME/go"
+export GOBIN="$HOME/go/bin"
+export PATH="$PATH:$GOBIN"'
+
+    append_rc '.local/bin' '# Python user binaries (ReconPipe)
+export PATH="$HOME/.local/bin:$PATH"'
 
     success "Go: $(go version 2>/dev/null | awk '{print $3}')  GOBIN=$GOBIN"
 }
 
-# Python deps
-# Try common pip invocation styles (user install, system, PEP 668 break flag).
+# Python deps — installed as the real user so scripts land in ~/.local/bin
 run_pip() {
-    local -a args=("$@")
-    if command -v pip3 &>/dev/null; then
-        pip3 install --user "${args[@]}" -q 2>/dev/null && return 0
-        pip3 install "${args[@]}" -q 2>/dev/null && return 0
-        pip3 install --user "${args[@]}" -q --break-system-packages 2>/dev/null && return 0
-        pip3 install "${args[@]}" -q --break-system-packages 2>/dev/null && return 0
-    fi
-    if command -v python3 &>/dev/null; then
-        python3 -m pip install --user "${args[@]}" -q 2>/dev/null && return 0
-        python3 -m pip install "${args[@]}" -q --break-system-packages 2>/dev/null && return 0
-    fi
+    run_as_user pip3 install --user "$@" -q 2>/dev/null && return 0
+    run_as_user pip3 install --user "$@" -q --break-system-packages 2>/dev/null && return 0
+    run_as_user python3 -m pip install --user "$@" -q --break-system-packages 2>/dev/null && return 0
+    $SUDO pip3 install "$@" -q --break-system-packages 2>/dev/null && return 0
     return 1
 }
 
@@ -376,103 +402,118 @@ install_python_deps() {
     install_pip_pkg waymore
 }
 
-# Ensure ~/.local/bin is on PATH for --user installs
-ensure_user_bin_path() {
-    export PATH="$HOME/.local/bin:$PATH"
-    for RC in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile"; do
-        if [[ -f "$RC" ]]; then
-            if ! grep -q '\.local/bin' "$RC" 2>/dev/null; then
-                {
-                    echo ''
-                    echo '# Python user binaries'
-                    echo 'export PATH="$HOME/.local/bin:$PATH"'
-                } >> "$RC"
-            fi
-        fi
-    done
-}
-
 # Go tools
 install_go_tool() {
     local name=$1
     local pkg=$2
-    if command -v "$name" &>/dev/null; then
-        success "$name already installed — updating..."
-        go install "$pkg" 2>/dev/null && success "$name updated" || warn "$name update failed"
+    if [[ -x "$GOBIN/$name" ]]; then
+        log "$name already present — updating..."
     else
         log "Installing $name..."
-        if go install "$pkg" 2>/dev/null; then
-            success "$name installed → $GOBIN/$name"
-        else
-            error "$name failed. Manual: go install $pkg"
-        fi
     fi
+
+    local out
+    if out="$(run_as_user go install "$pkg" 2>&1)"; then
+        if [[ -x "$GOBIN/$name" ]]; then
+            success "$name → $GOBIN/$name"
+            return 0
+        fi
+        warn "$name: go install reported success but $GOBIN/$name is missing"
+        return 1
+    fi
+
+    error "$name failed:"
+    echo -e "${DIM}$(printf '%s\n' "$out" | tail -3)${RESET}"
+    return 1
 }
 
 install_go_tools() {
     header "STEP 4: ProjectDiscovery tools (Go)"
-    install_go_tool "chaos"     "github.com/projectdiscovery/chaos-client/cmd/chaos@latest"
-    install_go_tool "httpx"     "github.com/projectdiscovery/httpx/cmd/httpx@latest"
-    install_go_tool "katana"    "github.com/projectdiscovery/katana/cmd/katana@latest"
-    install_go_tool "subfinder" "github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest"
-    install_go_tool "dnsx"      "github.com/projectdiscovery/dnsx/cmd/dnsx@latest"
+    install_go_tool "chaos"     "github.com/projectdiscovery/chaos-client/cmd/chaos@latest" || true
+    install_go_tool "httpx"     "github.com/projectdiscovery/httpx/cmd/httpx@latest" || true
+    install_go_tool "katana"    "github.com/projectdiscovery/katana/cmd/katana@latest" || true
+    install_go_tool "subfinder" "github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest" || true
+    install_go_tool "dnsx"      "github.com/projectdiscovery/dnsx/cmd/dnsx@latest" || true
 
     header "STEP 5: Community tools (Go)"
-    install_go_tool "gau"         "github.com/lc/gau/v2/cmd/gau@latest"
-    install_go_tool "gospider"    "github.com/jaeles-project/gospider@latest"
-    install_go_tool "waybackurls" "github.com/tomnomnom/waybackurls@latest"
-    install_go_tool "anew"        "github.com/tomnomnom/anew@latest"
-
-    log "Installing jsluice (optional katana enhancement)..."
-    if go install github.com/BishopFox/jsluice/cmd/jsluice@latest 2>/dev/null; then
-        success "jsluice installed"
-    else
-        warn "jsluice failed (optional — katana works without it)"
-    fi
+    install_go_tool "gau"         "github.com/lc/gau/v2/cmd/gau@latest" || true
+    install_go_tool "gospider"    "github.com/jaeles-project/gospider@latest" || true
+    install_go_tool "waybackurls" "github.com/tomnomnom/waybackurls@latest" || true
+    install_go_tool "anew"        "github.com/tomnomnom/anew@latest" || true
+    install_go_tool "jsluice"     "github.com/BishopFox/jsluice/cmd/jsluice@latest" \
+        || warn "jsluice is optional — katana works without it"
 }
 
 install_trufflehog() {
     header "STEP 6: TruffleHog"
-    if command -v trufflehog &>/dev/null; then
+    if [[ -x "$SHARED_BIN/trufflehog" ]]; then
         success "trufflehog already installed"
         return 0
     fi
 
     log "Installing TruffleHog..."
     if curl -sSfL https://raw.githubusercontent.com/trufflesecurity/trufflehog/main/scripts/install.sh \
-        | $SUDO sh -s -- -b /usr/local/bin 2>/dev/null; then
-        success "TruffleHog installed → /usr/local/bin/trufflehog"
-    elif go install github.com/trufflesecurity/trufflehog/v3@latest 2>/dev/null; then
+        | $SUDO sh -s -- -b "$SHARED_BIN" >/dev/null 2>&1; then
+        success "TruffleHog installed → $SHARED_BIN/trufflehog"
+    elif install_go_tool "trufflehog" "github.com/trufflesecurity/trufflehog/v3@latest"; then
         success "TruffleHog installed via Go"
     else
         error "TruffleHog failed. Manual: https://github.com/trufflesecurity/trufflehog#installation"
     fi
 }
 
-verify_installs() {
-    header "STEP 7: Verify installs"
-    echo ""
-    local tools=(chaos httpx katana subfinder dnsx gau gospider waybackurls jsluice trufflehog anew waymore)
-    ALL_OK=true
-    local tool ver
+# Locate a tool in the places this installer writes to
+find_tool() {
+    local name=$1 p
+    for p in "$SHARED_BIN/$name" "$GOBIN/$name" "$PY_USER_BIN/$name" "/usr/bin/$name" "/bin/$name"; do
+        if [[ -x "$p" ]]; then
+            echo "$p"
+            return 0
+        fi
+    done
+    return 1
+}
 
-    # Pick up freshly installed binaries without requiring a new shell
-    export PATH="/usr/local/go/bin:/usr/local/bin:$HOME/go/bin:$HOME/.local/bin:$PATH"
+# Symlink into /usr/local/bin so the tools resolve in any shell, including
+# fresh terminals and sudo, without waiting on a shell reload.
+link_tools_system_wide() {
+    header "STEP 7: Expose tools in $SHARED_BIN"
+    local tool src linked=0
+    $SUDO mkdir -p "$SHARED_BIN"
 
-    for tool in "${tools[@]}"; do
-        if command -v "$tool" &>/dev/null; then
-            ver="$("$tool" --version 2>/dev/null || "$tool" -version 2>/dev/null || echo "found")"
-            ver="$(printf '%s\n' "$ver" | head -1)"
-            echo -e "  ${GREEN}✓${RESET} ${BOLD}$tool${RESET}  ${DIM}$ver${RESET}"
+    for tool in "${TOOLS[@]}"; do
+        src="$(find_tool "$tool")" || continue
+        [[ "$src" == "$SHARED_BIN/"* || "$src" == /usr/bin/* || "$src" == /bin/* ]] && continue
+        if $SUDO ln -sfn "$src" "$SHARED_BIN/$tool"; then
+            linked=$((linked + 1))
         else
-            echo -e "  ${YELLOW}✗${RESET} ${BOLD}$tool${RESET}  ${DIM}not found in PATH${RESET}"
+            warn "Could not link $tool into $SHARED_BIN"
+        fi
+    done
+
+    success "Linked $linked tool(s) into $SHARED_BIN"
+}
+
+verify_installs() {
+    header "STEP 8: Verify installs"
+    echo ""
+    ALL_OK=true
+    local tool path ver
+
+    for tool in "${TOOLS[@]}"; do
+        if path="$(find_tool "$tool")"; then
+            ver="$("$path" --version </dev/null 2>/dev/null || "$path" -version </dev/null 2>/dev/null || echo "")"
+            ver="$(printf '%s\n' "$ver" | head -1)"
+            echo -e "  ${GREEN}✓${RESET} ${BOLD}$tool${RESET}  ${DIM}${path}  ${ver}${RESET}"
+        else
+            echo -e "  ${RED}✗${RESET} ${BOLD}$tool${RESET}  ${DIM}not installed${RESET}"
             ALL_OK=false
         fi
     done
 }
 
 print_api_key_hint() {
-    header "STEP 8: ProjectDiscovery API key"
+    header "STEP 9: ProjectDiscovery API key"
     echo ""
     if [[ -z "${PDCP_API_KEY:-}" && -z "${CHAOS_KEY:-}" ]]; then
         warn "No Chaos/PDCP API key found."
@@ -488,10 +529,10 @@ print_api_key_hint() {
 detect_os
 install_system_packages
 setup_go_env
-ensure_user_bin_path
 install_python_deps
 install_go_tools
 install_trufflehog
+link_tools_system_wide
 verify_installs
 print_api_key_hint
 
@@ -502,10 +543,11 @@ echo -e "${CYAN}═════════════════════�
 if $ALL_OK; then
     echo -e "  ${GREEN}${BOLD}All tools installed successfully.${RESET}"
 else
-    echo -e "  ${YELLOW}Some tools missing — check warnings above.${RESET}"
+    echo -e "  ${YELLOW}Some tools missing — check the ✗ entries above.${RESET}"
 fi
 echo ""
 echo -e "  Distro:             ${CYAN}$DISTRO_NAME${RESET}"
+echo -e "  Installed for:      ${CYAN}$REAL_USER${RESET}  ${DIM}($GOBIN, linked into $SHARED_BIN)${RESET}"
 echo -e "  Reload your shell:  ${CYAN}source ~/.bashrc${RESET}  (or ~/.zshrc)"
 echo -e "  Run the pipeline:   ${CYAN}python3 reconpipe.py -d target.com${RESET}"
 echo -e "${CYAN}══════════════════════════════════════════════════════════${RESET}"
