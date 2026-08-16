@@ -393,10 +393,12 @@ install_python_deps() {
             warn "requirements.txt batch install failed — installing packages individually"
             install_pip_pkg aiohttp
             install_pip_pkg PyYAML
+            install_pip_pkg nicegui
         fi
     else
         install_pip_pkg aiohttp
         install_pip_pkg PyYAML
+        install_pip_pkg nicegui
     fi
 
     install_pip_pkg waymore
@@ -550,5 +552,7 @@ echo -e "  Distro:             ${CYAN}$DISTRO_NAME${RESET}"
 echo -e "  Installed for:      ${CYAN}$REAL_USER${RESET}  ${DIM}($GOBIN, linked into $SHARED_BIN)${RESET}"
 echo -e "  Reload your shell:  ${CYAN}source ~/.bashrc${RESET}  (or ~/.zshrc)"
 echo -e "  Run the pipeline:   ${CYAN}python3 reconpipe.py -d target.com${RESET}"
+echo -e "  Launch the GUI:     ${CYAN}python3 reconpipegui.py${RESET}"
+echo -e "                      ${DIM}(opens http://127.0.0.1:8088 — localhost only)${RESET}"
 echo -e "${CYAN}══════════════════════════════════════════════════════════${RESET}"
 echo ""

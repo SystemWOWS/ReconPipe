@@ -6,6 +6,9 @@ aiohttp>=3.14.3
 # YAML config (patterns / validators / confidence) — required
 PyYAML>=6.0
 
+# Professional localhost GUI (python3 reconpipegui.py)
+nicegui>=2.0.0
+
 # Optional: cleaner AWS STS validation (falls back to manual SigV4 if missing)
 # boto3>=1.34.0
 # botocore>=1.34.0

@@ -16,6 +16,9 @@ Patterns, validators, and confidence scores load from `config.yaml` (overridable
 ```bash
 pip3 install -r requirements.txt
 python3 reconpipe.py -d target.com
+
+# Professional GUI (localhost NiceGUI — all CLI options + in-app key re-test)
+python3 reconpipegui.py
 ```
 
 Or on Linux (Debian, Ubuntu, Kali, Fedora, Arch, openSUSE, and derivatives), install system packages + Go tools + Python deps with:
@@ -33,10 +36,29 @@ The installer detects the user behind `sudo`, so Go tools land in `~/go/bin` and
 ### Python dependencies
 
 ```bash
-pip3 install -r requirements.txt   # aiohttp, PyYAML (required)
+pip3 install -r requirements.txt   # aiohttp, PyYAML, nicegui (required)
 pip3 install waymore               # recommended passive archives
 # optional: pip3 install boto3     # cleaner AWS STS checks
 ```
+
+### Professional GUI
+
+```bash
+python3 reconpipegui.py
+# Override bind address/port if needed:
+#   RECONPIPE_GUI_HOST=127.0.0.1 RECONPIPE_GUI_PORT=8088 python3 reconpipegui.py
+```
+
+Opens a localhost-only NiceGUI app with:
+
+- Every CLI option (domain, files, skips, concurrency, Chaos key, Shopify host, config overlays, ignore hashes, SARIF, fail-on-valid, headless, …)
+- Tool preflight status
+- Live pipeline console + stage tracker (runs `reconpipe.py` as a cancellable subprocess)
+- Findings browser (actionable / informational / exposures) with redacted secrets and Reveal
+- **Test with configured validator** — re-runs ReconPipe’s existing `config.yaml` validators only
+- Artifact preview for `findings.json`, `valid_keys.json`, `summary.txt`, SARIF, etc.
+
+Do not expose the GUI beyond localhost on untrusted networks — result files can contain live secrets.
 
 ### Go tools (ProjectDiscovery + community stack)
 
@@ -90,7 +112,7 @@ python3 reconpipe.py -d target.com --headless
 # Use existing subdomain list (skip Chaos)
 python3 reconpipe.py -d target.com --subdomains subs.txt
 
-# Use existing URL list (skip httpx + URL discovery)
+# Use existing URL list (skip URL discovery; Chaos/httpx still run unless skipped)
 python3 reconpipe.py -d target.com --files urls.txt
 
 # Skip individual stages

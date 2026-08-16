@@ -23,7 +23,7 @@ try:
     import yaml
     YAML_AVAILABLE = True
 except ImportError:
-    yaml = None  # type: ignore
+    yaml = None  
     YAML_AVAILABLE = False
 
 try:
@@ -38,8 +38,8 @@ try:
     BOTO3_AVAILABLE = True
 except ImportError:
     BOTO3_AVAILABLE = False
-    ClientError = Exception  # type: ignore
-    BotoCoreError = Exception  # type: ignore
+    ClientError = Exception  
+    BotoCoreError = Exception
 
 # Colors
 class C:
@@ -337,6 +337,11 @@ def step_header(num: int, title: str) -> None:
 
 
 # Tool helpers
+PIPELINE_TOOLS = [
+    "chaos", "httpx", "katana", "waymore", "gospider", "gau", "waybackurls", "trufflehog",
+]
+
+
 def check_tool(name: str) -> bool:
     """True if the binary is on PATH (exit code of --help/--version is ignored)."""
     try:
@@ -349,6 +354,12 @@ def check_tool(name: str) -> bool:
         return False
 
 
+def probe_tools(tools: Optional[List[str]] = None) -> Dict[str, bool]:
+    """Return {tool: available} for pipeline binaries (and optional extras)."""
+    names = tools or PIPELINE_TOOLS
+    return {name: check_tool(name) for name in names}
+
+
 def run_cmd(cmd: List[str], output_file: Optional[str] = None,
             stdin_data: Optional[bytes] = None, timeout: int = 300) -> Tuple[int, bytes]:
     try:
@@ -358,9 +369,15 @@ def run_cmd(cmd: List[str], output_file: Optional[str] = None,
         if output_file and proc.stdout:
             Path(output_file).write_bytes(proc.stdout)
         return proc.returncode, proc.stdout
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as e:
+        # Keep any stdout produced before the kill — callers may still use partial results
+        partial = e.stdout or b""
+        if isinstance(partial, str):
+            partial = partial.encode()
         log(f"Timed out: {' '.join(cmd)}", "warn")
-        return -1, b""
+        if output_file and partial:
+            Path(output_file).write_bytes(partial)
+        return -1, partial
     except (FileNotFoundError, OSError):
         log(f"Tool not found: {cmd[0]}", "error")
         return -1, b""
@@ -2093,6 +2110,43 @@ async def validate_all(findings: List[Dict], domain: str,
             return await asyncio.gather(*tasks)
 
 
+async def validate_finding_configured(
+    finding: Dict,
+    domain: str,
+    shop_domain: str = "",
+    config_overlays: Optional[List[str]] = None,
+) -> Dict:
+    """
+    Re-run a single finding through the configured provider validator.
+    Used by the GUI; does not invent probes beyond VALIDATORS/config.yaml.
+    """
+    for cfg in config_overlays or []:
+        path = Path(cfg)
+        if path.exists():
+            load_config_file(path, replace=False)
+
+    shop = _normalize_host(shop_domain)
+    if not AIOHTTP_AVAILABLE:
+        results = validate_sync_fallback([finding], domain, shop)
+        return results[0] if results else {**finding, "note": "Validation unavailable"}
+
+    limiter = DomainRateLimiter(global_limit=1, per_domain=1)
+    async with aiohttp.ClientSession() as session:
+        return await validate_one(session, finding, limiter, domain, shop)
+
+
+def validate_finding_configured_sync(
+    finding: Dict,
+    domain: str,
+    shop_domain: str = "",
+    config_overlays: Optional[List[str]] = None,
+) -> Dict:
+    """Blocking wrapper around validate_finding_configured for GUI workers."""
+    return asyncio.run(
+        validate_finding_configured(finding, domain, shop_domain, config_overlays)
+    )
+
+
 def validate_sync_fallback(findings: List[Dict], domain: str,
                             shop_domain: str = "") -> List[Dict]:
     """Basic synchronous validator when aiohttp is unavailable."""
@@ -2288,9 +2342,8 @@ def write_sarif(
 
 
 # Main
-def main():
-    print(BANNER)
-
+def build_parser() -> argparse.ArgumentParser:
+    """Construct the CLI ArgumentParser (shared by CLI and GUI)."""
     parser = argparse.ArgumentParser(
         prog="reconpipe",
         description="Automated API Key Leak Hunter — Chaos → httpx → gau → TruffleHog → Validate",
@@ -2308,7 +2361,8 @@ Examples:
     )
     parser.add_argument("-d", "--domain",      required=True,  help="Target domain")
     parser.add_argument("--subdomains",        metavar="FILE", help="Use existing subdomain list (skips Chaos)")
-    parser.add_argument("--files",             metavar="FILE", help="Use existing URL list (skips httpx + gau)")
+    parser.add_argument("--files",             metavar="FILE",
+                        help="Use existing URL list (skips URL discovery: katana/waymore/gau/gospider)")
     parser.add_argument("--skip-chaos",        action="store_true", help="Skip Chaos step")
     parser.add_argument("--skip-httpx",        action="store_true", help="Skip httpx live-host filter")
     parser.add_argument("--skip-gau",          action="store_true",
@@ -2351,19 +2405,77 @@ Examples:
         action="store_true",
         help="Do not exit 1 when validated live keys are found (default: exit 1 to gate CI)",
     )
+    return parser
 
-    args = parser.parse_args()
+
+def argv_from_options(opts: Dict[str, Any]) -> List[str]:
+    """
+    Build a reconpipe CLI argv list from a GUI/options dict.
+    Keys mirror argparse dest names (domain, skip_chaos, config, ignore_hash, …).
+    """
+    argv: List[str] = []
+    domain = (opts.get("domain") or "").strip()
+    if not domain:
+        raise ValueError("domain is required")
+    argv += ["-d", domain]
+
+    mapping_flags = {
+        "skip_chaos": "--skip-chaos",
+        "skip_httpx": "--skip-httpx",
+        "skip_gau": "--skip-gau",
+        "skip_discovery": "--skip-discovery",
+        "no_trufflehog": "--no-trufflehog",
+        "no_validate": "--no-validate",
+        "headless": "--headless",
+        "no_fail_on_valid": "--no-fail-on-valid",
+    }
+    for key, flag in mapping_flags.items():
+        if opts.get(key):
+            argv.append(flag)
+
+    value_flags = {
+        "subdomains": "--subdomains",
+        "files": "--files",
+        "chaos_key": "--chaos-key",
+        "output": "--output",
+        "shopify_domain": "--shopify-domain",
+        "sarif": "--sarif",
+    }
+    for key, flag in value_flags.items():
+        val = opts.get(key)
+        if val is not None and str(val).strip() != "":
+            argv += [flag, str(val).strip()]
+
+    if opts.get("concurrency") is not None:
+        argv += ["--concurrency", str(int(opts["concurrency"]))]
+    if opts.get("gau_threads") is not None:
+        argv += ["--gau-threads", str(int(opts["gau_threads"]))]
+
+    for cfg in opts.get("config") or []:
+        if str(cfg).strip():
+            argv += ["--config", str(cfg).strip()]
+    for h in opts.get("ignore_hash") or []:
+        if str(h).strip():
+            argv += ["--ignore-hash", str(h).strip()]
+    return argv
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    print(BANNER)
+
+    parser = build_parser()
+    args = parser.parse_args(argv)
 
     if args.subdomains and not Path(args.subdomains).exists():
         log(f"Subdomains file not found: {args.subdomains}", "error")
-        sys.exit(1)
+        return 1
     if args.files and not Path(args.files).exists():
-        log(f"URL list not found: {args.files}", "error")
-        sys.exit(1)
+        log(f"URL list file not found: {args.files}", "error")
+        return 1
     for cfg in args.config:
         if not Path(cfg).exists():
             log(f"Config file not found: {cfg}", "error")
-            sys.exit(1)
+            return 1
 
     shop_domain = _normalize_host(args.shopify_domain)
 
@@ -2391,10 +2503,8 @@ Examples:
     log(f"Output dir: {C.BOLD}{output_dir}{C.RESET}", "info")
 
     print(f"\n{C.DIM}Tool availability:{C.RESET}")
-    tools_status = {}
-    for tool in ["chaos", "httpx", "katana", "waymore", "gospider", "gau", "waybackurls", "trufflehog"]:
-        ok = check_tool(tool)
-        tools_status[tool] = ok
+    tools_status = probe_tools()
+    for tool, ok in tools_status.items():
         status = f"{C.GREEN}✓ found{C.RESET}" if ok else f"{C.YELLOW}✗ not found{C.RESET}"
         print(f"  {tool:<14} {status}")
 
@@ -2440,19 +2550,44 @@ Examples:
         live_hosts_file.write_text("\n".join(sub_list))
         live_count = sub_count
     else:
-        log("Running httpx (filtering live hosts)...", "info")
+        # Scale wall-clock budget with list size (50 threads × ~10s per probe, + buffer)
+        httpx_timeout = max(300, min(3600, (sub_count // 50) * 12 + 120))
+        log(
+            f"Running httpx (filtering live hosts, timeout {httpx_timeout}s)...",
+            "info",
+        )
         stdin_data = "\n".join(sub_list).encode()
         rc, output = run_cmd(
             ["httpx", "-silent", "-threads", "50", "-timeout", "10"],
-            stdin_data=stdin_data
+            stdin_data=stdin_data,
+            timeout=httpx_timeout,
         )
-        if output:
+        if rc == 0:
+            # Empty stdout is a valid result (zero live hosts) — do not inflate to all subs
+            live_hosts_file.write_bytes(output or b"")
+        elif output:
+            log(
+                "httpx failed/timed out — using partial live-host results "
+                "(not treating all subdomains as live)",
+                "warn",
+            )
             live_hosts_file.write_bytes(output)
         else:
-            live_hosts_file.write_text("\n".join(sub_list))
+            log(
+                "httpx failed/timed out with no results — stopping rather than "
+                "assuming all subdomains are live",
+                "error",
+            )
+            live_hosts_file.write_text("")
 
     live_list = [h for h in live_hosts_file.read_text().splitlines() if h.strip()]
     live_count = len(live_list)
+    if live_count == 0 and sub_count > 0 and not args.skip_httpx and tools_status.get("httpx"):
+        log(
+            "No live hosts after httpx — downstream URL discovery will be empty. "
+            "Re-run with --skip-httpx to force all subdomains, or increase budget.",
+            "warn",
+        )
     log(f"Live hosts: {C.BOLD}{live_count}{C.RESET} / {sub_count}", "success")
 
     # URL discovery
@@ -2497,7 +2632,9 @@ Examples:
 
             if katana_out_file.exists():
                 katana_out_file.unlink()
-            rc, _ = run_cmd(katana_cmd, timeout=600)
+            # Scale with live host count; default 600s is too short for large scopes
+            katana_timeout = max(600, min(7200, live_count * 2 + 300))
+            rc, _ = run_cmd(katana_cmd, timeout=katana_timeout)
             if rc == 0 and katana_out_file.exists():
                 raw_katana = [l.strip() for l in katana_out_file.read_text().splitlines() if l.strip()]
                 log(f"Katana raw crawl: {len(raw_katana)} total URLs", "info")
@@ -2505,6 +2642,15 @@ Examples:
                 for line in raw_katana:
                     all_urls.add(line)
                 log(f"Katana: {len(all_urls)} URLs added", "success")
+            elif katana_out_file.exists() and katana_out_file.stat().st_size > 0:
+                raw_katana = [l.strip() for l in katana_out_file.read_text().splitlines() if l.strip()]
+                for line in raw_katana:
+                    all_urls.add(line)
+                log(
+                    f"Katana timed out/failed — using partial output "
+                    f"({len(raw_katana)} URLs)",
+                    "warn",
+                )
             else:
                 log("Katana failed or produced no output — skipping its URLs", "warn")
         else:
@@ -2949,9 +3095,9 @@ Examples:
             f"(use --no-fail-on-valid to disable)",
             "error",
         )
-        sys.exit(1)
-    sys.exit(0)
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
