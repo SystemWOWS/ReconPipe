@@ -47,7 +47,7 @@ else
     SUDO=""
 fi
 
-# Resolve the human user behind a sudo invocation. Go tools and pip --user
+
 # packages must land in their home, not /root, or the shell won't find them.
 if [[ -n "${SUDO_USER:-}" && "$SUDO_USER" != "root" ]]; then
     REAL_USER="$SUDO_USER"
@@ -80,7 +80,7 @@ own_by_user() {
     $SUDO chown -R "$REAL_USER":"$REAL_GROUP" "$1" 2>/dev/null || true
 }
 
-# Append a block to the real user's shell rc files, once
+
 append_rc() {
     local marker=$1 content=$2 rc
     for rc in "$REAL_HOME/.bashrc" "$REAL_HOME/.zshrc" "$REAL_HOME/.profile"; do
@@ -363,7 +363,7 @@ export PATH="$HOME/.local/bin:$PATH"'
     success "Go: $(go version 2>/dev/null | awk '{print $3}')  GOBIN=$GOBIN"
 }
 
-# Python deps — installed as the real user so scripts land in ~/.local/bin
+# Python deps
 run_pip() {
     run_as_user pip3 install --user "$@" -q 2>/dev/null && return 0
     run_as_user pip3 install --user "$@" -q --break-system-packages 2>/dev/null && return 0
@@ -474,8 +474,8 @@ find_tool() {
     return 1
 }
 
+
 # Symlink into /usr/local/bin so the tools resolve in any shell, including
-# fresh terminals and sudo, without waiting on a shell reload.
 link_tools_system_wide() {
     header "STEP 7: Expose tools in $SHARED_BIN"
     local tool src linked=0
