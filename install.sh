@@ -429,6 +429,38 @@ install_go_tool() {
     return 1
 }
 
+
+
+install_go_tool() {
+    local tool_name="$1"
+    local tool_path="$2"
+    
+    echo -n "Installing $tool_name... "
+    
+    go install "$tool_path" &>/dev/null &
+    local pid=$!
+    
+    local elapsed=0
+    # Loops while go install process running
+    while kill -0 $pid 2>/dev/null; do
+        printf "\rInstalling %s... [%ds elapsed]" "$tool_name" "$elapsed"
+        sleep 1
+        ((elapsed++))
+    done
+
+    wait $pid
+    local exit_status=$?
+
+    if [ $exit_status -eq 0 ]; then
+        printf "\rinstalling %s... Done (%ds total)\n" "$tool_name" "$elapsed"
+        return 0
+    else
+        printf "\rInstalling %s... Failed (%ds total)\n" "$tool_name" "$elapsed"
+        return 1
+    fi
+}
+
+
 install_go_tools() {
     header "STEP 4: ProjectDiscovery tools (Go)"
     install_go_tool "chaos"     "github.com/projectdiscovery/chaos-client/cmd/chaos@latest" || true
