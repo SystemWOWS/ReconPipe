@@ -352,13 +352,13 @@ setup_go_env() {
         exit 1
     fi
 
-    append_rc 'GOBIN' '# Go binaries (ReconPipe)
+    append_rc 'GOBIN' '# Go binaries (ReconPipe) — ahead of pip so ProjectDiscovery httpx wins
 export GOPATH="$HOME/go"
 export GOBIN="$HOME/go/bin"
-export PATH="$PATH:$GOBIN"'
+export PATH="$GOBIN:$PATH"'
 
     append_rc '.local/bin' '# Python user binaries (ReconPipe)
-export PATH="$HOME/.local/bin:$PATH"'
+export PATH="$PATH:$HOME/.local/bin"'
 
     success "Go: $(go version 2>/dev/null | awk '{print $3}')  GOBIN=$GOBIN"
 }

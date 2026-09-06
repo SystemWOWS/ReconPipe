@@ -136,6 +136,17 @@ def test_gui_module_compiles_and_helpers():
     hits = mod.guess_key_types("sk_live_abcdefghijklmnopqrstuvwx")
     assert "stripe_live" in hits
     assert "github_pat" in mod.validator_type_options()
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "hosts.txt"
+        p.write_text("a.example.com\nb.example.com\n", encoding="utf-8")
+        n1 = mod.count_lines(p)
+        n2 = mod.count_lines(p)
+        assert n1 == n2 == 2
+        p.write_text("a.example.com\n", encoding="utf-8")
+        assert mod.count_lines(p) == 1
+    src = (ROOT / "reconpipegui.py").read_text(encoding="utf-8")
+    assert "Passive intel" in src
+    assert "--shodan-key" in src and "--zoomeye-key" in src and "--censys-id" in src
     print("[ok] reconpipegui import + form validation helpers")
 
 

@@ -17,7 +17,7 @@ from pathlib import Path
 from datetime import datetime, timezone
 from dataclasses import dataclass, field, fields
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import urlparse
+from urllib.parse import urlparse, quote, urlencode
 
 try:
     import yaml
@@ -342,8 +342,140 @@ PIPELINE_TOOLS = [
 ]
 
 
+def _cmd_blob(path: str, *args: str) -> str:
+    try:
+        proc = subprocess.run(
+            [path, *args], capture_output=True, timeout=6
+        )
+        return ((proc.stdout or b"") + (proc.stderr or b"")).decode(
+            "utf-8", errors="replace"
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return ""
+
+
+def is_projectdiscovery_httpx(help_or_version: str) -> bool:
+    """True if CLI text is ProjectDiscovery httpx, not the Python httpx client."""
+    text = (help_or_version or "").lower()
+    if not text.strip():
+        return False
+    if "no such option" in text or "usage: httpx [options] url" in text:
+        return False
+    if "projectdiscovery" in text:
+        return True
+    if "-silent" in text and ("-list" in text or "-l, -list" in text):
+        return True
+    if "current version" in text:
+        return True
+    return False
+
+
+def is_python_httpx_cli(help_or_version: str) -> bool:
+    text = (help_or_version or "").lower()
+    return (
+        "usage: httpx [options] url" in text
+        or "httpx: a next generation http client" in text
+        or ("no such option" in text and "url" in text)
+    )
+
+
+def _iter_named_binaries(names: List[str]) -> List[str]:
+    """All matching executables on PATH plus common Go install dirs."""
+    found: List[str] = []
+    seen: set = set()
+    extra = [
+        str(Path.home() / "go" / "bin"),
+        "/usr/local/bin",
+        "/usr/bin",
+        str(Path.home() / ".local" / "bin"),
+    ]
+    dirs = list(os.environ.get("PATH", "").split(os.pathsep)) + extra
+    suffixes = [""]
+    if os.name == "nt":
+        suffixes = [""] + [
+            e for e in os.environ.get("PATHEXT", ".EXE;.BAT;.CMD").split(";") if e
+        ]
+    for directory in dirs:
+        if not directory:
+            continue
+        for name in names:
+            for suf in suffixes:
+                cand = Path(directory) / f"{name}{suf}"
+                try:
+                    if not cand.is_file():
+                        continue
+                    resolved = str(cand.resolve())
+                except OSError:
+                    continue
+                if resolved in seen:
+                    continue
+                seen.add(resolved)
+                found.append(str(cand))
+    return found
+
+
+def _httpx_identify(path: str) -> str:
+    return (
+        _cmd_blob(path, "-version")
+        + _cmd_blob(path, "-h")
+        + _cmd_blob(path, "--help")
+    )
+
+
+def resolve_httpx_bin() -> Optional[str]:
+    """
+    Return ProjectDiscovery httpx path. Ignores pip/NiceGUI's Python `httpx` CLI.
+    Override with env HTTPX_BIN.
+    """
+    env = (os.environ.get("HTTPX_BIN") or "").strip()
+    if env and is_projectdiscovery_httpx(_httpx_identify(env)):
+        return env
+    for cand in _iter_named_binaries(["httpx", "httpx-toolkit"]):
+        if is_projectdiscovery_httpx(_httpx_identify(cand)):
+            return cand
+    return None
+
+
+def python_httpx_on_path() -> Optional[str]:
+    for cand in _iter_named_binaries(["httpx"]):
+        blob = _httpx_identify(cand)
+        if is_python_httpx_cli(blob):
+            return cand
+        if blob and not is_projectdiscovery_httpx(blob) and (
+            "usage: httpx" in blob.lower() or "no such option" in blob.lower()
+        ):
+            return cand
+    return None
+
+
+def log_httpx_missing() -> None:
+    """Explain why live-host filtering is skipped when PD httpx is absent."""
+    log("ProjectDiscovery httpx not found — treating all subdomains as live", "warn")
+    env = (os.environ.get("HTTPX_BIN") or "").strip()
+    if env:
+        log(f"HTTPX_BIN={env} is not ProjectDiscovery httpx — ignoring", "warn")
+    py = python_httpx_on_path()
+    if py:
+        log(
+            f"PATH httpx is the Python client ({py}), not ProjectDiscovery httpx",
+            "warn",
+        )
+        log(
+            "NiceGUI/pip install a CLI named httpx; ReconPipe will not use it as a live-host filter",
+            "warn",
+        )
+    log("Install: go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest", "warn")
+    log(
+        "Then put $HOME/go/bin before ~/.local/bin, or set HTTPX_BIN=/path/to/pd/httpx",
+        "warn",
+    )
+    log("On Kali: apt install httpx-toolkit  (binary name: httpx-toolkit)", "warn")
+
+
 def check_tool(name: str) -> bool:
     """True if the binary is on PATH (exit code of --help/--version is ignored)."""
+    if name == "httpx":
+        return resolve_httpx_bin() is not None
     try:
         subprocess.run(
             [name, "--version"] if name in ("trufflehog",) else [name, "--help"],
@@ -360,27 +492,55 @@ def probe_tools(tools: Optional[List[str]] = None) -> Dict[str, bool]:
     return {name: check_tool(name) for name in names}
 
 
+CMD_TIMEOUT_RC = -2
+CMD_NOTFOUND_RC = -1
+
+
+def _snippet_bytes(data: Optional[bytes], limit: int = 500) -> str:
+    if not data:
+        return ""
+    text = data.decode("utf-8", errors="replace").strip()
+    if not text:
+        return ""
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    return " | ".join(lines[:8])[:limit]
+
+
 def run_cmd(cmd: List[str], output_file: Optional[str] = None,
-            stdin_data: Optional[bytes] = None, timeout: int = 300) -> Tuple[int, bytes]:
+            stdin_data: Optional[bytes] = None, timeout: int = 300,
+            discard_stdout: bool = False) -> Tuple[int, bytes]:
+    """
+    Run an external tool. Set discard_stdout=True when the tool writes its
+    results to a file (-o / -oU) so URL dumps are not buffered in RAM.
+    """
     try:
         proc = subprocess.run(
-            cmd, input=stdin_data, capture_output=True, timeout=timeout
+            cmd,
+            input=stdin_data,
+            stdout=subprocess.DEVNULL if discard_stdout else subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=timeout,
         )
-        if output_file and proc.stdout:
-            Path(output_file).write_bytes(proc.stdout)
-        return proc.returncode, proc.stdout
+        stdout = b"" if discard_stdout else (proc.stdout or b"")
+        if output_file and stdout:
+            Path(output_file).write_bytes(stdout)
+        if proc.returncode not in (0, None):
+            err = _snippet_bytes(proc.stderr)
+            if err:
+                log(f"{cmd[0]} error: {err}", "warn")
+        return proc.returncode, stdout
     except subprocess.TimeoutExpired as e:
         # Keep any stdout produced before the kill — callers may still use partial results
-        partial = e.stdout or b""
+        partial = b"" if discard_stdout else (e.stdout or b"")
         if isinstance(partial, str):
             partial = partial.encode()
         log(f"Timed out: {' '.join(cmd)}", "warn")
         if output_file and partial:
             Path(output_file).write_bytes(partial)
-        return -1, partial
+        return CMD_TIMEOUT_RC, partial
     except (FileNotFoundError, OSError):
         log(f"Tool not found: {cmd[0]}", "error")
-        return -1, b""
+        return CMD_NOTFOUND_RC, b""
 
 
 # Dedup / filters / scanner
@@ -2341,6 +2501,259 @@ def write_sarif(
     path.write_text(json.dumps(doc, indent=2), encoding="utf-8")
 
 
+# Passive intel (Shodan / Censys / ZoomEye / crt.sh)
+_OSINT_HOST_RE = re.compile(r"^[A-Za-z0-9._*-]{1,253}$")
+
+
+def _osint_belongs(host: str, domain: str) -> bool:
+    h = (host or "").lower().strip().rstrip(".")
+    d = (domain or "").lower().strip().rstrip(".")
+    if h.startswith("*."):
+        h = h[2:]
+    if not h or not d or not _OSINT_HOST_RE.match(h):
+        return False
+    return h == d or h.endswith("." + d)
+
+
+def _osint_http_json(
+    url: str,
+    *,
+    headers: Optional[Dict[str, str]] = None,
+    timeout: int = 20,
+) -> Any:
+    req = urllib.request.Request(url, headers=headers or {"User-Agent": "ReconPipe/1.1"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        raw = resp.read()
+    if not raw:
+        return None
+    return json.loads(raw.decode("utf-8", errors="replace"))
+
+
+def _osint_walk_hosts(obj: Any, domain: str, bucket: set) -> None:
+    if len(bucket) >= 5000:
+        return
+    if isinstance(obj, str):
+        text = obj.strip().lower().rstrip(".")
+        if "://" in text:
+            text = urlparse(text).hostname or ""
+        for part in re.split(r"[\s,;]+", text):
+            part = part.strip().lower().rstrip(".")
+            if part.startswith("*."):
+                part = part[2:]
+            if _osint_belongs(part, domain):
+                bucket.add(part)
+    elif isinstance(obj, dict):
+        for v in obj.values():
+            _osint_walk_hosts(v, domain, bucket)
+    elif isinstance(obj, list):
+        for v in obj:
+            _osint_walk_hosts(v, domain, bucket)
+
+
+def query_shodan(domain: str, api_key: str, timeout: int = 20) -> List[str]:
+    """Shodan DNS domain endpoint — subdomains for the apex name."""
+    key = (api_key or "").strip()
+    if not key:
+        return []
+    url = (
+        f"https://api.shodan.io/dns/domain/{quote(domain)}"
+        f"?{urlencode({'key': key})}"
+    )
+    data = _osint_http_json(url, timeout=timeout)
+    found: set = set()
+    if isinstance(data, dict):
+        for sub in data.get("subdomains") or []:
+            host = f"{sub}.{domain}".lower().strip(".") if sub else domain
+            if _osint_belongs(host, domain):
+                found.add(host)
+        _osint_walk_hosts(data.get("data") or data, domain, found)
+    return sorted(found)
+
+
+def query_censys(
+    domain: str,
+    api_id: str,
+    api_secret: str,
+    timeout: int = 20,
+) -> List[str]:
+    """Censys Search v2 certificate + host name search."""
+    api_id = (api_id or "").strip()
+    api_secret = (api_secret or "").strip()
+    if not api_id or not api_secret:
+        return []
+    token = base64.b64encode(f"{api_id}:{api_secret}".encode()).decode("ascii")
+    headers = {
+        "Authorization": f"Basic {token}",
+        "Accept": "application/json",
+        "User-Agent": "ReconPipe/1.1",
+    }
+    found: set = set()
+    queries = [
+        (
+            "https://search.censys.io/api/v2/certificates/search?"
+            + urlencode({"q": f"names: {domain}", "per_page": 100})
+        ),
+        (
+            "https://search.censys.io/api/v2/hosts/search?"
+            + urlencode({"q": f"dns.names: {domain}", "per_page": 100})
+        ),
+    ]
+    for url in queries:
+        try:
+            data = _osint_http_json(url, headers=headers, timeout=timeout)
+        except Exception:
+            continue
+        _osint_walk_hosts(data, domain, found)
+    return sorted(found)
+
+
+def query_zoomeye(domain: str, api_key: str, timeout: int = 20) -> List[str]:
+    """ZoomEye domain/host search (api.zoomeye.ai, with .org fallback)."""
+    key = (api_key or "").strip()
+    if not key:
+        return []
+    headers = {"API-KEY": key, "User-Agent": "ReconPipe/1.1"}
+    found: set = set()
+    urls = [
+        "https://api.zoomeye.ai/domain/search?"
+        + urlencode({"q": domain, "type": 1, "page": 1}),
+        "https://api.zoomeye.ai/host/search?"
+        + urlencode({"query": f"site:{domain}", "page": 1}),
+        "https://api.zoomeye.org/domain/search?"
+        + urlencode({"q": domain, "type": 1, "page": 1}),
+    ]
+    for url in urls:
+        try:
+            data = _osint_http_json(url, headers=headers, timeout=timeout)
+        except Exception:
+            continue
+        _osint_walk_hosts(data, domain, found)
+        if found:
+            break
+    return sorted(found)
+
+
+def query_crtsh(domain: str, timeout: int = 20) -> List[str]:
+    """crt.sh certificate transparency (no API key)."""
+    url = "https://crt.sh/?" + urlencode({"q": f"%.{domain}", "output": "json"})
+    data = _osint_http_json(url, timeout=timeout)
+    found: set = set()
+    _osint_walk_hosts(data, domain, found)
+    return sorted(found)
+
+
+def osint_source_status(
+    shodan_key: str = "",
+    censys_id: str = "",
+    censys_secret: str = "",
+    zoomeye_key: str = "",
+    skip_crtsh: bool = False,
+    skip_intel: bool = False,
+) -> Dict[str, str]:
+    """GUI/preflight: key | env | on | off | skipped (never includes secret values)."""
+    if skip_intel:
+        return {k: "skipped" for k in ("shodan", "censys", "zoomeye", "crtsh")}
+    if (shodan_key or "").strip():
+        shodan = "key"
+    elif os.environ.get("SHODAN_API_KEY"):
+        shodan = "env"
+    else:
+        shodan = "off"
+    if (censys_id or "").strip() and (censys_secret or "").strip():
+        censys = "key"
+    elif os.environ.get("CENSYS_API_ID") and os.environ.get("CENSYS_API_SECRET"):
+        censys = "env"
+    else:
+        censys = "off"
+    if (zoomeye_key or "").strip():
+        zoomeye = "key"
+    elif os.environ.get("ZOOMEYE_API_KEY") or os.environ.get("ZOOMEYE_KEY"):
+        zoomeye = "env"
+    else:
+        zoomeye = "off"
+    return {
+        "shodan": shodan,
+        "censys": censys,
+        "zoomeye": zoomeye,
+        "crtsh": "off" if skip_crtsh else "on",
+    }
+
+
+def collect_osint_hosts(
+    domain: str,
+    *,
+    shodan_key: str = "",
+    censys_id: str = "",
+    censys_secret: str = "",
+    zoomeye_key: str = "",
+    skip_crtsh: bool = False,
+    skip_intel: bool = False,
+    timeout: int = 20,
+) -> Dict[str, List[str]]:
+    """Query optional intel APIs. Failures are logged; never abort the pipeline."""
+    results: Dict[str, List[str]] = {}
+    if skip_intel or not domain:
+        return results
+
+    shodan_key = shodan_key or os.environ.get("SHODAN_API_KEY", "")
+    censys_id = censys_id or os.environ.get("CENSYS_API_ID", "")
+    censys_secret = censys_secret or os.environ.get("CENSYS_API_SECRET", "")
+    zoomeye_key = (
+        zoomeye_key
+        or os.environ.get("ZOOMEYE_API_KEY", "")
+        or os.environ.get("ZOOMEYE_KEY", "")
+    )
+
+    jobs = [
+        ("shodan", bool((shodan_key or "").strip()),
+         lambda: query_shodan(domain, shodan_key, timeout)),
+        ("censys", bool((censys_id or "").strip() and (censys_secret or "").strip()),
+         lambda: query_censys(domain, censys_id, censys_secret, timeout)),
+        ("zoomeye", bool((zoomeye_key or "").strip()),
+         lambda: query_zoomeye(domain, zoomeye_key, timeout)),
+    ]
+    for name, enabled, fn in jobs:
+        if not enabled:
+            continue
+        try:
+            hosts = fn()
+        except Exception as exc:
+            log(f"{name}: {str(exc)[:120]}", "warn")
+            continue
+        if hosts:
+            results[name] = hosts
+            log(f"{name}: +{len(hosts)} host(s)", "success")
+        else:
+            log(f"{name}: no extra hosts", "info")
+
+    if not skip_crtsh:
+        try:
+            hosts = query_crtsh(domain, timeout)
+            if hosts:
+                results["crtsh"] = hosts
+                log(f"crt.sh: +{len(hosts)} host(s)", "success")
+            else:
+                log("crt.sh: no extra hosts", "info")
+        except Exception as exc:
+            log(f"crt.sh: {str(exc)[:120]}", "warn")
+    return results
+
+
+def merge_host_lists(*lists: List[str]) -> List[str]:
+    seen: set = set()
+    out: List[str] = []
+    for lst in lists:
+        for h in lst or []:
+            host = (h or "").strip().lower().rstrip(".")
+            if host.startswith("*."):
+                host = host[2:]
+            if not host or host in seen:
+                continue
+            seen.add(host)
+            out.append(host)
+    return sorted(out)
+
+
 # Main
 def build_parser() -> argparse.ArgumentParser:
     """Construct the CLI ArgumentParser (shared by CLI and GUI)."""
@@ -2373,6 +2786,14 @@ Examples:
     parser.add_argument("--no-validate",       action="store_true", help="Skip key validation")
     parser.add_argument("--concurrency",       type=int, default=10, help="Async validation concurrency (default: 10)")
     parser.add_argument("--chaos-key",         metavar="KEY",  help="Chaos API key (or set env CHAOS_KEY)")
+    parser.add_argument("--shodan-key",        metavar="KEY",  help="Shodan API key (or set env SHODAN_API_KEY)")
+    parser.add_argument("--censys-id",         metavar="ID",   help="Censys API ID (or set env CENSYS_API_ID)")
+    parser.add_argument("--censys-secret",     metavar="KEY",  help="Censys API secret (or set env CENSYS_API_SECRET)")
+    parser.add_argument("--zoomeye-key",       metavar="KEY",  help="ZoomEye API key (or set env ZOOMEYE_API_KEY)")
+    parser.add_argument("--skip-intel",        action="store_true",
+                        help="Skip Shodan/Censys/ZoomEye/crt.sh host enrichment")
+    parser.add_argument("--skip-crtsh",        action="store_true",
+                        help="Skip crt.sh certificate-transparency lookup")
     parser.add_argument("--output", "-o",      metavar="DIR",  help="Output directory (default: recon_<domain>)")
     parser.add_argument("--gau-threads",       type=int, default=5, help="gau thread count (default: 5)")
     parser.add_argument("--headless",          action="store_true", help="Enable Katana headless Chrome mode for SPAs/React/Angular")
@@ -2428,6 +2849,8 @@ def argv_from_options(opts: Dict[str, Any]) -> List[str]:
         "no_validate": "--no-validate",
         "headless": "--headless",
         "no_fail_on_valid": "--no-fail-on-valid",
+        "skip_intel": "--skip-intel",
+        "skip_crtsh": "--skip-crtsh",
     }
     for key, flag in mapping_flags.items():
         if opts.get(key):
@@ -2437,6 +2860,10 @@ def argv_from_options(opts: Dict[str, Any]) -> List[str]:
         "subdomains": "--subdomains",
         "files": "--files",
         "chaos_key": "--chaos-key",
+        "shodan_key": "--shodan-key",
+        "censys_id": "--censys-id",
+        "censys_secret": "--censys-secret",
+        "zoomeye_key": "--zoomeye-key",
         "output": "--output",
         "shopify_domain": "--shopify-domain",
         "sarif": "--sarif",
@@ -2504,9 +2931,16 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     print(f"\n{C.DIM}Tool availability:{C.RESET}")
     tools_status = probe_tools()
+    httpx_bin = resolve_httpx_bin()
+    python_httpx = python_httpx_on_path()
     for tool, ok in tools_status.items():
         status = f"{C.GREEN}✓ found{C.RESET}" if ok else f"{C.YELLOW}✗ not found{C.RESET}"
-        print(f"  {tool:<14} {status}")
+        extra = ""
+        if tool == "httpx" and httpx_bin:
+            extra = f"  {C.DIM}{httpx_bin}{C.RESET}"
+        elif tool == "httpx" and python_httpx:
+            extra = f"  {C.DIM}(Python httpx at {python_httpx} — skipped){C.RESET}"
+        print(f"  {tool:<14} {status}{extra}")
 
     if not AIOHTTP_AVAILABLE:
         log("aiohttp not installed — using sync validator fallback. Run: pip3 install aiohttp", "warn")
@@ -2537,48 +2971,104 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     sub_list = [s for s in subdomains_file.read_text().splitlines() if s.strip()]
     sub_count = len(sub_list)
+    log(f"Subdomains: {C.BOLD}{sub_count}{C.RESET} (pre-intel)", "success")
+
+    if not args.skip_intel:
+        log("Passive intel: Shodan / Censys / ZoomEye / crt.sh", "info")
+        intel = collect_osint_hosts(
+            args.domain,
+            shodan_key=args.shodan_key or "",
+            censys_id=args.censys_id or "",
+            censys_secret=args.censys_secret or "",
+            zoomeye_key=args.zoomeye_key or "",
+            skip_crtsh=args.skip_crtsh,
+            skip_intel=False,
+        )
+        extra = []
+        for src, hosts in intel.items():
+            extra.extend(hosts)
+        if extra:
+            before = len(sub_list)
+            sub_list = merge_host_lists(sub_list, extra)
+            added = len(sub_list) - before
+            merged_path = output_dir / "subdomains.txt"
+            merged_path.write_text("\n".join(sub_list) + "\n")
+            subdomains_file = merged_path
+            log(
+                f"Intel merge: {C.BOLD}{added}{C.RESET} new host(s) → {len(sub_list)} total",
+                "success",
+            )
+        else:
+            log("Intel merge: no additional hosts", "info")
+    else:
+        log("Passive intel skipped (--skip-intel)", "info")
+
+    sub_count = len(sub_list)
     log(f"Subdomains: {C.BOLD}{sub_count}{C.RESET}", "success")
 
     # Live hosts
     step_header(2, "Live Host Filtering (httpx)")
     live_hosts_file = output_dir / "live_hosts.txt"
 
-    if args.skip_httpx or not tools_status["httpx"]:
+    if args.skip_httpx or not httpx_bin:
         if not args.skip_httpx:
-            log("httpx not found — treating all subdomains as live", "warn")
-            log("Install: go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest", "warn")
+            log_httpx_missing()
         live_hosts_file.write_text("\n".join(sub_list))
         live_count = sub_count
     else:
         # Scale wall-clock budget with list size (50 threads × ~10s per probe, + buffer)
         httpx_timeout = max(300, min(3600, (sub_count // 50) * 12 + 120))
         log(
-            f"Running httpx (filtering live hosts, timeout {httpx_timeout}s)...",
+            f"Running httpx ({httpx_bin}, timeout {httpx_timeout}s)...",
             "info",
         )
-        stdin_data = "\n".join(sub_list).encode()
-        rc, output = run_cmd(
-            ["httpx", "-silent", "-threads", "50", "-timeout", "10"],
-            stdin_data=stdin_data,
-            timeout=httpx_timeout,
-        )
+        # File input is more reliable than stdin under subprocess capture
+        httpx_input = output_dir / "httpx_input.txt"
+        httpx_input.write_text("\n".join(sub_list) + "\n")
+        if live_hosts_file.exists():
+            live_hosts_file.unlink()
+        httpx_cmd = [
+            httpx_bin,
+            "-silent",
+            "-nc",
+            "-l", str(httpx_input),
+            "-o", str(live_hosts_file),
+            "-t", "50",
+            "-timeout", "10",
+        ]
+        rc, output = run_cmd(httpx_cmd, timeout=httpx_timeout)
+
+        def _httpx_hosts() -> bytes:
+            if live_hosts_file.is_file() and live_hosts_file.stat().st_size > 0:
+                return live_hosts_file.read_bytes()
+            return output or b""
+
+        hosts_raw = _httpx_hosts()
         if rc == 0:
-            # Empty stdout is a valid result (zero live hosts) — do not inflate to all subs
-            live_hosts_file.write_bytes(output or b"")
-        elif output:
+            # Empty result is valid (zero live hosts) — do not inflate to all subs
+            live_hosts_file.write_bytes(hosts_raw)
+        elif hosts_raw:
+            kind = "timed out" if rc == CMD_TIMEOUT_RC else "exited with an error"
             log(
-                "httpx failed/timed out — using partial live-host results "
+                f"httpx {kind} — using partial live-host results "
                 "(not treating all subdomains as live)",
                 "warn",
             )
-            live_hosts_file.write_bytes(output)
-        else:
+            live_hosts_file.write_bytes(hosts_raw)
+        elif rc == CMD_TIMEOUT_RC:
             log(
-                "httpx failed/timed out with no results — stopping rather than "
-                "assuming all subdomains are live",
+                "httpx timed out with no results — not assuming all subdomains are live",
                 "error",
             )
             live_hosts_file.write_text("")
+        else:
+            # Instant crash (bad flags, wrong binary, etc.) — keep recon moving
+            log(
+                "httpx failed immediately with no results — "
+                "continuing with unverified subdomains (same as --skip-httpx)",
+                "error",
+            )
+            live_hosts_file.write_text("\n".join(sub_list) + "\n")
 
     live_list = [h for h in live_hosts_file.read_text().splitlines() if h.strip()]
     live_count = len(live_list)
@@ -2615,6 +3105,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
             katana_cmd = [
                 "katana",
+                "-silent",
                 "-list", str(katana_input),
                 "-jc",              # parse JS for endpoints
                 "-kf", "all",       # robots.txt + sitemap.xml
@@ -2626,7 +3117,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             ]
             # -em drops extensionless SPA paths; filter after crawl instead
             if jsl_available:
-                katana_cmd.insert(3, "-jsl")  # deep JS via jsluice
+                katana_cmd.append("-jsl")  # deep JS via jsluice
             if args.headless:
                 katana_cmd += ["-hl", "-nos"]  # headless Chrome for SPAs
 
@@ -2634,7 +3125,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 katana_out_file.unlink()
             # Scale with live host count; default 600s is too short for large scopes
             katana_timeout = max(600, min(7200, live_count * 2 + 300))
-            rc, _ = run_cmd(katana_cmd, timeout=katana_timeout)
+            rc, _ = run_cmd(katana_cmd, timeout=katana_timeout, discard_stdout=True)
             if rc == 0 and katana_out_file.exists():
                 raw_katana = [l.strip() for l in katana_out_file.read_text().splitlines() if l.strip()]
                 log(f"Katana raw crawl: {len(raw_katana)} total URLs", "info")
@@ -2673,7 +3164,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                 waymore_out = waymore_dir / f"{clean.replace('/', '_')}.txt"
                 rc, _ = run_cmd(
                     ["waymore", "-i", clean, "-mode", "U", "-oU", str(waymore_out)],
-                    timeout=120
+                    timeout=120,
+                    discard_stdout=True,
                 )
                 if rc != 0:
                     waymore_failures += 1
@@ -2745,7 +3237,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 "--robots",
                 "-q",
                 "-o", str(gs_out_dir),
-            ], timeout=300)
+            ], timeout=300, discard_stdout=True)
 
             url_re = re.compile(r'\[url\]\s+\[\d+\]\s+-\s+(https?://\S+)')
             js_re  = re.compile(r'https?://\S+\.(js|json|jsx|map)\b')

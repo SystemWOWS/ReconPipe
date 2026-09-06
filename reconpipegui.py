@@ -11,6 +11,7 @@ and re-tests findings with ReconPipe's configured validators only.
 
 from __future__ import annotations
 
+import inspect
 import json
 import os
 import queue
@@ -23,6 +24,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+import asyncio
 
 HERE = Path(__file__).resolve().parent
 if str(HERE) not in sys.path:
@@ -82,13 +84,32 @@ def load_json_list(path: Path) -> List[Dict]:
     return []
 
 
+_LINE_CACHE: Dict[str, tuple] = {}
+
+
 def count_lines(path: Path) -> int:
-    if not path.is_file():
-        return 0
+    """Count non-empty lines, cached by size+mtime so the GUI can poll cheaply."""
     try:
-        return sum(1 for line in path.read_text(errors="ignore").splitlines() if line.strip())
-    except Exception:
+        st = path.stat()
+    except OSError:
         return 0
+    key = str(path)
+    stamp = (int(getattr(st, "st_mtime_ns", int(st.st_mtime * 1e9))), st.st_size)
+    cached = _LINE_CACHE.get(key)
+    if cached and cached[0] == stamp:
+        return cached[1]
+    n = 0
+    try:
+        with path.open("rb") as fh:
+            while True:
+                chunk = fh.read(1024 * 1024)
+                if not chunk:
+                    break
+                n += chunk.count(b"\n")
+    except OSError:
+        return 0
+    _LINE_CACHE[key] = (stamp, n)
+    return n
 
 
 def default_output_dir(domain: str) -> Path:
@@ -316,14 +337,13 @@ def build_ui() -> None:
             color: var(--rp-text) !important;
             font-family: "Segoe UI", Tahoma, sans-serif !important;
           }
+          /* Thin header wash only — a full-viewport repeating gradient
+             makes Firefox composite the whole page on every frame. */
           body::before {
             content: "";
-            position: fixed; inset: 0; pointer-events: none; z-index: 0;
-            background:
-              linear-gradient(180deg, rgba(232,93,4,0.05) 0 36px, transparent 36px),
-              repeating-linear-gradient(
-                0deg, transparent, transparent 3px, rgba(255,255,255,0.012) 4px
-              );
+            position: fixed; top: 0; left: 0; right: 0; height: 36px;
+            pointer-events: none; z-index: 0;
+            background: linear-gradient(180deg, rgba(232,93,4,0.05), transparent);
           }
           .q-header {
             background: #111111 !important;
@@ -357,6 +377,7 @@ def build_ui() -> None:
             background: #0c0c0c; color: #9ccc65;
             border: 1px solid #2a2a2a;
             padding: 10px 12px; height: 440px; overflow: auto; white-space: pre-wrap;
+            contain: content;
           }
           .rp-title {
             font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase;
@@ -400,15 +421,27 @@ def build_ui() -> None:
           }
           .rp-verdict.live { color: var(--rp-green); border-color: #3d5c2f; }
           .rp-verdict.dead { color: var(--rp-red); border-color: #5c1f1f; }
-          .rp-verdict.skip { color: #f9a825; border-color: #5c4a16; }
+          .rp-header-meta {
+            font-size: 10px; letter-spacing: 0.18em; text-transform: uppercase;
+            color: #8a8a8a; margin-left: 14px;
+          }
+          .rp-chip {
+            font-size: 10px; font-weight: 700; letter-spacing: 0.08em;
+            text-transform: uppercase; padding: 2px 8px;
+            border: 1px solid var(--rp-border); color: #cfcfcf;
+          }
+          .rp-chip.on { color: var(--rp-green); border-color: #3d5c2f; }
+          .rp-chip.off { color: #666; }
         </style>
         """
     )
 
-    with ui.header().classes("items-center px-4"):
+    with ui.header().classes("items-center justify-between px-4"):
         with ui.row().classes("items-center no-wrap"):
             ui.element("span").classes("rp-brand-mark")
             ui.label("ReconPipe").classes("rp-title text-base")
+            ui.label("Host intel · Key hunter").classes("rp-header-meta")
+        ui.label("v1.1").classes("text-xs text-gray-500 font-mono")
 
     with ui.tabs().classes("w-full") as tabs:
         tab_scan = ui.tab("Scan")
@@ -467,6 +500,38 @@ def build_ui() -> None:
                         ).classes("w-full").props("outlined dense")
 
                     with ui.card().classes("w-full rp-card"):
+                        ui.label("Passive intel").classes("rp-section")
+                        ui.label(
+                            "Optional host enrichment after Chaos. Keys stay in this session only."
+                        ).classes("text-xs text-gray-500 mb-2")
+                        shodan_in = ui.input(
+                            "Shodan API key (--shodan-key)",
+                            password=True,
+                            password_toggle_button=True,
+                            placeholder="or SHODAN_API_KEY",
+                        ).classes("w-full").props("outlined dense")
+                        with ui.row().classes("w-full gap-2"):
+                            censys_id_in = ui.input(
+                                "Censys API ID (--censys-id)",
+                                placeholder="or CENSYS_API_ID",
+                            ).classes("flex-1").props("outlined dense")
+                            censys_secret_in = ui.input(
+                                "Censys API secret (--censys-secret)",
+                                password=True,
+                                password_toggle_button=True,
+                                placeholder="or CENSYS_API_SECRET",
+                            ).classes("flex-1").props("outlined dense")
+                        zoomeye_in = ui.input(
+                            "ZoomEye API key (--zoomeye-key)",
+                            password=True,
+                            password_toggle_button=True,
+                            placeholder="or ZOOMEYE_API_KEY",
+                        ).classes("w-full").props("outlined dense")
+                        with ui.row().classes("w-full flex-wrap gap-4"):
+                            skip_intel = ui.checkbox("Skip all intel (--skip-intel)")
+                            skip_crtsh = ui.checkbox("Skip crt.sh (--skip-crtsh)")
+
+                    with ui.card().classes("w-full rp-card"):
                         ui.label("Pipeline options").classes("rp-section")
                         with ui.row().classes("w-full flex-wrap gap-4"):
                             skip_chaos = ui.checkbox("Skip Chaos (--skip-chaos)")
@@ -511,6 +576,10 @@ def build_ui() -> None:
                             "output": (out_in.value or "").strip() or None,
                             "sarif": (sarif_in.value or "").strip() or None,
                             "chaos_key": (chaos_in.value or "").strip() or None,
+                            "shodan_key": (shodan_in.value or "").strip() or None,
+                            "censys_id": (censys_id_in.value or "").strip() or None,
+                            "censys_secret": (censys_secret_in.value or "").strip() or None,
+                            "zoomeye_key": (zoomeye_in.value or "").strip() or None,
                             "shopify_domain": (shopify_in.value or "").strip() or None,
                             "config": configs,
                             "ignore_hash": hashes,
@@ -522,6 +591,8 @@ def build_ui() -> None:
                             "no_validate": bool(no_validate.value),
                             "headless": bool(headless.value),
                             "no_fail_on_valid": bool(no_fail.value),
+                            "skip_intel": bool(skip_intel.value),
+                            "skip_crtsh": bool(skip_crtsh.value),
                             "concurrency": int(conc_in.value or 10),
                             "gau_threads": int(gau_in.value or 5),
                         }
@@ -564,11 +635,15 @@ def build_ui() -> None:
                         STATE.informational.clear()
                         STATE.exposures.clear()
                         STATE.revealed.clear()
+                        try:
+                            console.clear()
+                        except Exception:
+                            pass
                         status_label.set_text("RUNNING")
                         status_dot.classes(replace="rp-status-dot run")
                         ui.notify("Pipeline started", type="positive")
                         tabs.set_value(tab_console)
-                        update_stats()
+                        update_stats(force=True)
 
                     def stop_scan() -> None:
                         STATE.runner.stop()
@@ -601,7 +676,17 @@ def build_ui() -> None:
                             tools_box.clear()
                             status = rp.probe_tools()
                             extras = {"jsluice": rp.check_tool("jsluice")}
+                            intel = rp.osint_source_status(
+                                shodan_key=shodan_in.value or "",
+                                censys_id=censys_id_in.value or "",
+                                censys_secret=censys_secret_in.value or "",
+                                zoomeye_key=zoomeye_in.value or "",
+                                skip_crtsh=bool(skip_crtsh.value),
+                                skip_intel=bool(skip_intel.value),
+                            )
                             with tools_box:
+                                httpx_bin = rp.resolve_httpx_bin()
+                                python_httpx = rp.python_httpx_on_path()
                                 for name, ok in {**status, **extras}.items():
                                     with ui.row().classes("w-full justify-between"):
                                         ui.label(name).classes("font-mono text-sm")
@@ -613,6 +698,36 @@ def build_ui() -> None:
                                             ui.label("MISSING").classes(
                                                 "text-xs rp-badge-miss"
                                             )
+                                if not status.get("httpx") and python_httpx:
+                                    ui.label(
+                                        f"PATH httpx is the Python client ({python_httpx}), "
+                                        "not ProjectDiscovery. Set HTTPX_BIN or put "
+                                        "$HOME/go/bin ahead of ~/.local/bin."
+                                    ).classes("text-xs text-amber-400")
+                                elif httpx_bin:
+                                    ui.label(httpx_bin).classes(
+                                        "text-xs text-gray-500 font-mono break-all"
+                                    )
+                                ui.separator()
+                                ui.label("PASSIVE INTEL").classes(
+                                    "text-xs text-gray-500 tracking-widest"
+                                )
+                                labels = {
+                                    "shodan": "Shodan",
+                                    "censys": "Censys",
+                                    "zoomeye": "ZoomEye",
+                                    "crtsh": "crt.sh",
+                                }
+                                for key, title in labels.items():
+                                    st = intel.get(key, "off")
+                                    chip = (
+                                        "on" if st in ("key", "env", "on") else "off"
+                                    )
+                                    with ui.row().classes("w-full justify-between"):
+                                        ui.label(title).classes("font-mono text-sm")
+                                        ui.label(st.upper()).classes(
+                                            f"text-xs rp-chip {chip}"
+                                        )
                                 ui.separator()
                                 ui.label(
                                     f"aiohttp  {'ok' if rp.AIOHTTP_AVAILABLE else 'missing'}"
@@ -656,7 +771,7 @@ def build_ui() -> None:
                                 if ln.strip()
                             ]
                             reload_findings()
-                            update_stats()
+                            update_stats(force=True)
                             ui.notify("Workspace loaded", type="positive")
                             tabs.set_value(tab_findings)
 
@@ -664,17 +779,18 @@ def build_ui() -> None:
                             "Load findings", on_click=load_workspace, color="secondary"
                         ).props("outline")
 
-        # ---------------- Console ----------------
+        # Console
         with ui.tab_panel(tab_console):
             with ui.card().classes("w-full rp-card"):
                 with ui.row().classes("w-full justify-between items-center"):
                     ui.label("Console").classes("rp-section w-full")
                     ui.button(
                         "Clear",
-                        on_click=lambda: (STATE.log_lines.clear(), console.set_content("")),
+                        on_click=lambda: (STATE.log_lines.clear(), console.clear()),
                         color="secondary",
                     ).props("flat dense")
-                console = ui.html("", sanitize=False).classes("rp-console w-full")
+                # ui.log appends; rewriting a giant <pre> every tick freezes Firefox
+                console = ui.log(max_lines=250).classes("rp-console w-full")
 
                 stage_labels: Dict[int, Any] = {}
                 with ui.row().classes("gap-3 flex-wrap mt-2"):
@@ -1021,7 +1137,7 @@ def build_ui() -> None:
                         STATE.workspace / "source_map_exposures.json"
                     )
                     render_findings()
-                    update_stats()
+                    update_stats(force=True)
                     ui.notify(
                         f"Loaded {len(STATE.findings)} findings from {STATE.workspace}",
                         type="info",
@@ -1283,38 +1399,64 @@ def build_ui() -> None:
             footer_target = ui.label("").classes("font-mono")
         footer_path = ui.label("").classes("font-mono truncate")
 
-    def update_stats() -> None:
-        ws = STATE.workspace or STATE.runner.output_dir
+    ui_cache: Dict[str, Any] = {}
+    last_stats_at = 0.0
+
+    def _text(el: Any, key: str, value: str) -> None:
+        if ui_cache.get(key) == value:
+            return
+        ui_cache[key] = value
+        el.set_text(value)
+
+    def update_stats(*, force: bool = False) -> None:
+        nonlocal last_stats_at
+        now = time.monotonic()
         running = STATE.runner.running
+        if running and not force and (now - last_stats_at) < 2.5:
+            return
+        last_stats_at = now
+
+        ws = STATE.workspace or STATE.runner.output_dir
         if running:
-            status_label.set_text("RUNNING")
-            status_dot.classes(replace="rp-status-dot run")
-            footer_status.set_text("RUNNING")
+            _text(status_label, "status", "RUNNING")
+            if ui_cache.get("dot") != "run":
+                ui_cache["dot"] = "run"
+                status_dot.classes(replace="rp-status-dot run")
+            _text(footer_status, "footer_status", "RUNNING")
         elif STATE.runner.exit_code is not None:
             code = STATE.runner.exit_code
-            status_label.set_text(f"DONE  exit {code}")
-            status_dot.classes(
-                replace="rp-status-dot live" if code == 0 else "rp-status-dot dead"
-            )
-            footer_status.set_text(f"DONE  {code}")
+            _text(status_label, "status", f"DONE  exit {code}")
+            dot = "live" if code == 0 else "dead"
+            if ui_cache.get("dot") != dot:
+                ui_cache["dot"] = dot
+                status_dot.classes(
+                    replace="rp-status-dot live" if code == 0 else "rp-status-dot dead"
+                )
+            _text(footer_status, "footer_status", f"DONE  {code}")
         else:
-            status_label.set_text("IDLE")
-            status_dot.classes(replace="rp-status-dot")
-            footer_status.set_text("IDLE")
+            _text(status_label, "status", "IDLE")
+            if ui_cache.get("dot") != "idle":
+                ui_cache["dot"] = "idle"
+                status_dot.classes(replace="rp-status-dot")
+            _text(footer_status, "footer_status", "IDLE")
 
         if STATE.domain:
-            footer_target.set_text(STATE.domain)
+            _text(footer_target, "target", STATE.domain)
         if not ws:
-            stats_html.set_content("")
-            footer_path.set_text("")
+            if ui_cache.get("stats"):
+                ui_cache["stats"] = ""
+                stats_html.set_content("")
+            _text(footer_path, "path", "")
             return
         ws = Path(ws)
-        footer_path.set_text(str(ws))
+        _text(footer_path, "path", str(ws))
         subs = count_lines(ws / "subdomains.txt")
         live = count_lines(ws / "live_hosts.txt")
         urls = count_lines(ws / "files_to_scan.txt")
-        findings_n = len(STATE.findings) or len(load_json_list(ws / "findings.json"))
-        stats_html.set_content(
+        findings_n = len(STATE.findings)
+        if not running and findings_n == 0:
+            findings_n = len(load_json_list(ws / "findings.json"))
+        html = (
             "<div class='rp-stat-grid'>"
             f"<div class='rp-stat'><div class='k'>Subs</div><div class='v'>{subs}</div></div>"
             f"<div class='rp-stat'><div class='k'>Live</div><div class='v'>{live}</div></div>"
@@ -1322,6 +1464,9 @@ def build_ui() -> None:
             f"<div class='rp-stat'><div class='k'>Keys</div><div class='v'>{findings_n}</div></div>"
             "</div>"
         )
+        if ui_cache.get("stats") != html:
+            ui_cache["stats"] = html
+            stats_html.set_content(html)
 
     def detect_stage(line: str) -> None:
         m = re.search(r"\[(\d)/6\]", line)
@@ -1343,16 +1488,16 @@ def build_ui() -> None:
         lines = STATE.runner.drain_logs()
         if lines:
             STATE.log_lines.extend(lines)
-            if len(STATE.log_lines) > 5000:
-                STATE.log_lines = STATE.log_lines[-4000:]
-            # Keep console readable
-            text = "\n".join(STATE.log_lines[-800:])
-            escaped = (
-                text.replace("&", "&amp;")
-                .replace("<", "&lt;")
-                .replace(">", "&gt;")
-            )
-            console.set_content(f"<pre style='margin:0'>{escaped}</pre>")
+            if len(STATE.log_lines) > 2000:
+                STATE.log_lines = STATE.log_lines[-1200:]
+            # One websocket payload per tick — never rewrite the whole console
+            dropped = 0
+            if len(lines) > 60:
+                dropped = len(lines) - 40
+                lines = lines[-40:]
+            if dropped:
+                console.push(f"… dropped {dropped} lines this tick")
+            console.push("\n".join(lines))
             for ln in lines:
                 detect_stage(ln)
 
@@ -1385,27 +1530,95 @@ def build_ui() -> None:
                     build_ui.render_history()  # type: ignore[attr-defined]
                 except Exception:
                     pass
-            update_stats()
+            update_stats(force=True)
 
-    ui.timer(0.4, on_tick)
+    ui.timer(1.0, on_tick)
+
+
+def _quiet_interrupt_hook(exc_type, exc, tb) -> None:
+    if issubclass(exc_type, (KeyboardInterrupt, asyncio.CancelledError, SystemExit)):
+        return
+    sys.__excepthook__(exc_type, exc, tb)
+
+
+def _stop_pipeline_quietly() -> None:
+    try:
+        STATE.runner.stop()
+    except Exception:
+        pass
+
+
+class _DropNiceguiBanner:
+    """Hide NiceGUI's 'ready to go' line; keep our own startup prints."""
+
+    def __init__(self, stream):
+        self._stream = stream
+
+    def write(self, data):
+        if isinstance(data, str) and data.startswith("NiceGUI ready to go"):
+            return len(data)
+        return self._stream.write(data)
+
+    def flush(self):
+        return self._stream.flush()
+
+    def __getattr__(self, name):
+        return getattr(self._stream, name)
+
+
+def _ui_run(**kwargs: Any) -> None:
+    """Call ui.run with only kwargs this NiceGUI version accepts."""
+    params = inspect.signature(ui.run).parameters
+    accepted = {
+        key: value
+        for key, value in kwargs.items()
+        if key in params and params[key].kind != inspect.Parameter.VAR_KEYWORD
+    }
+    wrap_stdout = "show_welcome_message" not in params
+    old = sys.stdout
+    if wrap_stdout:
+        sys.stdout = _DropNiceguiBanner(old)
+    try:
+        ui.run(**accepted)
+    finally:
+        sys.stdout = old
 
 
 def main() -> None:
+    sys.excepthook = _quiet_interrupt_hook
     host = os.environ.get("RECONPIPE_GUI_HOST", "127.0.0.1")
     port = int(os.environ.get("RECONPIPE_GUI_PORT", "8088"))
-    show = os.environ.get("RECONPIPE_GUI_SHOW", "1").strip() not in {"0", "false", "False"}
+    # Default off: NiceGUI's show=True calls webbrowser.open() and launches
+    # (or thrashes) Firefox even when you already have a browser open.
+    show = os.environ.get("RECONPIPE_GUI_SHOW", "0").strip() in {"1", "true", "True"}
     print(f"ReconPipe GUI → http://{host}:{port}")
     print("Press Ctrl+C to stop.")
-    ui.run(
-        title="ReconPipe",
-        host=host,
-        port=port,
-        reload=False,
-        show=show,
-        favicon="🔑",
-    )
+    try:
+        _ui_run(
+            title="ReconPipe",
+            host=host,
+            port=port,
+            reload=False,
+            show=show,
+            favicon="🔑",
+            dark=True,
+            show_welcome_message=False,
+            uvicorn_logging_level="warning",
+            # NiceGUI default is 0.1s; that binding loop is a Firefox CPU hog.
+            binding_refresh_interval=1.0,
+        )
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        pass
+    finally:
+        _stop_pipeline_quietly()
+        print("Stopped.")
 
 
 if __name__ in {"__main__", "__mp_main__"}:
-    build_ui()
-    main()
+    try:
+        build_ui()
+        main()
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        _stop_pipeline_quietly()
+        print("Stopped.")
+        raise SystemExit(0) from None

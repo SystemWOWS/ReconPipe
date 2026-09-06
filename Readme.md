@@ -45,8 +45,10 @@ pip3 install waymore               # recommended passive archives
 
 ```bash
 python3 reconpipegui.py
+# Then open http://127.0.0.1:8088 in a browser (it does not auto-launch Firefox).
 # Override bind address/port if needed:
 #   RECONPIPE_GUI_HOST=127.0.0.1 RECONPIPE_GUI_PORT=8088 python3 reconpipegui.py
+# Auto-open a tab: RECONPIPE_GUI_SHOW=1 python3 reconpipegui.py
 ```
 
 Opens a localhost-only NiceGUI app with:
@@ -68,6 +70,11 @@ go install -v github.com/projectdiscovery/chaos-client/cmd/chaos@latest
 
 # Live host filtering
 go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest
+# NiceGUI/pip also ship a Python CLI named `httpx`. ReconPipe ignores it.
+# If preflight still shows httpx MISSING after `go install`:
+#   export HTTPX_BIN="$HOME/go/bin/httpx"
+#   # or put $HOME/go/bin before ~/.local/bin
+# Kali: apt install httpx-toolkit   # binary name: httpx-toolkit
 
 # PRIMARY: Active crawl + JS endpoint parsing
 go install github.com/projectdiscovery/katana/cmd/katana@latest
@@ -97,6 +104,23 @@ curl -sSfL https://raw.githubusercontent.com/trufflesecurity/trufflehog/main/scr
 export CHAOS_KEY="your_key_here"   # get from https://cloud.projectdiscovery.io
 # or pass --chaos-key on the CLI
 ```
+
+### Passive intel (optional)
+
+After Chaos, ReconPipe can merge extra hostnames from Shodan, Censys, ZoomEye, and crt.sh. Missing keys are skipped; a source error never aborts the scan.
+
+```bash
+export SHODAN_API_KEY="..."
+export CENSYS_API_ID="..."
+export CENSYS_API_SECRET="..."
+export ZOOMEYE_API_KEY="..."
+
+python3 reconpipe.py -d target.com
+python3 reconpipe.py -d target.com --skip-intel      # Chaos only
+python3 reconpipe.py -d target.com --skip-crtsh      # skip the no-key CT lookup
+```
+
+The GUI **Passive intel** panel maps to the same flags. crt.sh needs no key; the others do.
 
 ---
 
