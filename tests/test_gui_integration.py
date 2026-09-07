@@ -136,6 +136,20 @@ def test_gui_module_compiles_and_helpers():
     hits = mod.guess_key_types("sk_live_abcdefghijklmnopqrstuvwx")
     assert "stripe_live" in hits
     assert "github_pat" in mod.validator_type_options()
+    assert mod.want_native_window(browser_flag=True) is False
+    assert mod.want_native_window(native_flag=True) is True
+    prev_native = os.environ.get("RECONPIPE_GUI_NATIVE")
+    os.environ["RECONPIPE_GUI_NATIVE"] = "0"
+    try:
+        assert mod.want_native_window() is False
+        args = mod.parse_gui_args(["--browser", "--port", "9999"])
+        assert args.browser and args.port == 9999 and not args.native
+    finally:
+        if prev_native is None:
+            os.environ.pop("RECONPIPE_GUI_NATIVE", None)
+        else:
+            os.environ["RECONPIPE_GUI_NATIVE"] = prev_native
+    assert (ROOT / "reconpipe-gui").is_file()
     with tempfile.TemporaryDirectory() as td:
         p = Path(td) / "hosts.txt"
         p.write_text("a.example.com\nb.example.com\n", encoding="utf-8")
@@ -166,6 +180,7 @@ def test_gui_server_smoke():
     env["RECONPIPE_GUI_HOST"] = "127.0.0.1"
     env["RECONPIPE_GUI_PORT"] = str(port)
     env["RECONPIPE_GUI_SHOW"] = "0"
+    env["RECONPIPE_GUI_NATIVE"] = "0"
 
     proc = subprocess.Popen(
         [sys.executable, str(ROOT / "reconpipegui.py")],

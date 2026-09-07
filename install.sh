@@ -218,6 +218,8 @@ install_system_packages() {
     local chromium_pkg=""
     local chromium_driver_pkg=""
 
+    local webview_gtk=""
+
     case "$PKG_MGR" in
         apt)
             base_pkgs=(curl wget git python3 python3-pip python3-venv unzip ca-certificates)
@@ -227,27 +229,50 @@ install_system_packages() {
             else
                 base_pkgs+=(gcc g++ make)
             fi
+            # pywebview GTK backend (desktop GUI, not Firefox)
+            if pkg_available python3-gi; then
+                base_pkgs+=(python3-gi)
+            fi
+            if pkg_available python3-gi-cairo; then
+                base_pkgs+=(python3-gi-cairo)
+            fi
+            if pkg_available gir1.2-gtk-3.0; then
+                base_pkgs+=(gir1.2-gtk-3.0)
+            fi
             go_pkg="$(resolve_first_available golang-go golang go || true)"
             chromium_pkg="$(resolve_first_available chromium chromium-browser || true)"
             chromium_driver_pkg="$(resolve_first_available chromium-driver chromedriver || true)"
+            webview_gtk="$(resolve_first_available gir1.2-webkit2-4.1 gir1.2-webkit2-4.0 || true)"
             ;;
         dnf|yum)
             base_pkgs=(curl wget git python3 python3-pip unzip ca-certificates gcc gcc-c++ make)
+            if pkg_available python3-gobject; then
+                base_pkgs+=(python3-gobject)
+            fi
             go_pkg="$(resolve_first_available golang go || true)"
             chromium_pkg="$(resolve_first_available chromium || true)"
             chromium_driver_pkg="$(resolve_first_available chromedriver || true)"
+            webview_gtk="$(resolve_first_available webkit2gtk4.1 webkit2gtk4.0 webkit2gtk3 || true)"
             ;;
         pacman)
             base_pkgs=(curl wget git python python-pip unzip ca-certificates base-devel)
+            if pkg_available python-gobject; then
+                base_pkgs+=(python-gobject)
+            fi
+            if pkg_available gtk3; then
+                base_pkgs+=(gtk3)
+            fi
             go_pkg="$(resolve_first_available go || true)"
             chromium_pkg="$(resolve_first_available chromium || true)"
             chromium_driver_pkg="$(resolve_first_available chromedriver || true)"
+            webview_gtk="$(resolve_first_available webkit2gtk-4.1 webkit2gtk || true)"
             ;;
         zypper)
             base_pkgs=(curl wget git python3 python3-pip unzip ca-certificates gcc gcc-c++ make)
             go_pkg="$(resolve_first_available go golang || true)"
             chromium_pkg="$(resolve_first_available chromium || true)"
             chromium_driver_pkg="$(resolve_first_available chromedriver || true)"
+            webview_gtk="$(resolve_first_available webkit2gtk-4_1-0 libwebkit2gtk-4_0-37 || true)"
             ;;
     esac
 
@@ -255,6 +280,7 @@ install_system_packages() {
     [[ -n "$go_pkg" ]] && to_install+=("$go_pkg")
     [[ -n "$chromium_pkg" ]] && to_install+=("$chromium_pkg")
     [[ -n "$chromium_driver_pkg" ]] && to_install+=("$chromium_driver_pkg")
+    [[ -n "$webview_gtk" ]] && to_install+=("$webview_gtk")
 
     log "Installing: ${to_install[*]}"
     if pkg_install "${to_install[@]}"; then
@@ -394,11 +420,13 @@ install_python_deps() {
             install_pip_pkg aiohttp
             install_pip_pkg PyYAML
             install_pip_pkg nicegui
+            install_pip_pkg pywebview
         fi
     else
         install_pip_pkg aiohttp
         install_pip_pkg PyYAML
         install_pip_pkg nicegui
+        install_pip_pkg pywebview
     fi
 
     install_pip_pkg waymore
@@ -559,6 +587,38 @@ print_api_key_hint() {
     fi
 }
 
+install_gui_launcher() {
+    header "Desktop GUI launcher"
+    local launcher="$SHARED_BIN/reconpipe-gui"
+    local tmp
+    tmp="$(mktemp)"
+    cat > "$tmp" <<EOF
+#!/usr/bin/env bash
+cd "$SCRIPT_DIR"
+exec python3 "$SCRIPT_DIR/reconpipegui.py" "\$@"
+EOF
+    $SUDO install -m 0755 "$tmp" "$launcher"
+    rm -f "$tmp"
+    success "Launcher: $launcher"
+
+    local apps="$REAL_HOME/.local/share/applications"
+    run_as_user mkdir -p "$apps"
+    local desktop="$apps/reconpipe.desktop"
+    run_as_user tee "$desktop" >/dev/null <<EOF
+[Desktop Entry]
+Type=Application
+Name=ReconPipe
+Comment=API key leak hunter (desktop GUI)
+Exec=$launcher
+Path=$SCRIPT_DIR
+Terminal=false
+Categories=Security;Development;
+StartupNotify=true
+EOF
+    own_by_user "$desktop"
+    success "Menu entry: $desktop"
+}
+
 # Main
 detect_os
 install_system_packages
@@ -567,6 +627,7 @@ install_python_deps
 install_go_tools
 install_trufflehog
 link_tools_system_wide
+install_gui_launcher
 verify_installs
 print_api_key_hint
 
@@ -584,7 +645,8 @@ echo -e "  Distro:             ${CYAN}$DISTRO_NAME${RESET}"
 echo -e "  Installed for:      ${CYAN}$REAL_USER${RESET}  ${DIM}($GOBIN, linked into $SHARED_BIN)${RESET}"
 echo -e "  Reload your shell:  ${CYAN}source ~/.bashrc${RESET}  (or ~/.zshrc)"
 echo -e "  Run the pipeline:   ${CYAN}python3 reconpipe.py -d target.com${RESET}"
-echo -e "  Launch the GUI:     ${CYAN}python3 reconpipegui.py${RESET}"
-echo -e "                      ${DIM}(opens http://127.0.0.1:8088 — localhost only)${RESET}"
+echo -e "  Launch the GUI:     ${CYAN}reconpipe-gui${RESET}  ${DIM}(desktop window, not Firefox)${RESET}"
+echo -e "                      ${DIM}or: python3 $SCRIPT_DIR/reconpipegui.py${RESET}"
+echo -e "  Browser fallback:   ${CYAN}python3 reconpipegui.py --browser${RESET}"
 echo -e "${CYAN}══════════════════════════════════════════════════════════${RESET}"
 echo ""

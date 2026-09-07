@@ -2,8 +2,12 @@
 """
 ReconPipe Professional GUI — NiceGUI frontend for reconpipe.py
 
-Linux-ready localhost web UI:
+Linux desktop window (default when a display is available):
   python3 reconpipegui.py
+  ./reconpipe-gui
+
+Localhost browser fallback:
+  python3 reconpipegui.py --browser
 
 Exposes every CLI option, streams pipeline output, browses artifacts,
 and re-tests findings with ReconPipe's configured validators only.
@@ -11,6 +15,7 @@ and re-tests findings with ReconPipe's configured validators only.
 
 from __future__ import annotations
 
+import argparse
 import inspect
 import json
 import os
@@ -1490,16 +1495,22 @@ def build_ui() -> None:
             STATE.log_lines.extend(lines)
             if len(STATE.log_lines) > 2000:
                 STATE.log_lines = STATE.log_lines[-1200:]
-            # One websocket payload per tick — never rewrite the whole console
+            # Keep websocket frames small — NiceGUI drops the connection on
+            # "Message too long" if a console dump exceeds the WS limit.
             dropped = 0
-            if len(lines) > 60:
-                dropped = len(lines) - 40
-                lines = lines[-40:]
+            if len(lines) > 30:
+                dropped = len(lines) - 20
+                lines = lines[-20:]
+            text = "\n".join(lines)
+            if len(text) > 3500:
+                text = text[-3500:]
+                dropped += 1
             if dropped:
                 console.push(f"… dropped {dropped} lines this tick")
-            console.push("\n".join(lines))
+            console.push(text)
             for ln in lines:
-                detect_stage(ln)
+                if "[/" in ln or "/6]" in ln:
+                    detect_stage(ln)
 
         if STATE.runner.running:
             update_stats()
@@ -1584,29 +1595,127 @@ def _ui_run(**kwargs: Any) -> None:
         sys.stdout = old
 
 
+def native_backend_available() -> bool:
+    """True if pywebview can be imported (GTK WebKit on Linux)."""
+    try:
+        import webview  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
+def has_graphical_display() -> bool:
+    if os.name == "nt":
+        return True
+    return bool(os.environ.get("WAYLAND_DISPLAY") or os.environ.get("DISPLAY"))
+
+
+def want_native_window(
+    native_flag: bool = False,
+    browser_flag: bool = False,
+) -> bool:
+    """
+    Desktop window vs Firefox/localhost.
+    Env RECONPIPE_GUI_NATIVE=0 forces browser (used by tests).
+    """
+    if browser_flag:
+        return False
+    if native_flag:
+        return True
+    raw = (os.environ.get("RECONPIPE_GUI_NATIVE") or "").strip().lower()
+    if raw in {"0", "false", "no", "browser", "off"}:
+        return False
+    if raw in {"1", "true", "yes", "native", "on"}:
+        return True
+    return has_graphical_display()
+
+
+def parse_gui_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="reconpipegui",
+        description="ReconPipe GUI — desktop window by default (no Firefox).",
+    )
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
+        "--native",
+        action="store_true",
+        help="Open a desktop window (WebKit), not Firefox",
+    )
+    mode.add_argument(
+        "--browser",
+        action="store_true",
+        help="Serve on localhost for a web browser",
+    )
+    parser.add_argument("--host", default=None, help="Bind address (browser mode)")
+    parser.add_argument("--port", type=int, default=None, help="Bind port")
+    args, unknown = parser.parse_known_args(argv)
+    if argv is None:
+        sys.argv[:] = [sys.argv[0], *unknown]
+    return args
+
+
+def _native_install_hint() -> str:
+    return (
+        "Native window needs pywebview + WebKit:\n"
+        "  pip3 install pywebview\n"
+        "  sudo apt install python3-gi python3-gi-cairo gir1.2-gtk-3.0 gir1.2-webkit2-4.1"
+    )
+
+
 def main() -> None:
     sys.excepthook = _quiet_interrupt_hook
-    host = os.environ.get("RECONPIPE_GUI_HOST", "127.0.0.1")
-    port = int(os.environ.get("RECONPIPE_GUI_PORT", "8088"))
-    # Default off: NiceGUI's show=True calls webbrowser.open() and launches
-    # (or thrashes) Firefox even when you already have a browser open.
+    cli = parse_gui_args()
+    host = cli.host or os.environ.get("RECONPIPE_GUI_HOST", "127.0.0.1")
+    port = int(cli.port or os.environ.get("RECONPIPE_GUI_PORT", "8088"))
     show = os.environ.get("RECONPIPE_GUI_SHOW", "0").strip() in {"1", "true", "True"}
-    print(f"ReconPipe GUI → http://{host}:{port}")
-    print("Press Ctrl+C to stop.")
+
+    native = want_native_window(cli.native, cli.browser)
+    if native and not native_backend_available():
+        if cli.native or (os.environ.get("RECONPIPE_GUI_NATIVE") or "").strip().lower() in {
+            "1", "true", "yes", "native", "on",
+        }:
+            print(_native_install_hint(), file=sys.stderr)
+            raise SystemExit(2)
+        print("pywebview not installed — using localhost instead of a desktop window.", file=sys.stderr)
+        print(_native_install_hint(), file=sys.stderr)
+        native = False
+
+    if native:
+        show = False
+        print("ReconPipe GUI — desktop window (not Firefox)")
+        print("Close the window or press Ctrl+C to stop.")
+    else:
+        print(f"ReconPipe GUI → http://{host}:{port}")
+        print("Press Ctrl+C to stop.")
+
+    # Official NiceGUI desktop app: native=True / window_size
+    # https://nicegui.io/documentation/run#ui_run
+    run_kwargs: Dict[str, Any] = dict(
+        title="ReconPipe",
+        host="127.0.0.1" if native else host,
+        reload=False,
+        show=show,
+        native=native,
+        favicon="🔑",
+        dark=True,
+        prod_js=True,
+        show_welcome_message=False,
+        uvicorn_logging_level="warning",
+        # Default is 0.1s; 2s is far easier on WebKit during long scans.
+        binding_refresh_interval=2.0,
+        # Do not replay a huge backlog after a hitch (default 1000 can crash WS).
+        message_history_length=0,
+        reconnect_timeout=8.0,
+    )
+    if native:
+        run_kwargs["window_size"] = (1440, 900)
+        run_kwargs["frameless"] = False
+        # Native mode picks a free port itself; a busy 8088 would fail to start.
+    else:
+        run_kwargs["port"] = port
+
     try:
-        _ui_run(
-            title="ReconPipe",
-            host=host,
-            port=port,
-            reload=False,
-            show=show,
-            favicon="🔑",
-            dark=True,
-            show_welcome_message=False,
-            uvicorn_logging_level="warning",
-            # NiceGUI default is 0.1s; that binding loop is a Firefox CPU hog.
-            binding_refresh_interval=1.0,
-        )
+        _ui_run(**run_kwargs)
     except (KeyboardInterrupt, asyncio.CancelledError):
         pass
     finally:

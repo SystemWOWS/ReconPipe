@@ -17,8 +17,9 @@ Patterns, validators, and confidence scores load from `config.yaml` (overridable
 pip3 install -r requirements.txt
 python3 reconpipe.py -d target.com
 
-# Professional GUI (localhost NiceGUI — all CLI options + in-app key re-test)
+# Professional GUI (desktop window — not Firefox)
 python3 reconpipegui.py
+# or: ./reconpipe-gui
 ```
 
 Or on Linux (Debian, Ubuntu, Kali, Fedora, Arch, openSUSE, and derivatives), install system packages + Go tools + Python deps with:
@@ -44,14 +45,24 @@ pip3 install waymore               # recommended passive archives
 ### Professional GUI
 
 ```bash
-python3 reconpipegui.py
-# Then open http://127.0.0.1:8088 in a browser (it does not auto-launch Firefox).
-# Override bind address/port if needed:
-#   RECONPIPE_GUI_HOST=127.0.0.1 RECONPIPE_GUI_PORT=8088 python3 reconpipegui.py
-# Auto-open a tab: RECONPIPE_GUI_SHOW=1 python3 reconpipegui.py
+python3 reconpipegui.py          # desktop window (WebKit) — does not use Firefox
+./reconpipe-gui                  # same, via launcher script
+python3 reconpipegui.py --browser
+# Bind address/port (browser mode, or the hidden local server):
+#   RECONPIPE_GUI_HOST=127.0.0.1 RECONPIPE_GUI_PORT=8088 python3 reconpipegui.py --browser
+# Force browser even on a desktop: RECONPIPE_GUI_NATIVE=0
 ```
 
-Opens a localhost-only NiceGUI app with:
+Opens a **desktop window** by default when a display is available (pywebview + WebKitGTK). That keeps the UI out of Firefox so a long URL-discovery run cannot freeze your browser. Linux also needs:
+
+```bash
+pip3 install pywebview
+sudo apt install python3-gi python3-gi-cairo gir1.2-gtk-3.0 gir1.2-webkit2-4.1
+```
+
+(`install.sh` installs these.) Use `--browser` if you really want the old localhost tab.
+
+The window includes:
 
 - Every CLI option (domain, files, skips, concurrency, Chaos key, Shopify host, config overlays, ignore hashes, SARIF, fail-on-valid, headless, …)
 - Tool preflight status
@@ -60,7 +71,7 @@ Opens a localhost-only NiceGUI app with:
 - **Test with configured validator** — re-runs ReconPipe’s existing `config.yaml` validators only
 - Artifact preview for `findings.json`, `valid_keys.json`, `summary.txt`, SARIF, etc.
 
-Do not expose the GUI beyond localhost on untrusted networks — result files can contain live secrets.
+Do not expose `--browser` mode beyond localhost on untrusted networks — result files can contain live secrets.
 
 ### Go tools (ProjectDiscovery + community stack)
 
