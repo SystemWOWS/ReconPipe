@@ -136,6 +136,18 @@ def test_gui_module_compiles_and_helpers():
     hits = mod.guess_key_types("sk_live_abcdefghijklmnopqrstuvwx")
     assert "stripe_live" in hits
     assert "github_pat" in mod.validator_type_options()
+    assert "google_api" in mod.validator_type_options()
+    assert "firebase_key" in mod.validator_type_options()
+    assert "mailchimp" in mod.validator_type_options()
+    runner = mod.PipelineRunner()
+    runner._offer_log("https://cdn.example.com/app.js?x=1")
+    runner._offer_log("found endpoint /api/v1/users")
+    runner._offer_log("[gui] Started: test")
+    runner._offer_log("  [3/6] URL DISCOVERY")
+    drained = runner.drain_logs()
+    assert "[gui] Started: test" in drained
+    assert any("/6]" in ln for ln in drained)
+    assert not any(ln.startswith("https://") for ln in drained)
     assert mod.want_native_window(browser_flag=True) is False
     assert mod.want_native_window(native_flag=True) is True
     prev_native = os.environ.get("RECONPIPE_GUI_NATIVE")

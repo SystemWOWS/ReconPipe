@@ -129,6 +129,16 @@ class SarifHelperTests(unittest.TestCase):
         out.unlink(missing_ok=True)
 
 
+class TrufflehogCmdTests(unittest.TestCase):
+    def test_filesystem_uses_positional_path(self):
+        cmd = r.trufflehog_filesystem_cmd("/tmp/downloaded_files")
+        self.assertEqual(cmd[0], "trufflehog")
+        self.assertIn("filesystem", cmd)
+        self.assertIn("/tmp/downloaded_files", cmd)
+        self.assertNotIn("--path", cmd)
+        self.assertEqual(cmd[-1], "/tmp/downloaded_files")
+
+
 def json_load(path: Path):
     import json
 

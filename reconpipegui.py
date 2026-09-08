@@ -190,7 +190,7 @@ class PipelineRunner:
     def __init__(self) -> None:
         self.proc: Optional[subprocess.Popen] = None
         self.thread: Optional[threading.Thread] = None
-        self.log_q: "queue.Queue[str]" = queue.Queue()
+        self.log_q: "queue.Queue[str]" = queue.Queue(maxsize=400)
         self.running = False
         self.exit_code: Optional[int] = None
         self.started_at: Optional[str] = None
@@ -243,26 +243,35 @@ class PipelineRunner:
             self.log_q.put(f"[gui] Started: {' '.join(cmd)}")
             self.log_q.put(f"[gui] Output directory: {self.output_dir}")
 
+    def _offer_log(self, line: str) -> None:
+        text = strip_ansi((line or "").rstrip("\n"))
+        if not rp.console_keep_line(text):
+            return
+        try:
+            self.log_q.put_nowait(text)
+        except queue.Full:
+            return
+
     def _reader(self) -> None:
         assert self.proc is not None
         try:
             assert self.proc.stdout is not None
             for line in self.proc.stdout:
-                self.log_q.put(strip_ansi(line.rstrip("\n")))
+                self._offer_log(line)
         except Exception as exc:
-            self.log_q.put(f"[gui] Log reader error: {exc}")
+            self._offer_log(f"[gui] Log reader error: {exc}")
         finally:
             code = self.proc.wait()
             self.exit_code = code
             self.finished_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             self.running = False
-            self.log_q.put(f"[gui] Pipeline finished with exit code {code}")
+            self._offer_log(f"[gui] Pipeline finished with exit code {code}")
 
     def stop(self) -> None:
         with self._lock:
             if not self.proc or not self.running:
                 return
-            self.log_q.put("[gui] Stopping pipeline…")
+            self._offer_log("[gui] Stopping pipeline…")
             try:
                 if os.name == "nt":
                     self.proc.terminate()
@@ -276,7 +285,7 @@ class PipelineRunner:
 
     def drain_logs(self) -> List[str]:
         lines: List[str] = []
-        while True:
+        while len(lines) < 40:
             try:
                 lines.append(self.log_q.get_nowait())
             except queue.Empty:
@@ -795,7 +804,7 @@ def build_ui() -> None:
                         color="secondary",
                     ).props("flat dense")
                 # ui.log appends; rewriting a giant <pre> every tick freezes Firefox
-                console = ui.log(max_lines=250).classes("rp-console w-full")
+                console = ui.log(max_lines=120).classes("rp-console w-full")
 
                 stage_labels: Dict[int, Any] = {}
                 with ui.row().classes("gap-3 flex-wrap mt-2"):
@@ -1157,8 +1166,10 @@ def build_ui() -> None:
             with ui.card().classes("w-full rp-card"):
                 ui.label("Key Tester").classes("rp-section")
                 ui.label(
-                    "Paste a discovered API key and run ReconPipe’s configured provider "
-                    "check. LIVE means the credential is accepted by the provider API."
+                    "Paste a discovered API key and run the configured provider check "
+                    "(keyhacks-style). Google AIza keys are sprayed across cheap Maps JSON, "
+                    "YouTube, and Gemini models-list probes — not billed image APIs. "
+                    "LIVE means the credential is accepted."
                 ).classes("text-xs text-gray-500 mb-3")
 
                 with ui.row().classes("w-full gap-2 flex-wrap"):
@@ -1284,11 +1295,17 @@ def build_ui() -> None:
                         f'<div class="rp-verdict {cls}">{label}</div>'
                     )
                     stamp = datetime.now().strftime("%H:%M:%S")
+                    services = result.get("google_services")
+                    extra = ""
+                    if isinstance(services, dict) and services:
+                        extra = "\nservices=" + ", ".join(
+                            f"{k}:{v}" for k, v in services.items()
+                        )
                     tester_detail.set_text(
                         f"[{stamp}] type={result.get('type')}\n"
                         f"valid={result.get('valid')}  validated={result.get('validated')}  "
                         f"http={result.get('status_code')}\n"
-                        f"note={note}"
+                        f"note={note}{extra}"
                     )
                     footer_status.set_text(f"LAST TEST  {label}")
                     ui.notify(f"Key test: {label}", type="positive" if valid else "warning")
@@ -1493,21 +1510,15 @@ def build_ui() -> None:
         lines = STATE.runner.drain_logs()
         if lines:
             STATE.log_lines.extend(lines)
-            if len(STATE.log_lines) > 2000:
-                STATE.log_lines = STATE.log_lines[-1200:]
+            if len(STATE.log_lines) > 400:
+                STATE.log_lines = STATE.log_lines[-300:]
             # Keep websocket frames small — NiceGUI drops the connection on
             # "Message too long" if a console dump exceeds the WS limit.
-            dropped = 0
-            if len(lines) > 30:
-                dropped = len(lines) - 20
-                lines = lines[-20:]
-            text = "\n".join(lines)
-            if len(text) > 3500:
-                text = text[-3500:]
-                dropped += 1
-            if dropped:
-                console.push(f"… dropped {dropped} lines this tick")
-            console.push(text)
+            if lines:
+                text = "\n".join(lines)
+                if len(text) > 1500:
+                    text = text[-1500:]
+                console.push(text)
             for ln in lines:
                 if "[/" in ln or "/6]" in ln:
                     detect_stage(ln)

@@ -89,6 +89,7 @@ class ValidatorSpec:
     twilio_pair: bool = False
     slack_webhook_probe: bool = False
     webhook: bool = False
+    google_api_spray: bool = False
 
     def note_for(self, status: int, default: str = "") -> str:
         if status in self.notes:
@@ -317,8 +318,46 @@ load_default_config()
 
 
 # Logging
+_FIND_LOGGED = 0
+_FIND_LOG_CAP = 12
+CONSOLE_KEEP_RE = re.compile(
+    r"\[(?:\d)/6\]|\[(?:gui|[+*!\-]|FIND|VALID)\]|PIPELINE COMPLETE|ReconPipe GUI",
+    re.I,
+)
+
+
+def reset_log_counters() -> None:
+    global _FIND_LOGGED
+    _FIND_LOGGED = 0
+
+
+def verbose_logs() -> bool:
+    return (os.environ.get("RECONPIPE_VERBOSE") or "").strip() in {"1", "true", "True", "yes"}
+
+
+def console_keep_line(line: str) -> bool:
+    """True if a pipeline line is worth showing in the GUI (stage/status only)."""
+    text = (line or "").strip()
+    if not text:
+        return False
+    if verbose_logs():
+        return True
+    return bool(CONSOLE_KEEP_RE.search(text))
+
+
 def log(msg: str, level: str = "info") -> None:
+    global _FIND_LOGGED
     ts = datetime.now().strftime("%H:%M:%S")
+    if level == "find" and not verbose_logs():
+        _FIND_LOGGED += 1
+        if _FIND_LOGGED == _FIND_LOG_CAP + 1:
+            print(
+                f"{C.DIM}[{ts}]{C.RESET} {C.YELLOW}[FIND]{C.RESET} "
+                f"… further hits written to findings.json (RECONPIPE_VERBOSE=1 for all)"
+            )
+            return
+        if _FIND_LOGGED > _FIND_LOG_CAP:
+            return
     icons = {
         "info":    f"{C.DIM}[{ts}]{C.RESET} {C.BLUE}[*]{C.RESET}",
         "success": f"{C.DIM}[{ts}]{C.RESET} {C.GREEN}[+]{C.RESET}",
@@ -490,6 +529,161 @@ def probe_tools(tools: Optional[List[str]] = None) -> Dict[str, bool]:
     """Return {tool: available} for pipeline binaries (and optional extras)."""
     names = tools or PIPELINE_TOOLS
     return {name: check_tool(name) for name in names}
+
+
+def help_has_flag(blob: str, flag: str) -> bool:
+    """True if CLI help documents a flag. Empty blob → assume a modern CLI."""
+    token = (flag or "").lstrip("-").lower()
+    if not token:
+        return False
+    if not (blob or "").strip():
+        return True
+    text = blob.lower()
+    if "no such option" in text and token in text and "usage: httpx [options] url" in text:
+        return False
+    return bool(
+        re.search(
+            rf"(?:^|[\s,|])-{{1,2}}{re.escape(token)}(?:\s|,|$|=|/)",
+            text,
+            re.M,
+        )
+    )
+
+
+def _extend_if(cmd: List[str], blob: str, flag: str, *values: str) -> None:
+    if help_has_flag(blob, flag):
+        cmd.append(flag)
+        cmd.extend(values)
+
+
+def build_chaos_cmd(
+    domain: str,
+    output_file: str,
+    api_key: str = "",
+    help_blob: Optional[str] = None,
+) -> List[str]:
+    blob = help_blob if help_blob is not None else _cmd_blob("chaos", "-h")
+    cmd = ["chaos"]
+    _extend_if(cmd, blob, "-d", domain)
+    _extend_if(cmd, blob, "-o", output_file)
+    _extend_if(cmd, blob, "-silent")
+    if api_key:
+        _extend_if(cmd, blob, "-key", api_key)
+    if "-d" not in cmd:
+        cmd.extend(["-d", domain])
+    if "-o" not in cmd:
+        cmd.extend(["-o", output_file])
+    return cmd
+
+
+def build_katana_cmd(
+    list_file: str,
+    output_file: str,
+    *,
+    headless: bool = False,
+    jsl: bool = False,
+    help_blob: Optional[str] = None,
+) -> List[str]:
+    """ProjectDiscovery katana flags from current README (-silent, -list, -jc, -kf)."""
+    blob = help_blob if help_blob is not None else _cmd_blob("katana", "-h")
+    cmd = ["katana"]
+    _extend_if(cmd, blob, "-silent")
+    if help_has_flag(blob, "list"):
+        cmd.extend(["-list", list_file])
+    else:
+        cmd.extend(["-u", list_file])
+    _extend_if(cmd, blob, "-jc")
+    if help_has_flag(blob, "kf"):
+        cmd.extend(["-kf", "all"])
+    _extend_if(cmd, blob, "-d", "3")
+    _extend_if(cmd, blob, "-c", "20")
+    _extend_if(cmd, blob, "-rl", "150")
+    _extend_if(cmd, blob, "-timeout", "10")
+    _extend_if(cmd, blob, "-o", output_file)
+    if jsl:
+        _extend_if(cmd, blob, "-jsl")
+    if headless:
+        _extend_if(cmd, blob, "-hl")
+        _extend_if(cmd, blob, "-nos")
+    return cmd
+
+
+def build_gospider_cmd(list_file: str, output_dir: str, help_blob: Optional[str] = None) -> List[str]:
+    blob = help_blob if help_blob is not None else _cmd_blob("gospider", "--help")
+    cmd = ["gospider"]
+    _extend_if(cmd, blob, "-S", list_file)
+    _extend_if(cmd, blob, "-c", "10")
+    _extend_if(cmd, blob, "-d", "3")
+    _extend_if(cmd, blob, "--js")
+    _extend_if(cmd, blob, "-t", "20")
+    _extend_if(cmd, blob, "--sitemap")
+    _extend_if(cmd, blob, "--robots")
+    _extend_if(cmd, blob, "-q")
+    _extend_if(cmd, blob, "-o", output_dir)
+    if "-S" not in cmd:
+        cmd.extend(["-S", list_file, "-o", output_dir])
+    return cmd
+
+
+def build_waymore_cmd(host: str, output_file: str, help_blob: Optional[str] = None) -> List[str]:
+    blob = help_blob if help_blob is not None else _cmd_blob("waymore", "--help")
+    cmd = ["waymore"]
+    _extend_if(cmd, blob, "-i", host)
+    if help_has_flag(blob, "mode"):
+        cmd.extend(["-mode", "U"])
+    _extend_if(cmd, blob, "-oU", output_file)
+    if "-i" not in cmd:
+        cmd.extend(["-i", host, "-mode", "U", "-oU", output_file])
+    return cmd
+
+
+def build_gau_cmd(host: str, threads: int = 5, help_blob: Optional[str] = None) -> List[str]:
+    blob = help_blob if help_blob is not None else _cmd_blob("gau", "--help")
+    cmd = ["gau"]
+    if help_has_flag(blob, "threads"):
+        cmd.extend(["--threads", str(threads)])
+    cmd.append(host)
+    return cmd
+
+
+def build_httpx_cmd(
+    httpx_bin: str,
+    list_file: str,
+    output_file: str,
+    *,
+    threads: int = 50,
+    timeout: int = 10,
+    help_blob: Optional[str] = None,
+) -> List[str]:
+    """ProjectDiscovery httpx: -silent -nc -l -o -t -timeout (not the Python client)."""
+    blob = help_blob if help_blob is not None else _httpx_identify(httpx_bin)
+    cmd = [httpx_bin]
+    _extend_if(cmd, blob, "-silent")
+    _extend_if(cmd, blob, "-nc")
+    if help_has_flag(blob, "list") or help_has_flag(blob, "l"):
+        cmd.extend(["-l", list_file])
+    else:
+        cmd.extend(["-l", list_file])
+    _extend_if(cmd, blob, "-o", output_file)
+    _extend_if(cmd, blob, "-t", str(threads))
+    _extend_if(cmd, blob, "-timeout", str(timeout))
+    return cmd
+
+
+def trufflehog_filesystem_cmd(scan_dir: str, help_blob: Optional[str] = None) -> List[str]:
+    """
+    TruffleHog v3: `trufflehog --json --no-update filesystem DIR`
+    Paths are positional. `--path` is invalid on current builds.
+    """
+    blob = help_blob if help_blob is not None else (
+        _cmd_blob("trufflehog", "--help") + _cmd_blob("trufflehog", "filesystem", "--help")
+    )
+    cmd = ["trufflehog"]
+    _extend_if(cmd, blob, "--json")
+    _extend_if(cmd, blob, "--no-update")
+    cmd.append("filesystem")
+    cmd.append(scan_dir)
+    return cmd
 
 
 CMD_TIMEOUT_RC = -2
@@ -1129,7 +1323,7 @@ def custom_scan(urls_file: str, output_dir: Optional[Path] = None) -> List[Dict]
         if path_is_noisy(url):
             continue
 
-        if i % 50 == 0:
+        if i % 200 == 0:
             log(f"  Progress: {i}/{len(urls)} scanned...", "info")
 
         try:
@@ -1970,6 +2164,194 @@ def classify_http_status(validator: ValidatorSpec, status: int,
     return False, f"Inconclusive (HTTP {status})"
 
 
+# Cheap Google key checks from keyhacks (Maps JSON) + Gemini models list.
+# Do not call Static Maps / Street View / Distance Matrix (large billed payloads).
+GOOGLE_API_PROBES: List[Dict[str, Any]] = [
+    {
+        "id": "geolocation",
+        "kind": "geolocation",
+        "method": "POST",
+        "url": "https://www.googleapis.com/geolocation/v1/geolocate?key={key}",
+        "json_body": {"considerIp": True},
+    },
+    {
+        "id": "geocoding",
+        "kind": "maps_json",
+        "method": "GET",
+        "url": "https://maps.googleapis.com/maps/api/geocode/json?latlng=40.0,30.0&key={key}",
+    },
+    {
+        "id": "timezone",
+        "kind": "maps_json",
+        "method": "GET",
+        "url": (
+            "https://maps.googleapis.com/maps/api/timezone/json"
+            "?location=39.6034810,-119.6822510&timestamp=1331161200&key={key}"
+        ),
+    },
+    {
+        "id": "elevation",
+        "kind": "maps_json",
+        "method": "GET",
+        "url": (
+            "https://maps.googleapis.com/maps/api/elevation/json"
+            "?locations=39.7391536,-104.9847034&key={key}"
+        ),
+    },
+    {
+        "id": "youtube",
+        "kind": "youtube",
+        "method": "GET",
+        "url": (
+            "https://www.googleapis.com/youtube/v3/activities"
+            "?part=id&maxResults=1&channelId=UC-lHJZR3Gqxm24_Vd_AJ5Yw&key={key}"
+        ),
+    },
+    {
+        "id": "gemini",
+        "kind": "gemini",
+        "method": "GET",
+        "url": "https://generativelanguage.googleapis.com/v1beta/models?key={key}",
+    },
+]
+
+
+def interpret_google_probe(kind: str, status: int, body: str) -> str:
+    """Map one Google probe to enabled | restricted | denied | invalid | error."""
+    body = body or ""
+    if re.search(r"API_KEY_INVALID|keyInvalid", body, re.I):
+        return "invalid"
+    if status == 429:
+        return "error"
+    if kind == "maps_json":
+        try:
+            data = json.loads(body) if body else {}
+        except Exception:
+            data = {}
+        st = str((data or {}).get("status") or "")
+        if st in {"OK", "ZERO_RESULTS", "INVALID_REQUEST"}:
+            return "enabled"
+        if st in {"REQUEST_DENIED", "OVER_DAILY_LIMIT", "OVER_QUERY_LIMIT"}:
+            if re.search(r"invalid.+key|key.+invalid", body, re.I):
+                return "invalid"
+            return "restricted"
+        if status == 200:
+            return "restricted"
+        if status in (400, 403):
+            return "restricted"
+        return "denied"
+    if kind == "geolocation":
+        if status == 200:
+            return "enabled"
+        if status in (400, 403):
+            return "restricted"
+        return "denied"
+    if kind in {"youtube", "gemini"}:
+        if status == 200:
+            return "enabled"
+        if status in (400, 403):
+            return "restricted"
+        return "denied"
+    return "error"
+
+
+def summarize_google_spray(results: Dict[str, str]) -> Tuple[bool, str]:
+    enabled = [k for k, v in results.items() if v == "enabled"]
+    restricted = [k for k, v in results.items() if v == "restricted"]
+    denied = [k for k, v in results.items() if v == "denied"]
+    invalid = [k for k, v in results.items() if v == "invalid"]
+    if invalid and not enabled and not restricted:
+        return False, "Invalid/Revoked Google API key"
+    valid = bool(enabled or restricted)
+    parts: List[str] = []
+    if enabled:
+        parts.append("enabled=" + ",".join(enabled))
+    if restricted:
+        parts.append("restricted=" + ",".join(restricted))
+    if denied:
+        parts.append("denied=" + ",".join(denied))
+    if not parts:
+        return False, "Inconclusive Google API probe"
+    prefix = "VALID" if valid else "Invalid"
+    return valid, f"{prefix}: " + "; ".join(parts)
+
+
+def _google_probe_sync(key: str, spec: Dict[str, Any]) -> Tuple[int, str]:
+    url = str(spec["url"]).format(key=key)
+    method = str(spec.get("method") or "GET")
+    body_bytes = None
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+    }
+    if spec.get("json_body") is not None:
+        body_bytes = json.dumps(spec["json_body"]).encode()
+        headers["Content-Type"] = "application/json"
+    req = urllib.request.Request(url, data=body_bytes, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return int(resp.status), resp.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        raw = exc.read().decode("utf-8", errors="replace") if exc.fp else ""
+        return int(exc.code), raw
+    except Exception:
+        return 0, ""
+
+
+def validate_google_api_spray_sync(key: str) -> Dict[str, Any]:
+    results: Dict[str, str] = {}
+    last_status = None
+    for spec in GOOGLE_API_PROBES:
+        status, body = _google_probe_sync(key, spec)
+        last_status = status
+        results[str(spec["id"])] = interpret_google_probe(str(spec["kind"]), status, body)
+    valid, note = summarize_google_spray(results)
+    return {
+        "validated": True,
+        "valid": valid,
+        "status_code": last_status,
+        "note": note,
+        "google_services": results,
+    }
+
+
+async def validate_google_api_spray_async(session, key: str, limiter: "DomainRateLimiter") -> Dict[str, Any]:
+    results: Dict[str, str] = {}
+    last_status = None
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    timeout = aiohttp.ClientTimeout(total=10)
+    for spec in GOOGLE_API_PROBES:
+        url = str(spec["url"]).format(key=key)
+        host = _host_from_url(url)
+        dsem = await limiter.acquire(host)
+        try:
+            kwargs: Dict[str, Any] = {
+                "headers": headers,
+                "timeout": timeout,
+                "allow_redirects": True,
+            }
+            if spec.get("json_body") is not None:
+                kwargs["json"] = spec["json_body"]
+            async with session.request(str(spec.get("method") or "GET"), url, **kwargs) as resp:
+                last_status = resp.status
+                body = await resp.text()
+            results[str(spec["id"])] = interpret_google_probe(
+                str(spec["kind"]), int(last_status or 0), body
+            )
+        except Exception:
+            results[str(spec["id"])] = "error"
+        finally:
+            limiter.release(dsem)
+        await asyncio.sleep(0.12)
+    valid, note = summarize_google_spray(results)
+    return {
+        "validated": True,
+        "valid": valid,
+        "status_code": last_status,
+        "note": note,
+        "google_services": results,
+    }
+
+
 LOGIN_REDIRECT_RE = re.compile(
     r"(?:/login\b|/signin\b|/sign-in\b|/log-in\b|/auth(?:/|$|\?)|/oauth|/sso\b|"
     r"/session/new|/account/login|/users/sign_in|"
@@ -1990,6 +2372,18 @@ def _host_from_url(url: str) -> str:
         return host or "unknown"
     except Exception:
         return "unknown"
+
+
+def _key_datacenter(key: str) -> str:
+    """Mailchimp-style datacenter suffix (`hex-us12` → us12)."""
+    if "-" not in (key or ""):
+        return "us1"
+    suffix = key.rsplit("-", 1)[-1]
+    return suffix if suffix.lower().startswith("us") else "us1"
+
+
+def _format_tpl(template: str, key: str, host: Optional[str] = "") -> str:
+    return (template or "").format(key=key, domain=host or "", dc=_key_datacenter(key))
 
 
 def _redirect_to_login(original_url: str, final_url: str) -> bool:
@@ -2127,6 +2521,13 @@ async def validate_one(session, finding: Dict, limiter: "DomainRateLimiter",
         result["note"] = validator.skip_reason
         return result
 
+    if validator.google_api_spray:
+        spray = await validate_google_api_spray_async(
+            session, finding.get("key") or "", limiter
+        )
+        result.update(spray)
+        return result
+
     # JWT — local header/payload inspection (no remote call)
     if validator.jwt_inspect:
         result.update(validate_jwt_inspect(finding.get("key") or ""))
@@ -2174,7 +2575,7 @@ async def validate_one(session, finding: Dict, limiter: "DomainRateLimiter",
         return result
 
     key = finding["key"]
-    url = validator.url.format(key=key, domain=host)
+    url = _format_tpl(validator.url, key, host)
     limit_host = _host_from_url(url)
     method = (validator.method or "GET").lower()
     max_attempts = 4  # 1 try + up to 3 retries on 429
@@ -2183,7 +2584,7 @@ async def validate_one(session, finding: Dict, limiter: "DomainRateLimiter",
     try:
         try:
             headers = {
-                k: v.format(key=key)
+                k: _format_tpl(v, key, host)
                 for k, v in validator.headers.items()
             }
             if host:
@@ -2195,7 +2596,9 @@ async def validate_one(session, finding: Dict, limiter: "DomainRateLimiter",
             auth = None
             if validator.auth:
                 u, p = validator.auth
-                auth = aiohttp.BasicAuth(u, p.format(key=key))
+                auth = aiohttp.BasicAuth(
+                    _format_tpl(u, key, host), _format_tpl(p, key, host)
+                )
 
             timeout = aiohttp.ClientTimeout(total=10)
             for attempt in range(max_attempts):
@@ -2324,6 +2727,11 @@ def validate_sync_fallback(findings: List[Dict], domain: str,
             results.append(result)
             continue
 
+        if validator.google_api_spray:
+            result.update(validate_google_api_spray_sync(f.get("key") or ""))
+            results.append(result)
+            continue
+
         if validator.jwt_inspect:
             result.update(validate_jwt_inspect(f.get("key") or ""))
             results.append(result)
@@ -2363,10 +2771,10 @@ def validate_sync_fallback(findings: List[Dict], domain: str,
             continue
 
         key = f["key"]
-        url = validator.url.format(key=key, domain=host)
+        url = _format_tpl(validator.url, key, host)
         max_attempts = 4
         try:
-            headers = {k: v.format(key=key) for k, v in validator.headers.items()}
+            headers = {k: _format_tpl(v, key, host) for k, v in validator.headers.items()}
             if host:
                 headers.setdefault("Referer", f"https://{host}/")
                 headers.setdefault("Origin", f"https://{host}")
@@ -2374,7 +2782,9 @@ def validate_sync_fallback(findings: List[Dict], domain: str,
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
             if validator.auth:
                 user, passwd = validator.auth
-                creds = f"{user.format(key=key)}:{passwd.format(key=key)}"
+                creds = (
+                    f"{_format_tpl(user, key, host)}:{_format_tpl(passwd, key, host)}"
+                )
                 headers["Authorization"] = (
                     "Basic " + base64.b64encode(creds.encode()).decode()
                 )
@@ -2888,6 +3298,7 @@ def argv_from_options(opts: Dict[str, Any]) -> List[str]:
 
 
 def main(argv: Optional[List[str]] = None) -> int:
+    reset_log_counters()
     print(BANNER)
 
     parser = build_parser()
@@ -2960,9 +3371,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         log(f"Wrote single domain as fallback: {args.domain}", "info")
     else:
         chaos_key = args.chaos_key or os.environ.get("CHAOS_KEY", "")
-        cmd = ["chaos", "-d", args.domain, "-o", str(subdomains_file), "-silent"]
-        if chaos_key:
-            cmd += ["-key", chaos_key]
+        cmd = build_chaos_cmd(args.domain, str(subdomains_file), chaos_key)
         log("Running chaos...", "info")
         rc, _ = run_cmd(cmd)
         if rc != 0 or not subdomains_file.exists() or subdomains_file.stat().st_size == 0:
@@ -3027,15 +3436,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         httpx_input.write_text("\n".join(sub_list) + "\n")
         if live_hosts_file.exists():
             live_hosts_file.unlink()
-        httpx_cmd = [
+        httpx_cmd = build_httpx_cmd(
             httpx_bin,
-            "-silent",
-            "-nc",
-            "-l", str(httpx_input),
-            "-o", str(live_hosts_file),
-            "-t", "50",
-            "-timeout", "10",
-        ]
+            str(httpx_input),
+            str(live_hosts_file),
+            threads=50,
+            timeout=10,
+        )
         rc, output = run_cmd(httpx_cmd, timeout=httpx_timeout)
 
         def _httpx_hosts() -> bytes:
@@ -3103,23 +3510,12 @@ def main(argv: Optional[List[str]] = None) -> int:
 
             jsl_available = check_tool("jsluice")
 
-            katana_cmd = [
-                "katana",
-                "-silent",
-                "-list", str(katana_input),
-                "-jc",              # parse JS for endpoints
-                "-kf", "all",       # robots.txt + sitemap.xml
-                "-d", "3",          # depth
-                "-c", "20",         # concurrency
-                "-rl", "150",       # rate limit (req/s)
-                "-timeout", "10",
-                "-o", str(katana_out_file),
-            ]
-            # -em drops extensionless SPA paths; filter after crawl instead
-            if jsl_available:
-                katana_cmd.append("-jsl")  # deep JS via jsluice
-            if args.headless:
-                katana_cmd += ["-hl", "-nos"]  # headless Chrome for SPAs
+            katana_cmd = build_katana_cmd(
+                str(katana_input),
+                str(katana_out_file),
+                headless=bool(args.headless),
+                jsl=bool(jsl_available),
+            )
 
             if katana_out_file.exists():
                 katana_out_file.unlink()
@@ -3163,7 +3559,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 # -oU expects a file path (not a dir);
                 waymore_out = waymore_dir / f"{clean.replace('/', '_')}.txt"
                 rc, _ = run_cmd(
-                    ["waymore", "-i", clean, "-mode", "U", "-oU", str(waymore_out)],
+                    build_waymore_cmd(clean, str(waymore_out)),
                     timeout=120,
                     discard_stdout=True,
                 )
@@ -3191,7 +3587,10 @@ def main(argv: Optional[List[str]] = None) -> int:
             for i, host in enumerate(live_list, 1):
                 if i % 10 == 0:
                     log(f"  gau: {i}/{live_count} hosts...", "info")
-                rc, output = run_cmd(["gau", "--threads", str(args.gau_threads), host], timeout=60)
+                rc, output = run_cmd(
+                    build_gau_cmd(host, int(args.gau_threads)),
+                    timeout=60,
+                )
                 if output:
                     for line in output.decode("utf-8", errors="ignore").splitlines():
                         line = line.strip()
@@ -3226,18 +3625,11 @@ def main(argv: Optional[List[str]] = None) -> int:
             gs_out_dir = output_dir / "gospider_out"
             gs_out_dir.mkdir(exist_ok=True)
 
-            run_cmd([
-                "gospider",
-                "-S", str(gs_input),
-                "-c", "10",
-                "-d", "3",
-                "--js",
-                "-t", "20",
-                "--sitemap",
-                "--robots",
-                "-q",
-                "-o", str(gs_out_dir),
-            ], timeout=300, discard_stdout=True)
+            run_cmd(
+                build_gospider_cmd(str(gs_input), str(gs_out_dir)),
+                timeout=300,
+                discard_stdout=True,
+            )
 
             url_re = re.compile(r'\[url\]\s+\[\d+\]\s+-\s+(https?://\S+)')
             js_re  = re.compile(r'https?://\S+\.(js|json|jsx|map)\b')
@@ -3269,7 +3661,6 @@ def main(argv: Optional[List[str]] = None) -> int:
         log(f"Files to scan:   {files_to_scan}", "warn")
     else:
         log(f"Total URLs to scan: {C.BOLD}{url_count}{C.RESET}", "success")
-        log(f"Sample: {url_list[0]}", "info")
 
     # Secret scanning
     step_header(4, "Secret Scanning (TruffleHog / Custom)")
@@ -3297,7 +3688,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 with urllib.request.urlopen(req, timeout=8) as resp:
                     out_path.write_bytes(resp.read())
                     downloaded += 1
-                if downloaded % 50 == 0:
+                if downloaded % 100 == 0:
                     log(f"  Downloaded: {downloaded}/{min(len(url_list),2000)} files...", "info")
             except Exception:
                 pass
@@ -3311,10 +3702,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         if ready > 0:
             log("Running TruffleHog on downloaded files...", "info")
             rc, output = run_cmd(
-                ["trufflehog", "filesystem",
-                 "--path", str(dl_dir),
-                 "--json", "--no-update"],
-                timeout=600
+                trufflehog_filesystem_cmd(str(dl_dir)),
+                timeout=600,
             )
             if output and output.strip():
                 raw_findings = parse_trufflehog(output)

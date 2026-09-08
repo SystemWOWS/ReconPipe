@@ -85,6 +85,7 @@ validators:
     method: POST
     json_body:
       considerIp: 'true'
+    google_api_spray: true
     valid_codes:
     - 200
     invalid_codes:
@@ -104,6 +105,16 @@ validators:
     notes:
       200: 'VALID: Full access to Geolocation API'
       403: 'VALID (restricted): Key exists but IP/referer/API restricted'
+  google_oauth:
+    url: https://oauth2.googleapis.com/tokeninfo?access_token={key}
+    method: GET
+    valid_codes:
+    - 200
+    invalid_codes:
+    - 400
+    - 401
+    notes:
+      200: 'VALID: Google OAuth access token'
   github_pat:
     url: https://api.github.com/user
     method: GET
@@ -137,6 +148,18 @@ validators:
     - 200
     invalid_codes:
     - 401
+  github_app:
+    url: https://api.github.com/user
+    method: GET
+    headers:
+      Authorization: token {key}
+      Accept: application/vnd.github.v3+json
+    valid_codes:
+    - 200
+    invalid_codes:
+    - 401
+    notes:
+      200: 'VALID: Authenticated GitHub app token'
   gitlab_pat:
     url: https://gitlab.com/api/v4/user
     method: GET
@@ -255,7 +278,7 @@ validators:
   jwt:
     jwt_inspect: true
   sendgrid:
-    url: https://api.sendgrid.com/v3/user/profile
+    url: https://api.sendgrid.com/v3/scopes
     method: GET
     headers:
       Authorization: Bearer {key}
@@ -263,7 +286,11 @@ validators:
     - 200
     invalid_codes:
     - 401
+    restricted_codes:
     - 403
+    notes:
+      200: 'VALID: SendGrid token (scopes endpoint)'
+      403: 'VALID (restricted): SendGrid key accepted but scopes forbidden'
   mailgun:
     url: https://api.mailgun.net/v3/domains
     method: GET
@@ -274,6 +301,18 @@ validators:
     - 200
     invalid_codes:
     - 401
+  mailchimp:
+    url: https://{dc}.api.mailchimp.com/3.0/
+    method: GET
+    auth:
+    - anystring
+    - '{key}'
+    valid_codes:
+    - 200
+    invalid_codes:
+    - 401
+    notes:
+      200: 'VALID: Mailchimp API key (datacenter ping)'
   aws_access_key:
     aws_sts: true
     valid_codes:
@@ -363,6 +402,21 @@ validators:
     skip_reason: UUID feeder only — heroku-context matches become heroku_api
   stripe_publishable:
     skip_reason: 'Informational: Stripe publishable keys are public-by-design'
+  firebase_key:
+    url: https://fcm.googleapis.com/fcm/send
+    method: POST
+    headers:
+      Authorization: key={key}
+      Content-Type: application/json
+    json_body:
+      registration_ids:
+      - '1'
+    valid_codes:
+    - 200
+    invalid_codes:
+    - 401
+    notes:
+      200: 'VALID: legacy FCM server key (InvalidRegistration body is OK)'
   firebase_url:
     skip_reason: 'Informational: Firebase URLs are public-by-design'
   source_map_exposure:
@@ -371,43 +425,4 @@ informational_types:
   stripe_publishable: Public-by-design (Stripe publishable key); not a secret
   firebase_url: Public-by-design (Firebase RTDB URL); not a secret
 exposure_types:
-  google_api: 90
-  google_oauth: 85
-  aws_access_key: 95
-  aws_secret: 90
-  aws_session_token: 88
-  github_pat: 92
-  github_fine_pat: 94
-  github_oauth: 88
-  github_app: 88
-  gitlab_pat: 92
-  stripe_live: 97
-  stripe_test: 85
-  stripe_restricted: 93
-  stripe_publishable: 0
-  openai_key: 94
-  anthropic_key: 94
-  sendgrid: 90
-  mailgun: 85
-  twilio_sid: 80
-  twilio_token: 80
-  slack_token: 88
-  slack_webhook: 92
-  firebase_url: 0
-  firebase_key: 85
-  digitalocean_pat: 92
-  npm_token: 90
-  pypi_token: 92
-  private_key_pem: 98
-  heroku_api: 90
-  uuid_candidate: 20
-  jwt: 60
-  shopify_token: 90
-  shopify_secret: 90
-  mailchimp: 80
-  discord_token: 85
-  discord_webhook: 90
-  telegram_bot: 88
-  mapbox_token: 82
-  generic_secret: 35
-  source_map_exposure: 92
+  source_map_exposure: Public JavaScript source map (.map) — not a credential
