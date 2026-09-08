@@ -136,6 +136,14 @@ def test_gui_module_compiles_and_helpers():
     hits = mod.guess_key_types("sk_live_abcdefghijklmnopqrstuvwx")
     assert "stripe_live" in hits
     assert "github_pat" in mod.validator_type_options()
+    status_path = Path(tempfile.mkdtemp()) / "scan_status.json"
+    status_path.write_text(
+        '{"pct": 40, "remaining_s": 600, "timing": "About 40% done", "stage_name": "URL discovery"}',
+        encoding="utf-8",
+    )
+    st = mod.load_scan_status(status_path)
+    assert st.get("pct") == 40 and st.get("remaining_s") == 600
+    assert rp.fmt_remaining_short(600) == "10m"
     assert "google_api" in mod.validator_type_options()
     assert "firebase_key" in mod.validator_type_options()
     assert "mailchimp" in mod.validator_type_options()
@@ -173,6 +181,7 @@ def test_gui_module_compiles_and_helpers():
     src = (ROOT / "reconpipegui.py").read_text(encoding="utf-8")
     assert "Passive intel" in src
     assert "--shodan-key" in src and "--zoomeye-key" in src and "--censys-id" in src
+    assert "Save API keys" in src and "Save target" in src
     print("[ok] reconpipegui import + form validation helpers")
 
 

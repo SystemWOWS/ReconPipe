@@ -7,14 +7,17 @@ import math
 import os
 import random
 import re
+import shutil
 import subprocess
 import sys
 import hashlib
+import threading
 import time
 import urllib.request
 import urllib.error
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass, field, fields
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse, quote, urlencode
@@ -321,7 +324,8 @@ load_default_config()
 _FIND_LOGGED = 0
 _FIND_LOG_CAP = 12
 CONSOLE_KEEP_RE = re.compile(
-    r"\[(?:\d)/6\]|\[(?:gui|[+*!\-]|FIND|VALID)\]|PIPELINE COMPLETE|ReconPipe GUI",
+    r"\[(?:\d)/6\]|\[(?:gui|[+*!\-]|FIND|VALID|ETA)\]|"
+    r"Timing:|PIPELINE COMPLETE|ReconPipe GUI",
     re.I,
 )
 
@@ -373,6 +377,524 @@ def step_header(num: int, title: str) -> None:
     print(f"\n{C.CYAN}{'─' * 62}{C.RESET}")
     print(f"{C.BOLD}{C.CYAN}  [{num}/6] {title.upper()}{C.RESET}")
     print(f"{C.CYAN}{'─' * 62}{C.RESET}")
+    if _ETA is not None:
+        _ETA.begin_stage(num, title)
+
+
+def fmt_hms(seconds: float) -> str:
+    """Nmap-style elapsed/remaining clock: 0:12:40."""
+    s = max(0, int(seconds))
+    h, rem = divmod(s, 3600)
+    m, sec = divmod(rem, 60)
+    return f"{h}:{m:02d}:{sec:02d}"
+
+
+def fmt_remaining_short(seconds: float) -> str:
+    s = max(0, int(seconds))
+    if s < 90:
+        return f"{s}s"
+    m = max(1, (s + 30) // 60)
+    if m < 90:
+        return f"{m}m"
+    h, mm = divmod(m, 60)
+    return f"{h}h{mm:02d}m"
+
+
+class ScanEta:
+    """
+    Nmap-like scan clock: elapsed, % done, ETC, remaining.
+    Budgets are expected times (not hard timeouts) and shrink as stages finish.
+    """
+
+    def __init__(self, output_dir: Optional[Path] = None) -> None:
+        self.output_dir = Path(output_dir) if output_dir else None
+        self.started = time.monotonic()
+        self.stage = 1
+        self.stage_name = "starting"
+        self.stage_started = self.started
+        self.progress = 0.0
+        self.subs = 0
+        self.live = 0
+        self.urls = 0
+        self.findings = 0
+        self.skip_chaos = False
+        self.skip_httpx = False
+        self.skip_discovery = False
+        self.skip_gau = False
+        self.skip_intel = False
+        self.no_trufflehog = False
+        self.no_validate = False
+        self.concurrency = 20
+        self.tools: Dict[str, bool] = {}
+        self._last_log = 0.0
+        self._hb_depth = 0
+        self._hb_stop: Optional[threading.Event] = None
+        self._hb_thread: Optional[threading.Thread] = None
+        self._lock = threading.Lock()
+
+    def configure(self, **kwargs: Any) -> None:
+        for key, val in kwargs.items():
+            if hasattr(self, key):
+                setattr(self, key, val)
+
+    def set_work(
+        self,
+        *,
+        subs: Optional[int] = None,
+        live: Optional[int] = None,
+        urls: Optional[int] = None,
+        findings: Optional[int] = None,
+        progress: Optional[float] = None,
+        log_now: bool = False,
+    ) -> None:
+        with self._lock:
+            if subs is not None:
+                self.subs = max(0, int(subs))
+            if live is not None:
+                self.live = max(0, int(live))
+            if urls is not None:
+                self.urls = max(0, int(urls))
+            if findings is not None:
+                self.findings = max(0, int(findings))
+            if progress is not None:
+                self.progress = min(1.0, max(0.0, float(progress)))
+        if log_now:
+            self.log_timing(force=True)
+        else:
+            self.write_status()
+
+    def begin_stage(self, num: int, title: str) -> None:
+        with self._lock:
+            self.stage = int(num)
+            self.stage_name = (title or "").strip() or f"stage {num}"
+            self.stage_started = time.monotonic()
+            self.progress = 0.0
+        self.log_timing(force=True)
+
+    def finish(self) -> None:
+        with self._lock:
+            self.stage = 6
+            self.stage_name = "complete"
+            self.progress = 1.0
+        self.log_timing(force=True)
+        self.write_status(remaining_s=0, pct=100)
+
+    def budgets(self) -> Dict[int, float]:
+        subs = max(self.subs, 1)
+        live = self.live if self.live else max(1, subs // 3)
+        urls = self.urls
+        findings = self.findings
+        tools = self.tools or {}
+
+        chaos = 4.0 if self.skip_chaos else 22.0
+        if not self.skip_intel:
+            chaos += 18.0
+        httpx = 3.0 if self.skip_httpx else min(1500.0, max(20.0, (subs / 50.0) * 6.0 + 12.0))
+
+        if self.skip_discovery:
+            disco = 4.0
+        else:
+            katana = min(2400.0, live * 1.6 + 70.0) if tools.get("katana") else 5.0
+            if self.skip_gau:
+                passive = 4.0
+            elif tools.get("waymore"):
+                passive = min(900.0, live * 18.0 + 20.0)
+            elif tools.get("gau") or tools.get("waybackurls"):
+                passive = min(600.0, live * 8.0 + 15.0)
+            else:
+                passive = 8.0
+            gospider = 80.0 if tools.get("gospider") else 5.0
+            disco = katana + passive + gospider
+
+        guessed_urls = urls if urls else max(int(live * 30), 15)
+        if guessed_urls <= 0:
+            scan = 6.0
+        elif self.no_trufflehog or not tools.get("trufflehog"):
+            scan = min(2400.0, guessed_urls * 0.14 + 15.0)
+        else:
+            dl = min(guessed_urls, 2000) * 0.32
+            hog = 35.0 + min(guessed_urls, 2000) * 0.05
+            scan = dl + hog
+
+        if self.no_validate:
+            val = 3.0
+        else:
+            nkeys = findings if findings else max(2, guessed_urls // 90)
+            val = max(6.0, nkeys / max(int(self.concurrency) or 1, 1) * 1.15 + 4.0)
+
+        return {
+            1: chaos,
+            2: httpx,
+            3: disco,
+            4: scan,
+            5: val,
+            6: 5.0,
+        }
+
+    def snapshot(self) -> Dict[str, Any]:
+        now = time.monotonic()
+        elapsed = max(0.0, now - self.started)
+        stage_elapsed = max(0.0, now - self.stage_started)
+        budgets = self.budgets()
+        stage = min(6, max(1, self.stage))
+        budget = max(1.0, budgets.get(stage, 30.0))
+        progress = self.progress
+        if progress >= 0.03:
+            rate = stage_elapsed / progress
+            current_left = rate * (1.0 - progress)
+        else:
+            current_left = max(0.0, budget - stage_elapsed)
+        if stage_elapsed > budget and progress < 0.99:
+            current_left = max(current_left, min(90.0, budget * 0.25))
+        future = sum(budgets[s] for s in range(stage + 1, 7))
+        remaining = current_left + future
+        total = elapsed + remaining
+        pct = 100.0 if remaining <= 0.5 else min(99.0, 100.0 * elapsed / max(total, 1.0))
+        etc = datetime.now() + timedelta(seconds=int(remaining))
+        return {
+            "stage": stage,
+            "stage_name": self.stage_name,
+            "elapsed_s": int(elapsed),
+            "remaining_s": int(remaining),
+            "pct": int(pct),
+            "etc": etc.strftime("%H:%M:%S"),
+            "etc_short": etc.strftime("%H:%M"),
+            "timing": (
+                f"About {int(pct)}% done; ETC: {etc.strftime('%H:%M')} "
+                f"({fmt_hms(remaining)} remaining)"
+            ),
+            "subs": self.subs,
+            "live": self.live,
+            "urls": self.urls,
+            "findings": self.findings,
+        }
+
+    def write_status(
+        self,
+        remaining_s: Optional[int] = None,
+        pct: Optional[int] = None,
+    ) -> None:
+        if not self.output_dir:
+            return
+        snap = self.snapshot()
+        if remaining_s is not None:
+            snap["remaining_s"] = int(remaining_s)
+        if pct is not None:
+            snap["pct"] = int(pct)
+            if remaining_s == 0:
+                snap["timing"] = (
+                    f"About 100% done; elapsed {fmt_hms(snap['elapsed_s'])}"
+                )
+        path = self.output_dir / "scan_status.json"
+        tmp = path.with_suffix(".json.tmp")
+        try:
+            tmp.write_text(json.dumps(snap, indent=2), encoding="utf-8")
+            tmp.replace(path)
+        except OSError:
+            pass
+
+    def log_timing(self, *, force: bool = False) -> None:
+        now = time.monotonic()
+        if not force and (now - self._last_log) < 25.0:
+            self.write_status()
+            return
+        self._last_log = now
+        snap = self.snapshot()
+        log(
+            f"Timing: {snap['timing']} - {self.stage_name} "
+            f"(elapsed {fmt_hms(snap['elapsed_s'])})",
+            "info",
+        )
+        self.write_status()
+
+    @contextmanager
+    def heartbeat(self, every: float = 30.0):
+        with self._lock:
+            self._hb_depth += 1
+            start_thread = self._hb_depth == 1
+        if start_thread:
+            stop = threading.Event()
+            self._hb_stop = stop
+
+            def _loop() -> None:
+                while not stop.wait(every):
+                    self.log_timing(force=True)
+
+            t = threading.Thread(target=_loop, daemon=True, name="reconpipe-eta")
+            self._hb_thread = t
+            t.start()
+        try:
+            yield
+        finally:
+            with self._lock:
+                self._hb_depth = max(0, self._hb_depth - 1)
+                stop_thread = self._hb_depth == 0
+            if stop_thread:
+                if self._hb_stop:
+                    self._hb_stop.set()
+                if self._hb_thread:
+                    self._hb_thread.join(timeout=1.0)
+                self._hb_stop = None
+                self._hb_thread = None
+                self.log_timing(force=True)
+
+
+_ETA: Optional[ScanEta] = None
+
+
+def set_scan_eta(eta: Optional[ScanEta]) -> None:
+    global _ETA
+    _ETA = eta
+
+
+def eta_heartbeat(timeout: int = 0):
+    """Pulse remaining-time logs during a long blocking tool."""
+    if _ETA is None or int(timeout) < 45:
+        return nullcontext()
+    return _ETA.heartbeat()
+
+
+# Saved keys / targets live in ~/.reconpipe (override with RECONPIPE_HOME).
+USER_KEY_FIELDS = (
+    ("chaos", "chaos_key", ("CHAOS_KEY", "PDCP_API_KEY")),
+    ("shodan", "shodan_key", ("SHODAN_API_KEY",)),
+    ("censys_id", "censys_id", ("CENSYS_API_ID",)),
+    ("censys_secret", "censys_secret", ("CENSYS_API_SECRET",)),
+    ("zoomeye", "zoomeye_key", ("ZOOMEYE_API_KEY", "ZOOMEYE_KEY")),
+)
+HIT_SOURCE_EXT = {".js", ".jsx", ".ts", ".tsx", ".map", ".json", ".html", ".htm", ".env"}
+
+
+def user_data_dir() -> Path:
+    env = (os.environ.get("RECONPIPE_HOME") or "").strip()
+    if env:
+        return Path(env).expanduser()
+    return Path.home() / ".reconpipe"
+
+
+def _ensure_user_dir() -> Path:
+    path = user_data_dir()
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _load_user_yaml(name: str) -> Dict[str, Any]:
+    path = user_data_dir() / name
+    if not path.is_file():
+        return {}
+    try:
+        if YAML_AVAILABLE:
+            data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        else:
+            data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _save_user_yaml(name: str, data: Dict[str, Any], *, private: bool = False) -> Path:
+    path = _ensure_user_dir() / name
+    text = yaml.safe_dump(data, sort_keys=False) if YAML_AVAILABLE else json.dumps(data, indent=2)
+    path.write_text(text, encoding="utf-8")
+    if private:
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+    return path
+
+
+def load_user_keys() -> Dict[str, str]:
+    raw = _load_user_yaml("keys.yaml")
+    out: Dict[str, str] = {}
+    for key, _arg, _env in USER_KEY_FIELDS:
+        val = raw.get(key)
+        if val is not None and str(val).strip():
+            out[key] = str(val).strip()
+    return out
+
+
+def save_user_keys(values: Dict[str, str]) -> Path:
+    current = _load_user_yaml("keys.yaml")
+    for key, _arg, _env in USER_KEY_FIELDS:
+        if key not in values:
+            continue
+        val = (values.get(key) or "").strip()
+        if val:
+            current[key] = val
+        else:
+            current.pop(key, None)
+    return _save_user_yaml("keys.yaml", current, private=True)
+
+
+def saved_keys_status() -> Dict[str, bool]:
+    saved = load_user_keys()
+    return {key: bool(saved.get(key)) for key, _arg, _env in USER_KEY_FIELDS}
+
+
+def apply_saved_keys(args: Any) -> None:
+    """CLI flag > environment > ~/.reconpipe/keys.yaml."""
+    saved = load_user_keys()
+    for key, arg_name, env_names in USER_KEY_FIELDS:
+        current = getattr(args, arg_name, None)
+        if (current or "").strip():
+            continue
+        picked = ""
+        for env in env_names:
+            picked = (os.environ.get(env) or "").strip()
+            if picked:
+                break
+        if not picked:
+            picked = (saved.get(key) or "").strip()
+        setattr(args, arg_name, picked or None)
+
+
+def list_saved_targets() -> List[Dict[str, str]]:
+    rows = _load_user_yaml("targets.yaml").get("targets") or []
+    if not isinstance(rows, list):
+        return []
+    out: List[Dict[str, str]] = []
+    for row in rows:
+        if isinstance(row, dict) and (row.get("domain") or row.get("name")):
+            out.append({str(k): "" if v is None else str(v) for k, v in row.items()})
+    return out
+
+
+def upsert_saved_target(entry: Dict[str, str]) -> List[Dict[str, str]]:
+    domain = (entry.get("domain") or "").strip()
+    if not domain:
+        raise ValueError("domain is required")
+    name = (entry.get("name") or domain).strip()
+    row = {
+        "name": name,
+        "domain": domain,
+        "files": (entry.get("files") or "").strip(),
+        "subdomains": (entry.get("subdomains") or "").strip(),
+        "output": (entry.get("output") or "").strip(),
+        "updated": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    rows = [r for r in list_saved_targets() if r.get("name") != name]
+    rows.insert(0, row)
+    _save_user_yaml("targets.yaml", {"targets": rows})
+    return rows
+
+
+def delete_saved_target(name: str) -> List[Dict[str, str]]:
+    name = (name or "").strip()
+    rows = [r for r in list_saved_targets() if r.get("name") != name]
+    _save_user_yaml("targets.yaml", {"targets": rows})
+    return rows
+
+
+def remember_scan_target(
+    domain: str,
+    *,
+    files: Optional[Path] = None,
+    subdomains: Optional[Path] = None,
+    output: Optional[Path] = None,
+) -> Dict[str, str]:
+    """Persist domain + URL list so the next scan can skip discovery."""
+    domain = (domain or "").strip()
+    files_path = ""
+    if files and Path(files).is_file():
+        lists = _ensure_user_dir() / "lists"
+        lists.mkdir(parents=True, exist_ok=True)
+        safe = re.sub(r"[^a-zA-Z0-9._-]+", "_", domain)[:80] or "target"
+        dest = lists / f"{safe}.txt"
+        try:
+            shutil.copy2(files, dest)
+            files_path = str(dest)
+        except OSError:
+            files_path = str(Path(files).resolve())
+    entry = {
+        "name": domain,
+        "domain": domain,
+        "files": files_path,
+        "subdomains": str(Path(subdomains).resolve()) if subdomains and Path(subdomains).is_file() else "",
+        "output": str(Path(output).resolve()) if output else "",
+    }
+    upsert_saved_target(entry)
+    return entry
+
+
+def download_filename(url: str) -> str:
+    tail = (url or "").split("/")[-1].split("?")[0]
+    fname = hashlib.md5((url or "").encode()).hexdigest() + "_" + tail
+    return re.sub(r"[^a-zA-Z0-9._-]", "_", fname)[:120]
+
+
+def _link_or_copy(src: Path, dest: Path) -> None:
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if dest.exists():
+        return
+    try:
+        os.link(src, dest)
+    except OSError:
+        shutil.copy2(src, dest)
+
+
+def pack_hit_bundle(
+    output_dir: Path,
+    findings: List[Dict],
+    exposures: Optional[List[Dict]] = None,
+    informational: Optional[List[Dict]] = None,
+) -> Optional[Path]:
+    """
+    When secrets/exposures exist, copy JS/.map sources plus keys and summary
+    into <output>/hits so the evidence is in one folder.
+    """
+    hits = list(findings or []) + list(exposures or [])
+    if not hits and not (informational or []):
+        return None
+    dest = Path(output_dir) / "hits"
+    sources = dest / "sources"
+    sources.mkdir(parents=True, exist_ok=True)
+
+    for name in (
+        "findings.json",
+        "valid_keys.json",
+        "informational.json",
+        "source_map_exposures.json",
+        "summary.txt",
+        "results.sarif",
+        "files_to_scan.txt",
+    ):
+        src = Path(output_dir) / name
+        if src.is_file():
+            shutil.copy2(src, dest / name)
+
+    wanted_urls = set()
+    wanted_local = set()
+    for item in hits:
+        srcu = str(item.get("source_url") or "").strip()
+        if srcu.startswith("http://") or srcu.startswith("https://"):
+            wanted_urls.add(srcu)
+        elif srcu:
+            wanted_local.add(srcu)
+
+    dl = Path(output_dir) / "downloaded_files"
+    copied = 0
+    index: List[str] = []
+    if dl.is_dir():
+        wanted_names = {download_filename(u) for u in wanted_urls}
+        wanted_names.update(Path(p).name for p in wanted_local)
+        for src in dl.iterdir():
+            if not src.is_file():
+                continue
+            suffix = src.suffix.lower()
+            keep = src.name in wanted_names or suffix in HIT_SOURCE_EXT
+            if not keep:
+                continue
+            _link_or_copy(src, sources / src.name)
+            copied += 1
+            if copied >= 2000:
+                break
+
+    index.append(f"sources copied: {copied}")
+    for url in sorted(wanted_urls):
+        index.append(url)
+    (dest / "INDEX.txt").write_text("\n".join(index) + ("\n" if index else ""), encoding="utf-8")
+    return dest
 
 
 # Tool helpers
@@ -516,10 +1038,13 @@ def check_tool(name: str) -> bool:
     if name == "httpx":
         return resolve_httpx_bin() is not None
     try:
-        subprocess.run(
-            [name, "--version"] if name in ("trufflehog",) else [name, "--help"],
-            capture_output=True, timeout=5
+        # --no-update first: `trufflehog --version` otherwise tries to replace its binary
+        argv = (
+            [name, "--no-update", "--version"]
+            if name == "trufflehog"
+            else [name, "--help"]
         )
+        subprocess.run(argv, capture_output=True, timeout=5)
         return True
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
         return False
@@ -672,18 +1197,14 @@ def build_httpx_cmd(
 
 def trufflehog_filesystem_cmd(scan_dir: str, help_blob: Optional[str] = None) -> List[str]:
     """
-    TruffleHog v3: `trufflehog --json --no-update filesystem DIR`
-    Paths are positional. `--path` is invalid on current builds.
+    TruffleHog v3: `trufflehog --no-update --json filesystem DIR`
+
+    `--no-update` is always passed. Auto-update tries to replace the running
+    binary and fails with "cannot move binary" on apt/Homebrew/root installs,
+    then exits before scanning. `--path` is invalid on current builds.
+    help_blob is accepted for tests but does not drop --no-update/--json.
     """
-    blob = help_blob if help_blob is not None else (
-        _cmd_blob("trufflehog", "--help") + _cmd_blob("trufflehog", "filesystem", "--help")
-    )
-    cmd = ["trufflehog"]
-    _extend_if(cmd, blob, "--json")
-    _extend_if(cmd, blob, "--no-update")
-    cmd.append("filesystem")
-    cmd.append(scan_dir)
-    return cmd
+    return ["trufflehog", "--no-update", "--json", "filesystem", scan_dir]
 
 
 CMD_TIMEOUT_RC = -2
@@ -700,28 +1221,55 @@ def _snippet_bytes(data: Optional[bytes], limit: int = 500) -> str:
     return " | ".join(lines[:8])[:limit]
 
 
+def _is_trufflehog_updater_error(text: str) -> bool:
+    t = (text or "").lower()
+    return "trufflehog updater" in t or "cannot move binary" in t
+
+
+def _trufflehog_env(extra: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+    env = os.environ.copy()
+    if extra:
+        env.update(extra)
+    env["TRUFFLEHOG_NO_UPDATE"] = "true"
+    return env
+
+
 def run_cmd(cmd: List[str], output_file: Optional[str] = None,
             stdin_data: Optional[bytes] = None, timeout: int = 300,
-            discard_stdout: bool = False) -> Tuple[int, bytes]:
+            discard_stdout: bool = False,
+            env: Optional[Dict[str, str]] = None) -> Tuple[int, bytes]:
     """
     Run an external tool. Set discard_stdout=True when the tool writes its
     results to a file (-o / -oU) so URL dumps are not buffered in RAM.
     """
+    run_env = env
+    bin_name = Path(cmd[0]).name.lower() if cmd else ""
+    if bin_name.startswith("trufflehog"):
+        run_env = _trufflehog_env(env)
     try:
-        proc = subprocess.run(
-            cmd,
-            input=stdin_data,
-            stdout=subprocess.DEVNULL if discard_stdout else subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=timeout,
-        )
+        with eta_heartbeat(timeout):
+            proc = subprocess.run(
+                cmd,
+                input=stdin_data,
+                stdout=subprocess.DEVNULL if discard_stdout else subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=timeout,
+                env=run_env,
+            )
         stdout = b"" if discard_stdout else (proc.stdout or b"")
         if output_file and stdout:
             Path(output_file).write_bytes(stdout)
         if proc.returncode not in (0, None):
             err = _snippet_bytes(proc.stderr)
             if err:
-                log(f"{cmd[0]} error: {err}", "warn")
+                if _is_trufflehog_updater_error(err):
+                    log(
+                        "TruffleHog auto-update could not replace its binary "
+                        "(install dir not writable). --no-update is always passed.",
+                        "warn",
+                    )
+                else:
+                    log(f"{cmd[0]} error: {err}", "warn")
         return proc.returncode, stdout
     except subprocess.TimeoutExpired as e:
         # Keep any stdout produced before the kill — callers may still use partial results
@@ -1325,6 +1873,8 @@ def custom_scan(urls_file: str, output_dir: Optional[Path] = None) -> List[Dict]
 
         if i % 200 == 0:
             log(f"  Progress: {i}/{len(urls)} scanned...", "info")
+            if _ETA is not None:
+                _ETA.set_work(progress=i / max(len(urls), 1), log_now=True)
 
         try:
             req = urllib.request.Request(url, headers={"User-Agent": ua})
@@ -3105,13 +3655,14 @@ def collect_osint_hosts(
     if skip_intel or not domain:
         return results
 
-    shodan_key = shodan_key or os.environ.get("SHODAN_API_KEY", "")
-    censys_id = censys_id or os.environ.get("CENSYS_API_ID", "")
-    censys_secret = censys_secret or os.environ.get("CENSYS_API_SECRET", "")
+    shodan_key = shodan_key or os.environ.get("SHODAN_API_KEY", "") or load_user_keys().get("shodan", "")
+    censys_id = censys_id or os.environ.get("CENSYS_API_ID", "") or load_user_keys().get("censys_id", "")
+    censys_secret = censys_secret or os.environ.get("CENSYS_API_SECRET", "") or load_user_keys().get("censys_secret", "")
     zoomeye_key = (
         zoomeye_key
         or os.environ.get("ZOOMEYE_API_KEY", "")
         or os.environ.get("ZOOMEYE_KEY", "")
+        or load_user_keys().get("zoomeye", "")
     )
 
     jobs = [
@@ -3303,6 +3854,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     parser = build_parser()
     args = parser.parse_args(argv)
+    apply_saved_keys(args)
 
     if args.subdomains and not Path(args.subdomains).exists():
         log(f"Subdomains file not found: {args.subdomains}", "error")
@@ -3356,6 +3908,20 @@ def main(argv: Optional[List[str]] = None) -> int:
     if not AIOHTTP_AVAILABLE:
         log("aiohttp not installed — using sync validator fallback. Run: pip3 install aiohttp", "warn")
 
+    eta = ScanEta(output_dir)
+    eta.configure(
+        skip_chaos=bool(args.skip_chaos or args.subdomains),
+        skip_httpx=bool(args.skip_httpx),
+        skip_discovery=bool(args.skip_discovery or args.files),
+        skip_gau=bool(args.skip_gau),
+        skip_intel=bool(args.skip_intel),
+        no_trufflehog=bool(args.no_trufflehog),
+        no_validate=bool(args.no_validate),
+        concurrency=int(args.concurrency),
+        tools=dict(tools_status),
+    )
+    set_scan_eta(eta)
+
     # Subdomains
     step_header(1, "Subdomain Acquisition (Chaos)")
     subdomains_file = output_dir / "subdomains.txt"
@@ -3381,18 +3947,21 @@ def main(argv: Optional[List[str]] = None) -> int:
     sub_list = [s for s in subdomains_file.read_text().splitlines() if s.strip()]
     sub_count = len(sub_list)
     log(f"Subdomains: {C.BOLD}{sub_count}{C.RESET} (pre-intel)", "success")
+    if _ETA is not None:
+        _ETA.set_work(subs=sub_count)
 
     if not args.skip_intel:
         log("Passive intel: Shodan / Censys / ZoomEye / crt.sh", "info")
-        intel = collect_osint_hosts(
-            args.domain,
-            shodan_key=args.shodan_key or "",
-            censys_id=args.censys_id or "",
-            censys_secret=args.censys_secret or "",
-            zoomeye_key=args.zoomeye_key or "",
-            skip_crtsh=args.skip_crtsh,
-            skip_intel=False,
-        )
+        with eta_heartbeat(80):
+            intel = collect_osint_hosts(
+                args.domain,
+                shodan_key=args.shodan_key or "",
+                censys_id=args.censys_id or "",
+                censys_secret=args.censys_secret or "",
+                zoomeye_key=args.zoomeye_key or "",
+                skip_crtsh=args.skip_crtsh,
+                skip_intel=False,
+            )
         extra = []
         for src, hosts in intel.items():
             extra.extend(hosts)
@@ -3414,6 +3983,8 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     sub_count = len(sub_list)
     log(f"Subdomains: {C.BOLD}{sub_count}{C.RESET}", "success")
+    if _ETA is not None:
+        _ETA.set_work(subs=sub_count, log_now=True)
 
     # Live hosts
     step_header(2, "Live Host Filtering (httpx)")
@@ -3486,6 +4057,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             "warn",
         )
     log(f"Live hosts: {C.BOLD}{live_count}{C.RESET} / {sub_count}", "success")
+    if _ETA is not None:
+        _ETA.set_work(subs=sub_count, live=live_count, log_now=True)
 
     # URL discovery
     step_header(3, "URL Discovery (Katana + waymore + gospider)")
@@ -3661,6 +4234,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         log(f"Files to scan:   {files_to_scan}", "warn")
     else:
         log(f"Total URLs to scan: {C.BOLD}{url_count}{C.RESET}", "success")
+    if _ETA is not None:
+        _ETA.set_work(urls=url_count, live=live_count, log_now=True)
 
     # Secret scanning
     step_header(4, "Secret Scanning (TruffleHog / Custom)")
@@ -3676,22 +4251,27 @@ def main(argv: Optional[List[str]] = None) -> int:
         ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
         downloaded = 0
         cached = 0
-        for url in url_list[:2000]:
-            try:
-                fname = hashlib.md5(url.encode()).hexdigest() + "_" + url.split("/")[-1].split("?")[0]
-                fname = re.sub(r'[^a-zA-Z0-9._-]', '_', fname)[:120]
-                out_path = dl_dir / fname
-                if out_path.exists():
-                    cached += 1
-                    continue
-                req = urllib.request.Request(url, headers={"User-Agent": ua})
-                with urllib.request.urlopen(req, timeout=8) as resp:
-                    out_path.write_bytes(resp.read())
-                    downloaded += 1
-                if downloaded % 100 == 0:
-                    log(f"  Downloaded: {downloaded}/{min(len(url_list),2000)} files...", "info")
-            except Exception:
-                pass
+        to_fetch = url_list[:2000]
+        with eta_heartbeat(90):
+            for i, url in enumerate(to_fetch, 1):
+                try:
+                    fname = download_filename(url)
+                    out_path = dl_dir / fname
+                    if out_path.exists():
+                        cached += 1
+                        continue
+                    req = urllib.request.Request(url, headers={"User-Agent": ua})
+                    with urllib.request.urlopen(req, timeout=8) as resp:
+                        out_path.write_bytes(resp.read())
+                        downloaded += 1
+                    if downloaded % 100 == 0:
+                        log(f"  Downloaded: {downloaded}/{len(to_fetch)} files...", "info")
+                        if _ETA is not None:
+                            _ETA.set_work(
+                                progress=min(0.55, i / max(len(to_fetch), 1) * 0.55)
+                            )
+                except Exception:
+                    pass
 
         ready = downloaded + cached
         if cached:
@@ -3709,8 +4289,17 @@ def main(argv: Optional[List[str]] = None) -> int:
                 raw_findings = parse_trufflehog(output)
                 log(f"TruffleHog: {len(raw_findings)} raw findings", "success")
             else:
-                log("TruffleHog returned no findings — running custom scanner too", "warn")
-                raw_findings = custom_scan(str(files_to_scan), output_dir)
+                if rc not in (0, None):
+                    log(
+                        "TruffleHog exited before writing findings "
+                        "(updater/binary replace is a common cause). "
+                        "Using the built-in scanner on the downloaded files.",
+                        "warn",
+                    )
+                else:
+                    log("TruffleHog returned no findings — running custom scanner too", "warn")
+                with eta_heartbeat(90):
+                    raw_findings = custom_scan(str(files_to_scan), output_dir)
                 for f_path in dl_dir.iterdir():
                     try:
                         content_text = f_path.read_text(errors="ignore")
@@ -3794,13 +4383,15 @@ def main(argv: Optional[List[str]] = None) -> int:
                         pass
         else:
             log("No files downloaded — falling back to custom HTTP scanner", "warn")
-            raw_findings = custom_scan(str(files_to_scan), output_dir)
+            with eta_heartbeat(90):
+                raw_findings = custom_scan(str(files_to_scan), output_dir)
     else:
         if not args.no_trufflehog:
             log("trufflehog not found — using built-in regex scanner", "warn")
             log("Install: https://github.com/trufflesecurity/trufflehog#installation", "warn")
         log("Running built-in regex scanner...", "info")
-        raw_findings = custom_scan(str(files_to_scan), output_dir)
+        with eta_heartbeat(90):
+            raw_findings = custom_scan(str(files_to_scan), output_dir)
 
     raw_findings, informational = split_informational(raw_findings)
 
@@ -3834,6 +4425,8 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     unique_findings = deduplicate(raw_findings)
     log(f"Unique findings: {C.BOLD}{len(unique_findings)}{C.RESET} (from {len(raw_findings)} raw)", "success")
+    if _ETA is not None:
+        _ETA.set_work(findings=len(unique_findings), urls=url_count, log_now=True)
 
     for f in unique_findings:
         kp = f['key'][:28] + "…" if len(f['key']) > 28 else f['key']
@@ -3854,13 +4447,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         validated = unique_findings
     else:
         log(f"Validating {len(unique_findings)} keys (concurrency={args.concurrency})...", "info")
-        if AIOHTTP_AVAILABLE:
-            validated = asyncio.run(
-                validate_all(unique_findings, args.domain, args.concurrency, shop_domain)
-            )
-        else:
-            log("Using synchronous validator (install aiohttp for async)...", "warn")
-            validated = validate_sync_fallback(unique_findings, args.domain, shop_domain)
+        with eta_heartbeat(90):
+            if AIOHTTP_AVAILABLE:
+                validated = asyncio.run(
+                    validate_all(unique_findings, args.domain, args.concurrency, shop_domain)
+                )
+            else:
+                log("Using synchronous validator (install aiohttp for async)...", "warn")
+                validated = validate_sync_fallback(unique_findings, args.domain, shop_domain)
 
         valid_count = sum(1 for f in validated if f.get("valid"))
         log(f"Results: {C.GREEN}{C.BOLD}{valid_count} VALID{C.RESET} / {len(validated)} checked", "success")
@@ -3951,11 +4545,44 @@ def main(argv: Optional[List[str]] = None) -> int:
     write_sarif(sarif_findings, sarif_path, domain=args.domain)
     log(f"results.sarif  → {sarif_path}", "success")
 
+    try:
+        remember_scan_target(
+            args.domain,
+            files=files_to_scan if Path(files_to_scan).is_file() else None,
+            subdomains=subdomains_file if Path(subdomains_file).is_file() else None,
+            output=output_dir,
+        )
+    except Exception as exc:
+        log(f"Could not save target for rescan: {exc}", "warn")
+
+    pack_items = list(validated) + list(exposures)
+    if pack_items or informational:
+        hits_dir = pack_hit_bundle(
+            output_dir,
+            validated,
+            exposures=exposures,
+            informational=informational,
+        )
+        if hits_dir:
+            n_src = 0
+            src_dir = hits_dir / "sources"
+            if src_dir.is_dir():
+                n_src = sum(1 for p in src_dir.iterdir() if p.is_file())
+            log(
+                f"Hit bundle: {n_src} JS/.map files + keys + summary → {hits_dir}",
+                "success",
+            )
+
     valid_count = sum(1 for f in validated if f.get("valid"))
+    elapsed_txt = fmt_hms(_ETA.snapshot()["elapsed_s"]) if _ETA is not None else ""
+    if _ETA is not None:
+        _ETA.finish()
     print(f"\n{C.CYAN}{'═' * 62}{C.RESET}")
     print(f"{C.BOLD}  PIPELINE COMPLETE{C.RESET}")
     print(f"{C.CYAN}{'═' * 62}{C.RESET}")
     print(f"  Domain       :  {C.BOLD}{args.domain}{C.RESET}")
+    if elapsed_txt:
+        print(f"  Elapsed      :  {C.BOLD}{elapsed_txt}{C.RESET}")
     print(f"  Subdomains   :  {C.BOLD}{sub_count}{C.RESET}")
     print(f"  Live hosts   :  {C.BOLD}{live_count}{C.RESET}")
     print(f"  URLs scanned :  {C.BOLD}{url_count}{C.RESET}")
@@ -3967,6 +4594,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     if exposures:
         print(f"  Exposures    :  {C.YELLOW}{C.BOLD}{len(exposures)}{C.RESET} source maps")
     print(f"  Output dir   :  {C.BOLD}{output_dir}/{C.RESET}")
+    hits_dir = output_dir / "hits"
+    if hits_dir.is_dir():
+        print(f"  Hit bundle   :  {C.BOLD}{hits_dir}/{C.RESET}")
     print(f"{C.CYAN}{'═' * 62}{C.RESET}\n")
 
     # Merge gate: live-validated secrets fail the process (CI can block merges)

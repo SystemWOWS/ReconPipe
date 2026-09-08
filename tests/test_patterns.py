@@ -137,6 +137,8 @@ class TrufflehogCmdTests(unittest.TestCase):
         self.assertIn("/tmp/downloaded_files", cmd)
         self.assertNotIn("--path", cmd)
         self.assertEqual(cmd[-1], "/tmp/downloaded_files")
+        self.assertIn("--no-update", cmd)
+        self.assertIn("--json", cmd)
 
 
 def json_load(path: Path):

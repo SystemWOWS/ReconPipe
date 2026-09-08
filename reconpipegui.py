@@ -1,17 +1,4 @@
 #!/usr/bin/env python3
-"""
-ReconPipe Professional GUI — NiceGUI frontend for reconpipe.py
-
-Linux desktop window (default when a display is available):
-  python3 reconpipegui.py
-  ./reconpipe-gui
-
-Localhost browser fallback:
-  python3 reconpipegui.py --browser
-
-Exposes every CLI option, streams pipeline output, browses artifacts,
-and re-tests findings with ReconPipe's configured validators only.
-"""
 
 from __future__ import annotations
 
@@ -63,6 +50,11 @@ ARTIFACT_FILES = [
     "subdomains.txt",
     "live_hosts.txt",
     "files_to_scan.txt",
+    "scan_status.json",
+    "hits/summary.txt",
+    "hits/findings.json",
+    "hits/valid_keys.json",
+    "hits/INDEX.txt",
 ]
 
 def strip_ansi(text: str) -> str:
@@ -87,6 +79,16 @@ def load_json_list(path: Path) -> List[Dict]:
     if isinstance(data, list):
         return [x for x in data if isinstance(x, dict)]
     return []
+
+
+def load_scan_status(path: Path) -> Dict[str, Any]:
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8", errors="ignore"))
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
 
 
 _LINE_CACHE: Dict[str, tuple] = {}
@@ -472,6 +474,28 @@ def build_ui() -> None:
                 with ui.column().classes("w-full lg:w-7/12 gap-3"):
                     with ui.card().classes("w-full rp-card"):
                         ui.label("Target & I/O").classes("rp-section")
+                        with ui.row().classes("w-full gap-2 items-end"):
+                            target_select = ui.select(
+                                [],
+                                label="Saved targets",
+                            ).classes("flex-1").props("dense outlined")
+                            targets_hint = ui.label("").classes(
+                                "text-xs text-slate-500"
+                            )
+
+                        def refresh_target_select() -> None:
+                            rows = rp.list_saved_targets()
+                            names = [r.get("name") or r.get("domain") or "" for r in rows]
+                            names = [n for n in names if n]
+                            target_select.options = names
+                            target_select.update()
+                            n = len(names)
+                            targets_hint.set_text(
+                                f"{n} saved · lists in {rp.user_data_dir() / 'lists'}"
+                                if n
+                                else f"Save a target to rescan without re-crawling"
+                            )
+
                         domain_in = ui.input(
                             "Target domain (-d)",
                             placeholder="example.com",
@@ -513,10 +537,74 @@ def build_ui() -> None:
                             placeholder="paste finding hashes to suppress",
                         ).classes("w-full").props("outlined dense")
 
+                        def apply_target(row: Dict[str, Any]) -> None:
+                            domain_in.set_value(row.get("domain") or "")
+                            files_in.set_value(row.get("files") or "")
+                            sub_in.set_value(row.get("subdomains") or "")
+                            out_in.set_value(row.get("output") or "")
+
+                        def load_selected_target() -> None:
+                            name = (target_select.value or "").strip()
+                            row = next(
+                                (r for r in rp.list_saved_targets() if r.get("name") == name),
+                                None,
+                            )
+                            if not row:
+                                ui.notify("Select a saved target", type="warning")
+                                return
+                            apply_target(row)
+                            ui.notify(f"Loaded {name}", type="positive")
+
+                        def save_current_target() -> None:
+                            domain = (domain_in.value or "").strip()
+                            if not domain:
+                                ui.notify("Enter a domain first", type="warning")
+                                return
+                            try:
+                                rp.upsert_saved_target(
+                                    {
+                                        "name": domain,
+                                        "domain": domain,
+                                        "files": (files_in.value or "").strip(),
+                                        "subdomains": (sub_in.value or "").strip(),
+                                        "output": (out_in.value or "").strip(),
+                                    }
+                                )
+                            except Exception as exc:
+                                ui.notify(str(exc), type="negative")
+                                return
+                            refresh_target_select()
+                            target_select.set_value(domain)
+                            ui.notify(f"Saved target {domain}", type="positive")
+
+                        def delete_selected_target() -> None:
+                            name = (target_select.value or "").strip()
+                            if not name:
+                                ui.notify("Select a saved target", type="warning")
+                                return
+                            rp.delete_saved_target(name)
+                            refresh_target_select()
+                            target_select.set_value(None)
+                            ui.notify(f"Deleted {name}", type="warning")
+
+                        with ui.row().classes("w-full gap-2"):
+                            ui.button(
+                                "Load target", on_click=load_selected_target, color="secondary"
+                            ).props("outline dense")
+                            ui.button(
+                                "Save target", on_click=save_current_target, color="primary"
+                            ).props("unelevated dense")
+                            ui.button(
+                                "Delete", on_click=delete_selected_target, color="negative"
+                            ).props("flat dense")
+                        refresh_target_select()
+                        build_ui.refresh_targets = refresh_target_select  # type: ignore[attr-defined]
+
                     with ui.card().classes("w-full rp-card"):
                         ui.label("Passive intel").classes("rp-section")
                         ui.label(
-                            "Optional host enrichment after Chaos. Keys stay in this session only."
+                            "Saved to ~/.reconpipe/keys.yaml so you do not re-enter them. "
+                            "That file stays on this machine (chmod 600)."
                         ).classes("text-xs text-gray-500 mb-2")
                         shodan_in = ui.input(
                             "Shodan API key (--shodan-key)",
@@ -544,6 +632,48 @@ def build_ui() -> None:
                         with ui.row().classes("w-full flex-wrap gap-4"):
                             skip_intel = ui.checkbox("Skip all intel (--skip-intel)")
                             skip_crtsh = ui.checkbox("Skip crt.sh (--skip-crtsh)")
+                        keys_hint = ui.label("").classes("text-xs text-slate-500")
+
+                        def fill_saved_keys() -> None:
+                            saved = rp.load_user_keys()
+                            if saved.get("chaos"):
+                                chaos_in.set_value(saved["chaos"])
+                            if saved.get("shodan"):
+                                shodan_in.set_value(saved["shodan"])
+                            if saved.get("censys_id"):
+                                censys_id_in.set_value(saved["censys_id"])
+                            if saved.get("censys_secret"):
+                                censys_secret_in.set_value(saved["censys_secret"])
+                            if saved.get("zoomeye"):
+                                zoomeye_in.set_value(saved["zoomeye"])
+                            n = sum(1 for ok in rp.saved_keys_status().values() if ok)
+                            keys_hint.set_text(
+                                f"{n} key(s) on disk · {rp.user_data_dir() / 'keys.yaml'}"
+                                if n
+                                else "No keys saved yet"
+                            )
+
+                        def save_intel_keys() -> None:
+                            path = rp.save_user_keys(
+                                {
+                                    "chaos": (chaos_in.value or "").strip(),
+                                    "shodan": (shodan_in.value or "").strip(),
+                                    "censys_id": (censys_id_in.value or "").strip(),
+                                    "censys_secret": (censys_secret_in.value or "").strip(),
+                                    "zoomeye": (zoomeye_in.value or "").strip(),
+                                }
+                            )
+                            fill_saved_keys()
+                            ui.notify(f"Saved API keys to {path}", type="positive")
+
+                        with ui.row().classes("w-full gap-2"):
+                            ui.button(
+                                "Save API keys", on_click=save_intel_keys, color="primary"
+                            ).props("unelevated dense")
+                            ui.button(
+                                "Reload saved keys", on_click=fill_saved_keys, color="secondary"
+                            ).props("outline dense")
+                        fill_saved_keys()
 
                     with ui.card().classes("w-full rp-card"):
                         ui.label("Pipeline options").classes("rp-section")
@@ -758,6 +888,9 @@ def build_ui() -> None:
                             status_label = ui.label("IDLE").classes(
                                 "font-mono font-bold tracking-widest"
                             )
+                        eta_label = ui.label("").classes(
+                            "text-xs text-slate-400 font-mono mt-1"
+                        )
                         stats_html = ui.html("", sanitize=False).classes("w-full")
 
                     with ui.card().classes("w-full rp-card"):
@@ -1440,11 +1573,9 @@ def build_ui() -> None:
 
         ws = STATE.workspace or STATE.runner.output_dir
         if running:
-            _text(status_label, "status", "RUNNING")
             if ui_cache.get("dot") != "run":
                 ui_cache["dot"] = "run"
                 status_dot.classes(replace="rp-status-dot run")
-            _text(footer_status, "footer_status", "RUNNING")
         elif STATE.runner.exit_code is not None:
             code = STATE.runner.exit_code
             _text(status_label, "status", f"DONE  exit {code}")
@@ -1455,12 +1586,14 @@ def build_ui() -> None:
                     replace="rp-status-dot live" if code == 0 else "rp-status-dot dead"
                 )
             _text(footer_status, "footer_status", f"DONE  {code}")
+            _text(eta_label, "eta", "")
         else:
             _text(status_label, "status", "IDLE")
             if ui_cache.get("dot") != "idle":
                 ui_cache["dot"] = "idle"
                 status_dot.classes(replace="rp-status-dot")
             _text(footer_status, "footer_status", "IDLE")
+            _text(eta_label, "eta", "")
 
         if STATE.domain:
             _text(footer_target, "target", STATE.domain)
@@ -1469,9 +1602,30 @@ def build_ui() -> None:
                 ui_cache["stats"] = ""
                 stats_html.set_content("")
             _text(footer_path, "path", "")
+            if running:
+                _text(status_label, "status", "RUNNING")
+                _text(footer_status, "footer_status", "RUNNING")
             return
         ws = Path(ws)
         _text(footer_path, "path", str(ws))
+        st = load_scan_status(ws / "scan_status.json") if running else {}
+        if running:
+            pct = int(st.get("pct") or 0)
+            left_s = int(st.get("remaining_s") or 0)
+            stage = str(st.get("stage_name") or "")
+            if st:
+                left = rp.fmt_remaining_short(left_s)
+                _text(status_label, "status", f"RUNNING  {pct}%")
+                _text(footer_status, "footer_status", f"RUNNING  ~{left}")
+                _text(
+                    eta_label,
+                    "eta",
+                    f"{st.get('timing') or f'About {pct}% done'}  {stage}",
+                )
+            else:
+                _text(status_label, "status", "RUNNING")
+                _text(footer_status, "footer_status", "RUNNING")
+                _text(eta_label, "eta", "Estimating remaining time…")
         subs = count_lines(ws / "subdomains.txt")
         live = count_lines(ws / "live_hosts.txt")
         urls = count_lines(ws / "files_to_scan.txt")
@@ -1550,6 +1704,10 @@ def build_ui() -> None:
                     pass
                 try:
                     build_ui.render_history()  # type: ignore[attr-defined]
+                except Exception:
+                    pass
+                try:
+                    build_ui.refresh_targets()  # type: ignore[attr-defined]
                 except Exception:
                     pass
             update_stats(force=True)

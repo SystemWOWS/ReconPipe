@@ -2,6 +2,7 @@
 """CLI adapters, quiet console, and keyhacks-style Google/SendGrid/FCM checks."""
 from __future__ import annotations
 
+import json
 import os
 import sys
 import unittest
@@ -76,6 +77,19 @@ class ToolCliAdapters(unittest.TestCase):
         self.assertIn("--json", cmd)
         self.assertIn("--no-update", cmd)
 
+    def test_trufflehog_always_disables_updater(self):
+        cmd = rp.trufflehog_filesystem_cmd(
+            "/tmp/dl", help_blob="filesystem [<path>...]\n  Find credentials."
+        )
+        self.assertEqual(
+            cmd[:4], ["trufflehog", "--no-update", "--json", "filesystem"]
+        )
+        self.assertTrue(
+            rp._is_trufflehog_updater_error(
+                'error occurred with trufflehog updater {"error": "cannot move binary"}'
+            )
+        )
+
     def test_katana_uses_pd_flags(self):
         cmd = rp.build_katana_cmd(
             "hosts.txt", "out.txt", headless=True, jsl=True, help_blob=KATANA_HELP
@@ -132,12 +146,69 @@ class QuietConsole(unittest.TestCase):
         self.assertTrue(rp.console_keep_line("[09:00:00] [*] Katana: 12 URLs added"))
         self.assertTrue(rp.console_keep_line("  [3/6] URL DISCOVERY"))
         self.assertTrue(rp.console_keep_line("[gui] Started: reconpipe.py"))
+        self.assertTrue(
+            rp.console_keep_line(
+                "[09:00:00] [*] Timing: About 28% done; ETC: 20:51 (0:12:40 remaining)"
+            )
+        )
         self.assertFalse(rp.console_keep_line("https://cdn.example.com/app.js?x=1"))
         self.assertFalse(rp.console_keep_line("found endpoint /api/v1/users"))
 
     def test_verbose_keeps_all(self):
         with patch.dict(os.environ, {"RECONPIPE_VERBOSE": "1"}):
             self.assertTrue(rp.console_keep_line("https://cdn.example.com/app.js"))
+
+
+class ScanEtaTests(unittest.TestCase):
+    def test_fmt_hms(self):
+        self.assertEqual(rp.fmt_hms(0), "0:00:00")
+        self.assertEqual(rp.fmt_hms(400), "0:06:40")
+        self.assertEqual(rp.fmt_remaining_short(40), "40s")
+        self.assertEqual(rp.fmt_remaining_short(600), "10m")
+
+    def test_skip_flags_shrink_budget(self):
+        full = rp.ScanEta()
+        full.configure(
+            tools={"katana": True, "waymore": True, "gospider": True, "trufflehog": True}
+        )
+        full.set_work(subs=200, live=40, urls=500)
+        slim = rp.ScanEta()
+        slim.configure(
+            skip_chaos=True,
+            skip_httpx=True,
+            skip_discovery=True,
+            skip_intel=True,
+            no_trufflehog=True,
+            no_validate=True,
+        )
+        self.assertGreater(sum(full.budgets().values()), sum(slim.budgets().values()))
+
+    def test_remaining_falls_as_stages_complete(self):
+        eta = rp.ScanEta()
+        eta.configure(tools={"katana": True, "waymore": True})
+        eta.set_work(subs=80, live=20, urls=200)
+        eta.begin_stage(1, "Subdomains")
+        early = eta.snapshot()["remaining_s"]
+        eta.begin_stage(6, "Saving Results")
+        late = eta.snapshot()["remaining_s"]
+        self.assertLess(late, early)
+        snap = eta.snapshot()
+        self.assertIn("ETC:", snap["timing"])
+        self.assertIn("remaining", snap["timing"])
+
+    def test_writes_scan_status_json(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            eta = rp.ScanEta(Path(td))
+            eta.set_work(subs=10, live=4, urls=20)
+            eta.begin_stage(3, "URL Discovery")
+            path = Path(td) / "scan_status.json"
+            self.assertTrue(path.is_file())
+            data = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(data["stage"], 3)
+            self.assertGreaterEqual(data["remaining_s"], 0)
+            self.assertIn("timing", data)
 
 
 class GoogleKeyhacks(unittest.TestCase):
