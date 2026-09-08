@@ -1,43 +1,173 @@
 min_confidence: 30
 patterns:
-  google_api: 'AIza[0-9A-Za-z\-_]{35}'
-  google_oauth: 'ya29\.[0-9A-Za-z\-_]{20,}'
+  google_api: AIza[0-9A-Za-z\-_]{35}
+  google_oauth: ya29\.[0-9A-Za-z\-_]{20,}
   aws_access_key: (?:AKIA|ASIA)[0-9A-Z]{16}
-  aws_secret: '(?i)\baws.{0,20}(?:secret|access_key)?[''\"]?([0-9a-zA-Z\/+]{40})[''\"]?'
-  aws_session_token: '(?i)(?:aws[_-]?session[_-]?token|x-amz-security-token)[''\"]?\s*[=:]\s*[''\"]?([A-Za-z0-9/+=]{100,})[''\"]?'
+  aws_secret: (?i)\baws.{0,20}(?:secret|access_key)?['\"]?([0-9a-zA-Z\/+]{40})['\"]?
+  aws_session_token: (?i)(?:aws[_-]?session[_-]?token|x-amz-security-token)['\"]?\s*[=:]\s*['\"]?([A-Za-z0-9/+=]{100,})['\"]?
   github_pat: ghp_[0-9a-zA-Z]{36}
   github_fine_pat: github_pat_[0-9a-zA-Z_]{22}_[0-9a-zA-Z_]{59}
   github_oauth: gho_[0-9a-zA-Z]{36}
   github_app: (?:ghu|ghs)_[0-9a-zA-Z]{36}
-  gitlab_pat: 'glpat-[A-Za-z0-9_\-]{20,}'
+  gitlab_pat: glpat-[A-Za-z0-9_\-]{20,}
   stripe_live: sk_live_[0-9a-zA-Z]{24,}
   stripe_test: sk_test_[0-9a-zA-Z]{24,}
   stripe_restricted: rk_(?:live|test)_[0-9a-zA-Z]{24,}
   stripe_publishable: pk_(?:live|test)_[0-9a-zA-Z]{24,}
   openai_key: sk-proj-[A-Za-z0-9_-]{20,}-[A-Za-z0-9_-]{20,}
   anthropic_key: sk-ant-api03-[A-Za-z0-9_-]{20,}
-  sendgrid: 'SG\.[a-zA-Z0-9\-_]{22}\.[a-zA-Z0-9\-_]{43}'
+  sendgrid: SG\.[a-zA-Z0-9\-_]{22}\.[a-zA-Z0-9\-_]{43}
   mailgun: key-[0-9a-zA-Z]{32}
   twilio_sid: AC[a-z0-9]{32}
   twilio_token: SK[0-9a-fA-F]{32}
   slack_token: xox[baprs]-[0-9]{10,}-[0-9a-zA-Z]{10,}
-  slack_webhook: 'https://hooks\.slack\.com/services/T[a-zA-Z0-9_]+/B[a-zA-Z0-9_]+/[a-zA-Z0-9_]+'
+  slack_webhook: https://hooks\.slack\.com/services/T[a-zA-Z0-9_]+/B[a-zA-Z0-9_]+/[a-zA-Z0-9_]+
   firebase_url: '[a-z0-9-]+\.firebaseio\.com'
   firebase_key: AAAA[A-Za-z0-9_-]{7}:[A-Za-z0-9_-]{140}
   digitalocean_pat: dop_v1_[a-f0-9]{64}
   npm_token: npm_[A-Za-z0-9]{36}
-  pypi_token: 'pypi-AgEIcHlwaS5vcmc[A-Za-z0-9\-_]{50,}'
+  pypi_token: pypi-AgEIcHlwaS5vcmc[A-Za-z0-9\-_]{50,}
   private_key_pem: '-----BEGIN (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----'
   uuid_candidate: '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}'
-  jwt: 'eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}'
+  jwt: eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}
   shopify_token: shpat_[a-fA-F0-9]{32}
   shopify_secret: shpss_[a-fA-F0-9]{32}
   mailchimp: '[0-9a-f]{32}-us[0-9]{1,2}'
-  discord_token: '(?<![A-Za-z0-9_-])(?:mfa\.[A-Za-z0-9_-]{20,}|[MN][A-Za-z0-9_-]{23,27}\.[A-Za-z0-9_-]{6,7}\.[A-Za-z0-9_-]{27})(?![A-Za-z0-9_-])'
-  discord_webhook: 'https://discord(?:app)?\.com/api/webhooks/[0-9]+/[a-zA-Z0-9_-]+'
+  discord_token: (?<![A-Za-z0-9_-])(?:mfa\.[A-Za-z0-9_-]{20,}|[MN][A-Za-z0-9_-]{23,27}\.[A-Za-z0-9_-]{6,7}\.[A-Za-z0-9_-]{27})(?![A-Za-z0-9_-])
+  discord_webhook: https://discord(?:app)?\.com/api/webhooks/[0-9]+/[a-zA-Z0-9_-]+
   telegram_bot: '[0-9]{8,10}:[a-zA-Z0-9_-]{35}'
-  mapbox_token: 'pk\.[A-Za-z0-9_-]{20,}'
-  generic_secret: '(?i)(secret|token|password|passwd|api_key|apikey|access_key)[''\"]?\s*[:=]\s*[''\"]([a-zA-Z0-9!@#$%^&*\-_]{16,})[''\"]'
+  mapbox_token: pk\.[A-Za-z0-9_-]{20,}
+  generic_secret: (?i)(secret|token|password|passwd|api_key|apikey|access_key)['\"]?\s*[:=]\s*['\"]([a-zA-Z0-9!@#$%^&*\-_]{16,})['\"]
+  cloudflare_api: (?i)(?:cfpat-[A-Za-z0-9_-]{20,}|(?:cloudflare|cf[_-]?api[_-]?(?:token|key))['\" \t:=]{1,12}([A-Za-z0-9_-]{37,50}))
+  azure_sas: sv=\d{4}-\d{2}-\d{2}[^\s"']{0,500}sig=[A-Za-z0-9%+/=]{10,}
+  huggingface_token: hf_[A-Za-z0-9]{34,}
+  notion_token: (?:secret_[a-zA-Z0-9]{43}|ntn_[A-Za-z0-9]{40,})
+  grafana_token: glsa_[A-Za-z0-9]{32}(?:_[A-Fa-f0-9]{8})?
+  hashicorp_vault: (?:hvs|hvb)\.[A-Za-z0-9_-]{24,}
+  datadog_api_key: (?i)(?:datadog|dd[_-]?api[_-]?key)['\" \t:=]{1,12}([a-f0-9]{32})
+  gcp_service_acct: (?s)\{\s*"type"\s*:\s*"service_account".{0,8000}?"private_key"\s*:\s*"-----BEGIN
+  linear_api_key: lin_api_[a-zA-Z0-9]{40}
+  supabase_service: eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}
+  vercel_token: (?i)(?:vercel[_-]?(?:token|api[_-]?key|api))['\" \t:=]{1,12}([A-Za-z0-9]{24})
+  netlify_pat: (?i)(?:netlify[_-]?(?:token|auth|pat|api[_-]?key))['\" \t:=]{1,12}([a-zA-Z0-9_-]{43,50})
+  railway_token: railway_[A-Za-z0-9]{32,}
+  render_api: rnd_[a-zA-Z0-9]{24,}
+  flyio_token: fo1_[A-Za-z0-9_-]{40,}
+  planetscale_token: pscale_tkn_[A-Za-z0-9_]{32,}
+  supabase_anon: eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}
+  neon_api: neon_[a-zA-Z0-9_]{32,}
+  upstash_token: (?i)(?:upstash[_-]?(?:token|redis|api))['\" \t:=]{1,12}(AX[a-zA-Z0-9_-]{36,})
+  circleci_token: (?:CIRCLE_TOKEN|circleci[_-]?token)['\" \t:=]{1,12}([a-fA-F0-9]{40})|circleci_[a-fA-F0-9]{40}
+  travis_token: (?i)(?:travis[_-]?(?:token|api))['\" \t:=]{1,12}([A-Za-z0-9_-]{22,})
+  jenkins_token: (?i)(?:jenkins[_-]?(?:token|api))['\" \t:=]{1,12}([a-fA-F0-9]{32,34})
+  drone_token: (?i)(?:drone[_-]?token)['\" \t:=]{1,12}([A-Za-z0-9]{32,})
+  buildkite_token: bkua_[a-zA-Z0-9]{40}
+  codefresh_token: (?i)(?:codefresh[_-]?(?:token|api))['\" \t:=]{1,12}([a-zA-Z0-9._-]{40,})
+  teamcity_token: (?i)(?:teamcity[_-]?token)['\" \t:=]{1,12}([A-Za-z0-9_-]{20,})
+  bitbucket_app_password: ATBB[A-Za-z0-9]{32,}
+  sentry_auth: sntrys_[A-Za-z0-9]{64}
+  sentry_dsn: https://[a-f0-9]{32}@[a-z0-9.-]+\.ingest(?:\.sentry\.io|\.[a-z0-9.-]+)/[0-9]+
+  newrelic_api: NRAK-[A-Z0-9]{27}
+  newrelic_license: '[a-f0-9]{40}NRAL'
+  newrelic_insert: NRII-[A-Za-z0-9_-]{32}
+  splunk_hec: (?i)(?:splunk[_-]?(?:hec|token))['\" \t:=]{1,12}([a-f0-9-]{36})
+  elastic_api: (?i)(?:elastic[_-]?(?:api|cloud|key))['\" \t:=]{1,12}([A-Za-z0-9_=-]{40,})
+  logdna_key: (?i)(?:logdna[_-]?(?:key|ingestion))['\" \t:=]{1,12}([a-f0-9]{32})
+  loggly_token: (?i)(?:loggly[_-]?token)['\" \t:=]{1,12}([a-f0-9-]{36})
+  papertrail_token: (?i)(?:papertrail[_-]?token)['\" \t:=]{1,12}([A-Za-z0-9]{32,})
+  rollbar_token: (?i)(?:rollbar[_-]?(?:token|access))['\" \t:=]{1,12}([a-f0-9]{32})
+  bugsnag_api: (?i)(?:bugsnag[_-]?(?:api|key))['\" \t:=]{1,12}([a-f0-9]{32})
+  honeybadger_api: (?i)(?:honeybadger[_-]?(?:api|key))['\" \t:=]{1,12}([A-Za-z0-9]{20,})
+  teams_webhook: https://[a-z0-9-]+\.webhook\.office\.com/webhookb2/[A-Za-z0-9@._/?=-]+
+  vonage_api: (?i)(?:(?:vonage|nexmo)[_-]?(?:api|key))['\" \t:=]{1,12}([a-f0-9]{8})
+  messagebird_key: (?i)(?:messagebird[_-]?(?:key|access))['\" \t:=]{1,12}([A-Za-z0-9]{25})
+  postmark_token: (?i)(?:postmark[_-]?(?:token|server))['\" \t:=]{1,12}([a-f0-9-]{36})
+  mailjet_api: (?i)(?:mailjet[_-]?(?:api|key))['\" \t:=]{1,12}([a-f0-9]{32})
+  sparkpost_api: (?i)(?:sparkpost[_-]?(?:api|key))['\" \t:=]{1,12}([a-f0-9]{40})
+  intercom_token: (?i)(?:intercom[_-]?(?:token|access))['\" \t:=]{1,12}([a-zA-Z0-9_=-]{40,})
+  zendesk_token: (?i)(?:zendesk[_-]?(?:token|api))['\" \t:=]{1,12}([A-Za-z0-9]{40})
+  freshdesk_api: (?i)(?:freshdesk[_-]?(?:api|key))['\" \t:=]{1,12}([A-Za-z0-9]{20})
+  square_access: (?:EAAA|sq0atp-)[A-Za-z0-9_-]{22,60}
+  square_application: sq0idp-[A-Za-z0-9_-]{22}
+  paypal_client_id: (?i)(?:paypal[_-]?(?:client[_-]?id|clientid))['\" \t:=]{1,12}(A[a-zA-Z0-9_-]{79})
+  paypal_secret: (?i)(?:paypal[_-]?(?:secret|client[_-]?secret))['\" \t:=]{1,12}(E[a-zA-Z0-9_-]{79})
+  braintree_token: (?i)(?:braintree[_-]?(?:token|key|private))['\" \t:=]{1,12}([a-z0-9]{32})
+  adyen_api: AQE[a-zA-Z0-9+/]{40,}
+  mollie_api: (?i)(?:mollie[_-]?(?:api|key|live|test))['\" \t:=]{1,12}((?:live|test)_[A-Za-z0-9]{30,})
+  klarna_api: (?i)(?:klarna[_-]?(?:api|key))['\" \t:=]{1,12}([A-Za-z0-9_-]{40,})
+  woocommerce_key: ck_[a-f0-9]{40}
+  woocommerce_secret: cs_[a-f0-9]{40}
+  bigcommerce_token: (?i)(?:bigcommerce[_-]?(?:token|access))['\" \t:=]{1,12}([A-Za-z0-9]{64})
+  algolia_api: (?i)(?:algolia[_-]?(?:api|search)[_-]?key)['\" \t:=]{1,12}([a-f0-9]{32})
+  algolia_admin: (?i)(?:algolia[_-]?admin[_-]?key)['\" \t:=]{1,12}([a-f0-9]{32})
+  meilisearch_key: (?i)(?:meili(?:search)?[_-]?(?:master|api))['\" \t:=]{1,12}([A-Za-z0-9_-]{40,})
+  typesense_api: (?i)(?:typesense[_-]?(?:api|key))['\" \t:=]{1,12}([A-Za-z0-9]{32,})
+  mixpanel_token: (?i)(?:mixpanel[_-]?(?:token|project))['\" \t:=]{1,12}([a-f0-9]{32})
+  mixpanel_secret: (?i)(?:mixpanel[_-]?(?:secret|api))['\" \t:=]{1,12}([a-f0-9]{32})
+  amplitude_api: (?i)(?:amplitude[_-]?(?:api|key))['\" \t:=]{1,12}([a-f0-9]{32})
+  segment_write: (?i)(?:segment[_-]?(?:write|key))['\" \t:=]{1,12}([A-Za-z0-9]{32})
+  heap_app_id: (?i)(?:heap[_-]?(?:app|id|app[_-]?id))['\" \t:=]{1,12}([0-9]{9,10})
+  plausible_api: (?i)(?:plausible[_-]?(?:api|key))['\" \t:=]{1,12}([A-Za-z0-9_-]{40,})
+  posthog_api: phc_[A-Za-z0-9]{32,}
+  cohere_api: (?i)(?:cohere[_-]?(?:api|key))['\" \t:=]{1,12}([A-Za-z0-9]{40})
+  replicate_api: r8_[A-Za-z0-9]{40}
+  stability_api: (?i)(?:stability[_-]?(?:api|key))['\" \t:=]{1,12}(sk-[A-Za-z0-9]{48})
+  together_api: (?i)(?:together[_-]?(?:api|key))['\" \t:=]{1,12}([a-f0-9]{64})
+  anyscale_api: (?i)(?:anyscale[_-]?(?:api|key))['\" \t:=]{1,12}([A-Za-z0-9_-]{40,})
+  pinecone_api: (?i)(?:pinecone[_-]?(?:api|key))['\" \t:=]{1,12}([a-f0-9-]{36})
+  weaviate_api: (?i)(?:weaviate[_-]?(?:api|key))['\" \t:=]{1,12}([A-Za-z0-9]{50,})
+  qdrant_api: (?i)(?:qdrant[_-]?(?:api|key))['\" \t:=]{1,12}([A-Za-z0-9_-]{32,})
+  elevenlabs_api: (?i)(?:eleven[_-]?labs[_-]?(?:api|key))['\" \t:=]{1,12}([a-f0-9]{32})
+  deepgram_api: (?i)(?:deepgram[_-]?(?:api|key))['\" \t:=]{1,12}([a-f0-9]{40})
+  assemblyai_api: (?i)(?:assemblyai[_-]?(?:api|key))['\" \t:=]{1,12}([a-f0-9]{32})
+  doppler_token: dp\.(?:pt|ct|sa|scim)\.[A-Za-z0-9_-]{40,}
+  infisical_token: (?i)(?:infisical[_-]?(?:token|key))['\" \t:=]{1,12}([A-Za-z0-9_-]{40,})
+  onepassword_connect: (?i)(?:1password|op[_-]?connect|onepassword)['\" \t:=]{1,12}(eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)
+  conjur_api: (?i)(?:conjur[_-]?(?:api|authn))['\" \t:=]{1,12}([A-Za-z0-9_-]{40,})
+  akeyless_token: (?i)(?:akeyless[_-]?(?:token|access))['\" \t:=]{1,12}([A-Za-z0-9._-]{100,})
+  terraform_cloud: (?:atlasv1|TFE)[A-Za-z0-9]{44}
+  pulumi_token: pul-[a-f0-9]{40}
+  spacelift_api: (?i)(?:spacelift[_-]?(?:api|key))['\" \t:=]{1,12}([A-Za-z0-9_-]{40,})
+  mongodb_srv: mongodb(?:\+srv)?://[^:\s]+:[^@\s]+@[^/\s]+
+  postgres_uri: postgres(?:ql)?://[^:\s]+:[^@\s]+@[^/\s]+/[^\s'\"]+
+  mysql_uri: mysql://[^:\s]+:[^@\s]+@[^/\s]+/[^\s'\"]+
+  redis_uri: rediss?://[^:\s]*:[^@\s]+@[^/\s]+
+  fauna_secret: fn[A-Za-z0-9_-]{40,}
+  cockroachdb_api: (?i)(?:cockroach[_-]?(?:api|key))['\" \t:=]{1,12}([A-Za-z0-9_-]{40,})
+  airtable_api: (?i)(?:airtable[_-]?(?:api|pat|key))['\" \t:=]{1,12}((?:pat|key)[A-Za-z0-9.]{14,80})
+  notion_database: (?i)(?:notion[_-]?(?:database|db)[_-]?id)['\" \t:=]{1,12}([a-f0-9]{32})
+  contentful_cda: (?i)(?:contentful[_-]?(?:delivery|cda|access))['\" \t:=]{1,12}([A-Za-z0-9_-]{43})
+  contentful_cma: CFPAT-[A-Za-z0-9_-]{43}
+  sanity_token: (?i)(?:sanity[_-]?(?:token|api))['\" \t:=]{1,12}(sk[A-Za-z0-9]{40,})
+  strapi_token: (?i)(?:strapi[_-]?(?:token|api))['\" \t:=]{1,12}([a-f0-9]{64,})
+  azure_client_secret: (?i)(?:azure[_-]?client[_-]?secret)['\" \t:=]{1,12}([A-Za-z0-9~._-]{34,44})
+  azure_storage_key: (?i)(?:(?:account[_-]?key|storage[_-]?key))['\" \t:=]{1,12}([A-Za-z0-9+/=]{86,88})
+  azure_cosmos_key: (?i)(?:(?:cosmos|documentdb)[_-]?(?:key|primary))['\" \t:=]{1,12}([A-Za-z0-9+/=]{86,90})
+  azure_devops_pat: (?i)(?:(?:azure[_-]?devops|vsts)[_-]?(?:pat|token))['\" \t:=]{1,12}([a-z0-9]{52})
+  aws_mws_auth: amzn\.mws\.[0-9a-f-]{36}
+  oci_api_key: ocid1\.tenancy\.oc1\.\.[a-z0-9]{60}
+  linode_pat: (?i)(?:linode[_-]?(?:pat|token|api))['\" \t:=]{1,12}([a-f0-9]{64})
+  vultr_api: (?i)(?:vultr[_-]?(?:api|key))['\" \t:=]{1,12}([A-Z0-9]{36})
+  hetzner_api: (?i)(?:hetzner[_-]?(?:api|token))['\" \t:=]{1,12}([A-Za-z0-9]{64})
+  scaleway_secret: (?i)(?:scaleway[_-]?(?:secret|key))['\" \t:=]{1,12}([a-f0-9-]{36})
+  pagerduty_api: (?i)(?:pagerduty[_-]?(?:api|token))['\" \t:=]{1,12}([A-Za-z0-9_+-]{20})
+  opsgenie_api: (?i)(?:opsgenie[_-]?(?:api|key))['\" \t:=]{1,12}([a-f0-9-]{36})
+  atlassian_api: (?i)(?:atlassian[_-]?(?:token|api))['\" \t:=]{1,12}([A-Za-z0-9]{20,})
+  jira_token: (?i)(?:jira[_-]?(?:token|api))['\" \t:=]{1,12}([A-Za-z0-9]{24})
+  confluence_token: (?i)(?:confluence[_-]?(?:token|api))['\" \t:=]{1,12}([A-Za-z0-9]{24})
+  asana_pat: '[01]/[0-9]{16}:[A-Za-z0-9]{32}'
+  monday_api: (?i)(?:monday[_-]?(?:api|token))['\" \t:=]{1,12}(eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)
+  clickup_api: pk_[0-9]+_[A-Z0-9]{32}
+  trello_api: (?i)(?:trello[_-]?(?:api|key))['\" \t:=]{1,12}([a-f0-9]{32})
+  okta_api: (?i)(?:okta[_-]?(?:api|token|ssws))['\" \t:=]{1,12}(00[A-Za-z0-9_-]{40})
+  auth0_token: (?i)(?:auth0[_-]?(?:token|secret|client[_-]?secret))['\" \t:=]{1,12}([A-Za-z0-9_-]{32,})
+  clerk_secret: (?i)(?:clerk[_-]?(?:secret|api))['\" \t:=]{1,12}(sk_(?:live|test)_[A-Za-z0-9]{27,})
+  supertokens_key: (?i)(?:supertokens[_-]?(?:api|key))['\" \t:=]{1,12}([A-Za-z0-9_-]{40,})
+  launchdarkly_sdk: sdk-[a-f0-9-]{36}
+  launchdarkly_api: api-[a-f0-9-]{36}
+  split_api: (?i)(?:split[_-]?(?:api|key))['\" \t:=]{1,12}([A-Za-z0-9]{50,})
+  statsig_secret: (?i)(?:statsig[_-]?(?:secret|console))['\" \t:=]{1,12}(secret-[A-Za-z0-9]{32,})
+  unleash_token: (?i)(?:unleash[_-]?(?:token|api))['\" \t:=]{1,12}([A-Za-z0-9*:._-]{30,})
 confidence:
   google_api: 90
   google_oauth: 85
@@ -78,7 +208,137 @@ confidence:
   telegram_bot: 88
   mapbox_token: 82
   generic_secret: 35
+  cloudflare_api: 88
+  azure_sas: 90
+  huggingface_token: 92
+  notion_token: 90
+  grafana_token: 88
+  hashicorp_vault: 90
+  datadog_api_key: 85
+  gcp_service_acct: 96
+  linear_api_key: 92
+  supabase_service: 90
   source_map_exposure: 92
+  vercel_token: 88
+  netlify_pat: 88
+  railway_token: 94
+  render_api: 92
+  flyio_token: 92
+  planetscale_token: 94
+  supabase_anon: 70
+  neon_api: 92
+  upstash_token: 86
+  circleci_token: 90
+  travis_token: 82
+  jenkins_token: 82
+  drone_token: 84
+  buildkite_token: 94
+  codefresh_token: 86
+  teamcity_token: 82
+  bitbucket_app_password: 92
+  sentry_auth: 94
+  sentry_dsn: 70
+  newrelic_api: 94
+  newrelic_license: 80
+  newrelic_insert: 82
+  splunk_hec: 84
+  elastic_api: 84
+  logdna_key: 82
+  loggly_token: 82
+  papertrail_token: 82
+  rollbar_token: 86
+  bugsnag_api: 84
+  honeybadger_api: 84
+  teams_webhook: 92
+  vonage_api: 80
+  messagebird_key: 86
+  postmark_token: 88
+  mailjet_api: 84
+  sparkpost_api: 86
+  intercom_token: 88
+  zendesk_token: 84
+  freshdesk_api: 82
+  square_access: 96
+  square_application: 40
+  paypal_client_id: 50
+  paypal_secret: 94
+  braintree_token: 84
+  adyen_api: 88
+  mollie_api: 90
+  klarna_api: 86
+  woocommerce_key: 88
+  woocommerce_secret: 90
+  bigcommerce_token: 86
+  algolia_api: 84
+  algolia_admin: 94
+  meilisearch_key: 86
+  typesense_api: 86
+  mixpanel_token: 70
+  mixpanel_secret: 88
+  amplitude_api: 80
+  segment_write: 80
+  heap_app_id: 30
+  plausible_api: 86
+  posthog_api: 90
+  cohere_api: 90
+  replicate_api: 94
+  stability_api: 88
+  together_api: 86
+  anyscale_api: 86
+  pinecone_api: 86
+  weaviate_api: 84
+  qdrant_api: 84
+  elevenlabs_api: 88
+  deepgram_api: 88
+  assemblyai_api: 88
+  doppler_token: 96
+  infisical_token: 88
+  onepassword_connect: 86
+  conjur_api: 86
+  akeyless_token: 86
+  terraform_cloud: 94
+  pulumi_token: 94
+  spacelift_api: 88
+  mongodb_srv: 96
+  postgres_uri: 96
+  mysql_uri: 96
+  redis_uri: 94
+  fauna_secret: 90
+  cockroachdb_api: 86
+  airtable_api: 88
+  notion_database: 40
+  contentful_cda: 80
+  contentful_cma: 96
+  sanity_token: 86
+  strapi_token: 86
+  azure_client_secret: 90
+  azure_storage_key: 94
+  azure_cosmos_key: 92
+  azure_devops_pat: 92
+  aws_mws_auth: 90
+  oci_api_key: 70
+  linode_pat: 90
+  vultr_api: 90
+  hetzner_api: 90
+  scaleway_secret: 88
+  pagerduty_api: 88
+  opsgenie_api: 88
+  atlassian_api: 84
+  jira_token: 84
+  confluence_token: 84
+  asana_pat: 92
+  monday_api: 86
+  clickup_api: 92
+  trello_api: 80
+  okta_api: 90
+  auth0_token: 88
+  clerk_secret: 92
+  supertokens_key: 86
+  launchdarkly_sdk: 50
+  launchdarkly_api: 94
+  split_api: 84
+  statsig_secret: 88
+  unleash_token: 84
 validators:
   google_api:
     url: https://www.googleapis.com/geolocation/v1/geolocate?key={key}
@@ -172,7 +432,7 @@ validators:
     notes:
       200: 'VALID: Authenticated GitLab user'
   stripe_live:
-    url: https://api.stripe.com/v1/charges?limit=1
+    url: https://api.stripe.com/v1/account
     method: GET
     headers:
       Authorization: Bearer {key}
@@ -180,10 +440,13 @@ validators:
     - 200
     invalid_codes:
     - 401
+    restricted_codes:
+    - 403
     notes:
       200: 'VALID LIVE KEY: Active Stripe production key'
+      403: 'VALID (restricted): Stripe live key accepted but /v1/account forbidden'
   stripe_test:
-    url: https://api.stripe.com/v1/charges?limit=1
+    url: https://api.stripe.com/v1/account
     method: GET
     headers:
       Authorization: Bearer {key}
@@ -191,10 +454,13 @@ validators:
     - 200
     invalid_codes:
     - 401
+    restricted_codes:
+    - 403
     notes:
       200: 'VALID TEST KEY: Active Stripe test key'
+      403: 'VALID (restricted): Stripe test key accepted but /v1/account forbidden'
   stripe_restricted:
-    url: https://api.stripe.com/v1/charges?limit=1
+    url: https://api.stripe.com/v1/account
     method: GET
     headers:
       Authorization: Bearer {key}
@@ -202,8 +468,11 @@ validators:
     - 200
     invalid_codes:
     - 401
+    restricted_codes:
+    - 403
     notes:
       200: 'VALID: Active Stripe restricted key'
+      403: 'VALID (restricted): Stripe restricted key accepted'
   openai_key:
     url: https://api.openai.com/v1/models
     method: GET
@@ -421,8 +690,1131 @@ validators:
     skip_reason: 'Informational: Firebase URLs are public-by-design'
   source_map_exposure:
     skip_reason: Exposure confirmed by fetch — see source_map_exposures.json
+  cloudflare_api:
+    url: https://api.cloudflare.com/client/v4/user
+    method: GET
+    headers:
+      Authorization: Bearer {key}
+    valid_codes:
+    - 200
+    invalid_codes:
+    - 401
+    notes:
+      200: 'VALID: Cloudflare API token (user endpoint)'
+  azure_sas:
+    azure_sas_inspect: true
+  huggingface_token:
+    url: https://huggingface.co/api/whoami-v2
+    method: GET
+    headers:
+      Authorization: Bearer {key}
+    valid_codes:
+    - 200
+    invalid_codes:
+    - 401
+    notes:
+      200: 'VALID: Hugging Face token'
+  notion_token:
+    url: https://api.notion.com/v1/users/me
+    method: GET
+    headers:
+      Authorization: Bearer {key}
+      Notion-Version: '2022-06-28'
+    valid_codes:
+    - 200
+    invalid_codes:
+    - 401
+    notes:
+      200: 'VALID: Notion integration token'
+  grafana_token:
+    url: https://{domain}/api/user
+    method: GET
+    headers:
+      Authorization: Bearer {key}
+    valid_codes:
+    - 200
+    invalid_codes:
+    - 401
+    needs_grafana: true
+    notes:
+      200: 'VALID: Grafana service account token'
+  hashicorp_vault:
+    url: '{domain}/v1/auth/token/lookup-self'
+    method: GET
+    headers:
+      X-Vault-Token: '{key}'
+    valid_codes:
+    - 200
+    invalid_codes:
+    - 401
+    - 403
+    needs_vault: true
+    notes:
+      200: 'VALID: Vault token lookup-self'
+  datadog_api_key:
+    url: https://api.datadoghq.com/api/v1/validate
+    method: GET
+    headers:
+      DD-API-KEY: '{key}'
+    valid_codes:
+    - 200
+    invalid_codes:
+    - 403
+    notes:
+      200: 'VALID: Datadog API key'
+  gcp_service_acct:
+    gcp_sa_inspect: true
+  linear_api_key:
+    url: https://api.linear.app/graphql
+    method: POST
+    headers:
+      Authorization: Bearer {key}
+      Content-Type: application/json
+    json_body:
+      query: '{ viewer { id name } }'
+    valid_codes:
+    - 200
+    invalid_codes:
+    - 401
+    notes:
+      200: 'VALID: Linear API key'
+  supabase_service:
+    jwt_inspect: true
+  vercel_token:
+    url: https://api.vercel.com/v2/user
+    method: GET
+    headers:
+      Authorization: Bearer {key}
+    valid_codes:
+    - 200
+    invalid_codes:
+    - 401
+    notes:
+      200: 'VALID: Vercel token'
+  netlify_pat:
+    url: https://api.netlify.com/api/v1/user
+    method: GET
+    headers:
+      Authorization: Bearer {key}
+    valid_codes:
+    - 200
+    invalid_codes:
+    - 401
+    notes:
+      200: 'VALID: Netlify PAT'
+  railway_token:
+    url: https://backboard.railway.app/graphql/v2
+    method: POST
+    headers:
+      Authorization: Bearer {key}
+      Content-Type: application/json
+    json_body:
+      query: '{ me { id email } }'
+    valid_codes:
+    - 200
+    invalid_codes:
+    - 401
+    notes:
+      200: 'VALID: Railway token'
+  render_api:
+    url: https://api.render.com/v1/owners
+    method: GET
+    headers:
+      Authorization: Bearer {key}
+    valid_codes:
+    - 200
+    invalid_codes:
+    - 401
+    notes:
+      200: 'VALID: Render API key'
+  flyio_token:
+    url: https://api.fly.io/graphql
+    method: POST
+    headers:
+      Authorization: Bearer {key}
+      Content-Type: application/json
+    json_body:
+      query: '{ viewer { email } }'
+    valid_codes:
+    - 200
+    invalid_codes:
+    - 401
+    notes:
+      200: 'VALID: Fly.io token'
+  planetscale_token:
+    url: https://api.planetscale.com/v1/organizations
+    method: GET
+    headers:
+      Authorization: Bearer {key}
+    valid_codes:
+    - 200
+    invalid_codes:
+    - 401
+    notes:
+      200: 'VALID: PlanetScale token'
+  supabase_anon:
+    jwt_inspect: true
+  neon_api:
+    url: https://console.neon.tech/api/v2/projects
+    method: GET
+    headers:
+      Authorization: Bearer {key}
+    valid_codes:
+    - 200
+    invalid_codes:
+    - 401
+    notes:
+      200: 'VALID: Neon API key'
+  upstash_token:
+    skip_reason: Upstash token — needs the Redis REST endpoint to probe
+  circleci_token:
+    url: https://circleci.com/api/v2/me
+    method: GET
+    headers:
+      Circle-Token: '{key}'
+    valid_codes:
+    - 200
+    invalid_codes:
+    - 401
+    - 403
+    notes:
+      200: 'VALID: CircleCI token'
+  travis_token:
+    url: https://api.travis-ci.com/user
+    method: GET
+    headers:
+      Authorization: token {key}
+      Travis-API-Version: '3'
+    valid_codes:
+    - 200
+    invalid_codes:
+    - 401
+    - 403
+    notes:
+      200: 'VALID: Travis CI token'
+  jenkins_token:
+    url: https://{domain}/crumbIssuer/api/json
+    method: GET
+    headers:
+      Authorization: Bearer {key}
+    valid_codes:
+    - 200
+    invalid_codes:
+    - 401
+    - 403
+    needs_domain: true
+    notes:
+      200: 'VALID: Jenkins token'
+  drone_token:
+    url: https://{domain}/api/user
+    method: GET
+    headers:
+      Authorization: Bearer {key}
+    valid_codes:
+    - 200
+    invalid_codes:
+    - 401
+    needs_domain: true
+    notes:
+      200: 'VALID: Drone token'
+  buildkite_token:
+    url: https://api.buildkite.com/v2/user
+    method: GET
+    headers:
+      Authorization: Bearer {key}
+    valid_codes:
+    - 200
+    invalid_codes:
+    - 401
+    notes:
+      200: 'VALID: Buildkite token'
+  codefresh_token:
+    url: https://g.codefresh.io/api/user
+    method: GET
+    headers:
+      Authorization: Bearer {key}
+    valid_codes:
+    - 200
+    invalid_codes:
+    - 401
+    notes:
+      200: 'VALID: Codefresh token'
+  teamcity_token:
+    url: https://{domain}/app/rest/users/current
+    method: GET
+    headers:
+      Authorization: Bearer {key}
+      Accept: application/json
+    valid_codes:
+    - 200
+    invalid_codes:
+    - 401
+    needs_domain: true
+    notes:
+      200: 'VALID: TeamCity token'
+  bitbucket_app_password:
+    skip_reason: Bitbucket app password needs the account username for Basic auth
+  sentry_auth:
+    url: https://sentry.io/api/0/
+    method: GET
+    headers:
+      Authorization: Bearer {key}
+    valid_codes:
+    - 200
+    invalid_codes:
+    - 401
+    notes:
+      200: 'VALID: Sentry auth token'
+  sentry_dsn:
+    skip_reason: Sentry DSN is typically public-by-design in frontend apps
+  newrelic_api:
+    url: https://api.newrelic.com/v2/applications.json
+    method: GET
+    headers:
+      X-Api-Key: '{key}'
+    valid_codes:
+    - 200
+    invalid_codes:
+    - 401
+    - 403
+    notes:
+      200: 'VALID: New Relic user API key'
+  newrelic_license:
+    skip_reason: New Relic license key is ingest-only — no account probe
+  newrelic_insert:
+    skip_reason: New Relic insert key is ingest-only — no account probe
+  splunk_hec:
+    skip_reason: Splunk HEC token needs the collector host (--scan-host)
+  elastic_api:
+    skip_reason: Elastic API key needs the cluster URL
+  logdna_key:
+    skip_reason: Mezmo/LogDNA ingestion key — no whoami endpoint
+  loggly_token:
+    skip_reason: Loggly customer token — ingest-only
+  papertrail_token:
+    skip_reason: Papertrail token — needs the API host
+  rollbar_token:
+    url: https://api.rollbar.com/api/1/user
+    method: GET
+    headers:
+      X-Rollbar-Access-Token: '{key}'
+    valid_codes:
+    - 200
+    invalid_codes:
+    - 401
+    - 403
+    notes:
+      200: 'VALID: Rollbar token'
+  bugsnag_api:
+    url: https://api.bugsnag.com/user
+    method: GET
+    headers:
+      Authorization: token {key}
+    valid_codes:
+    - 200
+    invalid_codes:
+    - 401
+    - 403
+    notes:
+      200: 'VALID: Bugsnag API key'
+  honeybadger_api:
+    url: https://app.honeybadger.io/v2/projects
+    method: GET
+    auth:
+    - '{key}'
+    - ''
+    valid_codes:
+    - 200
+    invalid_codes:
+    - 401
+    notes:
+      200: 'VALID: Honeybadger API key'
+  teams_webhook:
+    url: '{key}'
+    method: POST
+    json_body:
+      text: ''
+    webhook: true
+    invalid_codes:
+    - 404
+    - 410
+    notes:
+      200: 'VALID: Teams webhook accepted empty probe'
+  vonage_api:
+    skip_reason: Vonage/Nexmo key needs the matching API secret
+  messagebird_key:
+    url: https://rest.messagebird.com/balance
+    method: GET
+    headers:
+      Authorization: AccessKey {key}
+    valid_codes:
+    - 200
+    invalid_codes:
+    - 401
+    - 403
+    notes:
+      200: 'VALID: MessageBird key'
+  postmark_token:
+    url: https://api.postmarkapp.com/server
+    method: GET
+    headers:
+      X-Postmark-Server-Token: '{key}'
+    valid_codes:
+    - 200
+    invalid_codes:
+    - 401
+    - 403
+    notes:
+      200: 'VALID: Postmark server token'
+  mailjet_api:
+    skip_reason: Mailjet key needs the matching secret for Basic auth
+  sparkpost_api:
+    url: https://api.sparkpost.com/api/v1/account
+    method: GET
+    headers:
+      Authorization: '{key}'
+    valid_codes:
+    - 200
+    invalid_codes:
+    - 401
+    - 403
+    notes:
+      200: 'VALID: SparkPost API key'
+  intercom_token:
+    url: https://api.intercom.io/me
+    method: GET
+    headers:
+      Authorization: Bearer {key}
+    valid_codes:
+    - 200
+    invalid_codes:
+    - 401
+    notes:
+      200: 'VALID: Intercom token'
+  zendesk_token:
+    url: https://{domain}/api/v2/users/me.json
+    method: GET
+    headers:
+      Authorization: Bearer {key}
+    valid_codes:
+    - 200
+    invalid_codes:
+    - 401
+    needs_domain: true
+    notes:
+      200: 'VALID: Zendesk token'
+  freshdesk_api:
+    url: https://{domain}/api/v2/tickets
+    method: GET
+    auth:
+    - '{key}'
+    - X
+    valid_codes:
+    - 200
+    invalid_codes:
+    - 401
+    needs_domain: true
+    notes:
+      200: 'VALID: Freshdesk API key'
+  square_access:
+    url: https://connect.squareup.com/v2/merchants
+    method: GET
+    headers:
+      Authorization: Bearer {key}
+    valid_codes:
+    - 200
+    invalid_codes:
+    - 401
+    notes:
+      200: 'VALID: Square access token'
+  square_application:
+    skip_reason: 'Informational: Square application ID is public-by-design'
+  paypal_client_id:
+    skip_reason: 'Informational: PayPal client ID needs the matching secret'
+  paypal_secret:
+    skip_reason: PayPal secret needs the matching client ID for OAuth
+  braintree_token:
+    skip_reason: Braintree private key needs the merchant ID / public key pair
+  adyen_api:
+    skip_reason: Adyen API key needs the merchant account for a live probe
+  mollie_api:
+    url: https://api.mollie.com/v2/organizations/me
+    method: GET
+    headers:
+      Authorization: Bearer {key}
+    valid_codes:
+    - 200
+    invalid_codes:
+    - 401
+    notes:
+      200: 'VALID: Mollie API key'
+  klarna_api:
+    skip_reason: Klarna API user needs the matching password
+  woocommerce_key:
+    skip_reason: WooCommerce consumer key is paired with cs_ secret + store URL
+  woocommerce_secret:
+    skip_reason: Paired with woocommerce_key for REST Basic auth
+  bigcommerce_token:
+    skip_reason: BigCommerce token needs the store hash
+  algolia_api:
+    skip_reason: Algolia key needs the Application ID to probe
+  algolia_admin:
+    skip_reason: Algolia admin key needs the Application ID — treat as critical if confirmed
+  meilisearch_key:
+    url: https://{domain}/keys
+    method: GET
+    headers:
+      Authorization: Bearer {key}
+    valid_codes:
+    - 200
+    invalid_codes:
+    - 401
+    - 403
+    needs_domain: true
+    notes:
+      200: 'VALID: Meilisearch key'
+  typesense_api:
+    url: https://{domain}/collections
+    method: GET
+    headers:
+      X-TYPESENSE-API-KEY: '{key}'
+    valid_codes:
+    - 200
+    invalid_codes:
+    - 401
+    needs_domain: true
+    notes:
+      200: 'VALID: Typesense API key'
+  mixpanel_token:
+    skip_reason: Mixpanel project token is often public (ingest)
+  mixpanel_secret:
+    skip_reason: Mixpanel secret needs the project API key for Basic auth
+  amplitude_api:
+    skip_reason: Amplitude API key is typically a client ingest key
+  segment_write:
+    skip_reason: Segment write key is often embedded in the frontend
+  heap_app_id:
+    skip_reason: 'Informational: Heap app id'
+  plausible_api:
+    url: https://plausible.io/api/v1/stats/realtime/visitors?site_id=example.com
+    method: GET
+    headers:
+      Authorization: Bearer {key}
+    valid_codes:
+    - 200
+    invalid_codes:
+    - 401
+    notes:
+      200: 'VALID: Plausible API key'
+  posthog_api:
+    skip_reason: PostHog project key (phc_) is often a public project token
+  cohere_api:
+    url: https://api.cohere.ai/v1/models
+    method: GET
+    headers:
+      Authorization: Bearer {key}
+    valid_codes:
+    - 200
+    invalid_codes:
+    - 401
+    notes:
+      200: 'VALID: Cohere API key'
+  replicate_api:
+    url: https://api.replicate.com/v1/account
+    method: GET
+    headers:
+      Authorization: Bearer {key}
+    valid_codes:
+    - 200
+    invalid_codes:
+    - 401
+    notes:
+      200: 'VALID: Replicate API token'
+  stability_api:
+    url: https://api.stability.ai/v1/user/account
+    method: GET
+    headers:
+      Authorization: Bearer {key}
+    valid_codes:
+    - 200
+    invalid_codes:
+    - 401
+    - 403
+    notes:
+      200: 'VALID: Stability API key'
+  together_api:
+    url: https://api.together.xyz/v1/models
+    method: GET
+    headers:
+      Authorization: Bearer {key}
+    valid_codes:
+    - 200
+    invalid_codes:
+    - 401
+    notes:
+      200: 'VALID: Together API key'
+  anyscale_api:
+    skip_reason: Anyscale key needs the endpoints base URL
+  pinecone_api:
+    skip_reason: Pinecone API key needs the index host
+  weaviate_api:
+    url: https://{domain}/v1/schema
+    method: GET
+    headers:
+      Authorization: Bearer {key}
+    valid_codes:
+    - 200
+    invalid_codes:
+    - 401
+    needs_domain: true
+    notes:
+      200: 'VALID: Weaviate API key'
+  qdrant_api:
+    url: https://{domain}/collections
+    method: GET
+    headers:
+      api-key: '{key}'
+    valid_codes:
+    - 200
+    invalid_codes:
+    - 401
+    needs_domain: true
+    notes:
+      200: 'VALID: Qdrant API key'
+  elevenlabs_api:
+    url: https://api.elevenlabs.io/v1/user
+    method: GET
+    headers:
+      xi-api-key: '{key}'
+    valid_codes:
+    - 200
+    invalid_codes:
+    - 401
+    - 403
+    notes:
+      200: 'VALID: ElevenLabs API key'
+  deepgram_api:
+    url: https://api.deepgram.com/v1/projects
+    method: GET
+    headers:
+      Authorization: Bearer {key}
+    valid_codes:
+    - 200
+    invalid_codes:
+    - 401
+    notes:
+      200: 'VALID: Deepgram API key'
+  assemblyai_api:
+    url: https://api.assemblyai.com/v2/account
+    method: GET
+    headers:
+      Authorization: '{key}'
+    valid_codes:
+    - 200
+    invalid_codes:
+    - 401
+    - 403
+    notes:
+      200: 'VALID: AssemblyAI key'
+  doppler_token:
+    url: https://api.doppler.com/v3/me
+    method: GET
+    headers:
+      Authorization: Bearer {key}
+    valid_codes:
+    - 200
+    invalid_codes:
+    - 401
+    notes:
+      200: 'VALID: Doppler token'
+  infisical_token:
+    skip_reason: Infisical token needs the project/workspace host
+  onepassword_connect:
+    jwt_inspect: true
+  conjur_api:
+    skip_reason: Conjur token needs the appliance URL
+  akeyless_token:
+    skip_reason: Akeyless token needs the API gateway URL
+  terraform_cloud:
+    url: https://app.terraform.io/api/v2/account/details
+    method: GET
+    headers:
+      Authorization: Bearer {key}
+    valid_codes:
+    - 200
+    invalid_codes:
+    - 401
+    notes:
+      200: 'VALID: Terraform Cloud token'
+  pulumi_token:
+    url: https://api.pulumi.com/api/user
+    method: GET
+    headers:
+      Authorization: Bearer {key}
+    valid_codes:
+    - 200
+    invalid_codes:
+    - 401
+    notes:
+      200: 'VALID: Pulumi access token'
+  spacelift_api:
+    skip_reason: Spacelift API key needs the account GraphQL endpoint
+  mongodb_srv:
+    uri_inspect: true
+  postgres_uri:
+    uri_inspect: true
+  mysql_uri:
+    uri_inspect: true
+  redis_uri:
+    uri_inspect: true
+  fauna_secret:
+    url: https://db.fauna.com/
+    method: POST
+    headers:
+      Authorization: Bearer {key}
+      Content-Type: application/json
+    json_body:
+      query: '{ ping }'
+    valid_codes:
+    - 200
+    invalid_codes:
+    - 401
+    notes:
+      200: 'VALID: Fauna secret'
+  cockroachdb_api:
+    skip_reason: Cockroach Cloud API key needs the org context
+  airtable_api:
+    url: https://api.airtable.com/v0/meta/whoami
+    method: GET
+    headers:
+      Authorization: Bearer {key}
+    valid_codes:
+    - 200
+    invalid_codes:
+    - 401
+    notes:
+      200: 'VALID: Airtable token'
+  notion_database:
+    skip_reason: Notion database ID is not a credential
+  contentful_cda:
+    skip_reason: Contentful delivery token needs the space ID
+  contentful_cma:
+    url: https://api.contentful.com/users/me
+    method: GET
+    headers:
+      Authorization: Bearer {key}
+    valid_codes:
+    - 200
+    invalid_codes:
+    - 401
+    notes:
+      200: 'VALID: Contentful CMA token'
+  sanity_token:
+    skip_reason: Sanity token needs the project ID / dataset
+  strapi_token:
+    url: https://{domain}/api/users/me
+    method: GET
+    headers:
+      Authorization: Bearer {key}
+    valid_codes:
+    - 200
+    invalid_codes:
+    - 401
+    needs_domain: true
+    notes:
+      200: 'VALID: Strapi token'
+  azure_client_secret:
+    skip_reason: Azure client secret needs tenant ID + client ID for OAuth
+  azure_storage_key:
+    skip_reason: Azure storage key needs the account name to probe
+  azure_cosmos_key:
+    skip_reason: Cosmos DB key needs the account endpoint
+  azure_devops_pat:
+    skip_reason: Azure DevOps PAT needs the organization name
+  aws_mws_auth:
+    skip_reason: Amazon MWS auth token — seller API, no anonymous whoami
+  oci_api_key:
+    skip_reason: OCI tenancy OCID is an identifier, not a private key
+  linode_pat:
+    url: https://api.linode.com/v4/account
+    method: GET
+    headers:
+      Authorization: Bearer {key}
+    valid_codes:
+    - 200
+    invalid_codes:
+    - 401
+    notes:
+      200: 'VALID: Linode token'
+  vultr_api:
+    url: https://api.vultr.com/v2/account
+    method: GET
+    headers:
+      Authorization: Bearer {key}
+    valid_codes:
+    - 200
+    invalid_codes:
+    - 401
+    - 403
+    notes:
+      200: 'VALID: Vultr API key'
+  hetzner_api:
+    url: https://api.hetzner.cloud/v1/servers
+    method: GET
+    headers:
+      Authorization: Bearer {key}
+    valid_codes:
+    - 200
+    invalid_codes:
+    - 401
+    notes:
+      200: 'VALID: Hetzner API token'
+  scaleway_secret:
+    url: https://api.scaleway.com/account/v2/organizations
+    method: GET
+    headers:
+      X-Auth-Token: '{key}'
+    valid_codes:
+    - 200
+    invalid_codes:
+    - 401
+    - 403
+    notes:
+      200: 'VALID: Scaleway secret key'
+  pagerduty_api:
+    url: https://api.pagerduty.com/users/me
+    method: GET
+    headers:
+      Authorization: Token token={key}
+    valid_codes:
+    - 200
+    invalid_codes:
+    - 401
+    - 403
+    notes:
+      200: 'VALID: PagerDuty API key'
+  opsgenie_api:
+    url: https://api.opsgenie.com/v2/account
+    method: GET
+    headers:
+      Authorization: GenieKey {key}
+    valid_codes:
+    - 200
+    invalid_codes:
+    - 401
+    - 403
+    notes:
+      200: 'VALID: Opsgenie API key'
+  atlassian_api:
+    skip_reason: Atlassian API token needs the account email for Basic auth
+  jira_token:
+    url: https://{domain}/rest/api/3/myself
+    method: GET
+    headers:
+      Authorization: Bearer {key}
+    valid_codes:
+    - 200
+    invalid_codes:
+    - 401
+    needs_domain: true
+    notes:
+      200: 'VALID: Jira token'
+  confluence_token:
+    url: https://{domain}/wiki/rest/api/user/current
+    method: GET
+    headers:
+      Authorization: Bearer {key}
+    valid_codes:
+    - 200
+    invalid_codes:
+    - 401
+    needs_domain: true
+    notes:
+      200: 'VALID: Confluence token'
+  asana_pat:
+    url: https://app.asana.com/api/1.0/users/me
+    method: GET
+    headers:
+      Authorization: Bearer {key}
+    valid_codes:
+    - 200
+    invalid_codes:
+    - 401
+    notes:
+      200: 'VALID: Asana PAT'
+  monday_api:
+    url: https://api.monday.com/v2
+    method: POST
+    headers:
+      Authorization: '{key}'
+      Content-Type: application/json
+    json_body:
+      query: '{ me { id name } }'
+    valid_codes:
+    - 200
+    invalid_codes:
+    - 401
+    notes:
+      200: 'VALID: Monday.com API token'
+  clickup_api:
+    url: https://api.clickup.com/api/v2/user
+    method: GET
+    headers:
+      Authorization: '{key}'
+    valid_codes:
+    - 200
+    invalid_codes:
+    - 401
+    - 403
+    notes:
+      200: 'VALID: ClickUp API key'
+  trello_api:
+    skip_reason: Trello API key needs a member token query parameter
+  okta_api:
+    url: https://{domain}/api/v1/users/me
+    method: GET
+    headers:
+      Authorization: SSWS {key}
+    valid_codes:
+    - 200
+    invalid_codes:
+    - 401
+    needs_domain: true
+    notes:
+      200: 'VALID: Okta API token'
+  auth0_token:
+    skip_reason: Auth0 client secret needs the tenant domain + client ID
+  clerk_secret:
+    url: https://api.clerk.com/v1/users
+    method: GET
+    headers:
+      Authorization: Bearer {key}
+    valid_codes:
+    - 200
+    invalid_codes:
+    - 401
+    notes:
+      200: 'VALID: Clerk secret key'
+  supertokens_key:
+    skip_reason: SuperTokens API key needs the core URL
+  launchdarkly_sdk:
+    skip_reason: LaunchDarkly client-side SDK key
+  launchdarkly_api:
+    url: https://app.launchdarkly.com/api/v2/projects
+    method: GET
+    headers:
+      Authorization: Bearer {key}
+    valid_codes:
+    - 200
+    invalid_codes:
+    - 401
+    notes:
+      200: 'VALID: LaunchDarkly API token'
+  split_api:
+    skip_reason: Split.io key needs the workspace / environment
+  statsig_secret:
+    skip_reason: Statsig secret needs a gate name to probe
+  unleash_token:
+    url: https://{domain}/api/admin/features
+    method: GET
+    headers:
+      Authorization: '{key}'
+    valid_codes:
+    - 200
+    invalid_codes:
+    - 401
+    needs_domain: true
+    notes:
+      200: 'VALID: Unleash token'
 informational_types:
   stripe_publishable: Public-by-design (Stripe publishable key); not a secret
   firebase_url: Public-by-design (Firebase RTDB URL); not a secret
+  square_application: Public-by-design (Square application ID)
+  paypal_client_id: PayPal client ID is not a secret without the matching secret
+  heap_app_id: Public analytics app id
+  notion_database: Notion database ID — needs a token to access
+  sentry_dsn: Client Sentry DSN — typically public in frontend bundles
+  launchdarkly_sdk: LaunchDarkly client-side SDK key
+  oci_api_key: OCI tenancy OCID (identifier, not a private key)
 exposure_types:
   source_map_exposure: Public JavaScript source map (.map) — not a credential
+severity:
+  vercel_token: high
+  netlify_pat: high
+  railway_token: high
+  render_api: high
+  flyio_token: high
+  planetscale_token: critical
+  supabase_anon: low
+  neon_api: high
+  upstash_token: medium
+  circleci_token: high
+  travis_token: medium
+  jenkins_token: medium
+  drone_token: medium
+  buildkite_token: high
+  codefresh_token: medium
+  teamcity_token: medium
+  bitbucket_app_password: high
+  sentry_auth: high
+  sentry_dsn: low
+  newrelic_api: high
+  newrelic_license: low
+  newrelic_insert: medium
+  splunk_hec: medium
+  elastic_api: medium
+  logdna_key: medium
+  loggly_token: medium
+  papertrail_token: medium
+  rollbar_token: medium
+  bugsnag_api: medium
+  honeybadger_api: medium
+  teams_webhook: medium
+  vonage_api: medium
+  messagebird_key: medium
+  postmark_token: high
+  mailjet_api: medium
+  sparkpost_api: medium
+  intercom_token: high
+  zendesk_token: medium
+  freshdesk_api: medium
+  square_access: critical
+  square_application: low
+  paypal_client_id: low
+  paypal_secret: critical
+  braintree_token: medium
+  adyen_api: medium
+  mollie_api: high
+  klarna_api: medium
+  woocommerce_key: medium
+  woocommerce_secret: medium
+  bigcommerce_token: medium
+  algolia_api: medium
+  algolia_admin: critical
+  meilisearch_key: medium
+  typesense_api: medium
+  mixpanel_token: low
+  mixpanel_secret: medium
+  amplitude_api: medium
+  segment_write: medium
+  heap_app_id: low
+  plausible_api: medium
+  posthog_api: medium
+  cohere_api: high
+  replicate_api: high
+  stability_api: high
+  together_api: medium
+  anyscale_api: medium
+  pinecone_api: medium
+  weaviate_api: medium
+  qdrant_api: medium
+  elevenlabs_api: high
+  deepgram_api: medium
+  assemblyai_api: medium
+  doppler_token: critical
+  infisical_token: medium
+  onepassword_connect: high
+  conjur_api: medium
+  akeyless_token: medium
+  terraform_cloud: critical
+  pulumi_token: critical
+  spacelift_api: medium
+  mongodb_srv: critical
+  postgres_uri: critical
+  mysql_uri: critical
+  redis_uri: critical
+  fauna_secret: high
+  cockroachdb_api: medium
+  airtable_api: high
+  notion_database: low
+  contentful_cda: medium
+  contentful_cma: critical
+  sanity_token: medium
+  strapi_token: medium
+  azure_client_secret: critical
+  azure_storage_key: critical
+  azure_cosmos_key: critical
+  azure_devops_pat: high
+  aws_mws_auth: high
+  oci_api_key: low
+  linode_pat: high
+  vultr_api: high
+  hetzner_api: high
+  scaleway_secret: medium
+  pagerduty_api: high
+  opsgenie_api: high
+  atlassian_api: medium
+  jira_token: medium
+  confluence_token: medium
+  asana_pat: high
+  monday_api: medium
+  clickup_api: high
+  trello_api: medium
+  okta_api: high
+  auth0_token: medium
+  clerk_secret: high
+  supertokens_key: medium
+  launchdarkly_sdk: low
+  launchdarkly_api: high
+  split_api: medium
+  statsig_secret: high
+  unleash_token: medium
+  aws_access_key: critical
+  aws_secret: critical
+  gcp_service_acct: critical
+  private_key_pem: critical
+  stripe_live: critical
+  hashicorp_vault: critical
+revocation:
+  vercel_token: https://vercel.com/account/tokens
+  netlify_pat: https://app.netlify.com/user/applications
+  github_pat: https://github.com/settings/tokens
+  github_fine_pat: https://github.com/settings/tokens?type=beta
+  gitlab_pat: https://gitlab.com/-/user_settings/personal_access_tokens
+  stripe_live: https://dashboard.stripe.com/apikeys
+  openai_key: https://platform.openai.com/api-keys
+  slack_token: https://api.slack.com/authentication/token-types
+  aws_access_key: https://us-east-1.console.aws.amazon.com/iam/home#/security_credentials
+  doppler_token: https://dashboard.doppler.com/workplace/tokens
+  sentry_auth: https://sentry.io/settings/account/api/auth-tokens/
+  cloudflare_api: https://dash.cloudflare.com/profile/api-tokens
+compliance:
+  stripe_live:
+  - PCI-DSS
+  - SOC2
+  stripe_restricted:
+  - PCI-DSS
+  square_access:
+  - PCI-DSS
+  - SOC2
+  paypal_secret:
+  - PCI-DSS
+  aws_access_key:
+  - SOC2
+  - GDPR
+  gcp_service_acct:
+  - SOC2
+  - GDPR
+  azure_storage_key:
+  - SOC2
+  - GDPR
+  mongodb_srv:
+  - SOC2
+  - GDPR
+  postgres_uri:
+  - SOC2
+  - GDPR
+  mysql_uri:
+  - SOC2
+  - GDPR
+  okta_api:
+  - SOC2
+  - GDPR
+  clerk_secret:
+  - GDPR
+  sendgrid:
+  - GDPR
+  twilio_sid:
+  - GDPR
+  pagerduty_api:
+  - SOC2

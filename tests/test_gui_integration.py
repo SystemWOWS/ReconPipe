@@ -182,6 +182,12 @@ def test_gui_module_compiles_and_helpers():
     assert "Passive intel" in src
     assert "--shodan-key" in src and "--zoomeye-key" in src and "--censys-id" in src
     assert "Save API keys" in src and "Save target" in src
+    assert "Copy" in src and "Test key(s)" in src
+    assert "--exclude-pattern" in src and "--notify-webhook" in src
+    assert "one per line for batch" in src
+    assert "Dark/Light" in src
+    assert "Export HackerOne" in src and "Export Jira" in src
+    assert "--proxy" in src and "Add to queue" in src
     print("[ok] reconpipegui import + form validation helpers")
 
 

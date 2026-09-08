@@ -265,6 +265,7 @@ class GoogleKeyhacks(unittest.TestCase):
         self.assertTrue(rp.VALIDATORS["google_api"].google_api_spray)
         self.assertIn("/v3/scopes", rp.VALIDATORS["sendgrid"].url)
         self.assertIn("fcm.googleapis.com", rp.VALIDATORS["firebase_key"].url)
+        self.assertIn("/v1/account", rp.VALIDATORS["stripe_live"].url)
         self.assertEqual(rp.VALIDATORS["sendgrid"].restricted_codes, [403])
         self.assertIn("{dc}", rp.VALIDATORS["mailchimp"].url)
         self.assertIn("github_app", rp.VALIDATORS)
@@ -283,6 +284,12 @@ class GoogleKeyhacks(unittest.TestCase):
         self.assertIn("sendgrid", opts)
         self.assertIn("mailchimp", opts)
         self.assertIn("telegram_bot", opts)
+        self.assertIn("cloudflare_api", opts)
+        self.assertIn("huggingface_token", opts)
+        self.assertIn("linear_api_key", opts)
+        self.assertIn("vercel_token", opts)
+        self.assertIn("doppler_token", opts)
+        self.assertIn("postgres_uri", opts)
 
     def test_exposure_types_not_every_secret(self):
         self.assertEqual(rp.EXPOSURE_TYPES, frozenset({"source_map_exposure"}))

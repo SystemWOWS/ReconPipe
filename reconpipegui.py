@@ -55,6 +55,19 @@ ARTIFACT_FILES = [
     "hits/findings.json",
     "hits/valid_keys.json",
     "hits/INDEX.txt",
+    "report.html",
+    "report.md",
+    "findings.csv",
+    "findings_diff.json",
+    "report.jsonld",
+    "pipeline_metrics.json",
+    "js_endpoints.json",
+    "js_secrets.json",
+    "unique_findings.json",
+    "checkpoint.json",
+    "export_hackerone.md",
+    "export_jira.md",
+    "findings_stream.jsonl",
 ]
 
 def strip_ansi(text: str) -> str:
@@ -76,9 +89,27 @@ def load_json_list(path: Path) -> List[Dict]:
         data = json.loads(path.read_text(encoding="utf-8", errors="ignore"))
     except Exception:
         return []
-    if isinstance(data, list):
-        return [x for x in data if isinstance(x, dict)]
-    return []
+    return data if isinstance(data, list) else []
+
+
+def load_jsonl_list(path: Path) -> List[Dict]:
+    if not path.is_file():
+        return []
+    rows: List[Dict] = []
+    try:
+        for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except Exception:
+                continue
+            if isinstance(obj, dict):
+                rows.append(obj)
+    except Exception:
+        return []
+    return rows
 
 
 def load_scan_status(path: Path) -> Dict[str, Any]:
@@ -148,12 +179,19 @@ def validator_type_options() -> List[str]:
 def validate_form(opts: Dict[str, Any]) -> List[str]:
     errors: List[str] = []
     domain = (opts.get("domain") or "").strip()
-    if not domain:
+    domain_list = (opts.get("domain_list") or "").strip()
+    if not domain and not domain_list:
         errors.append("Target domain is required.")
-    elif not DOMAIN_RE.match(domain):
+    elif domain and not DOMAIN_RE.match(domain):
         errors.append(f"Invalid domain syntax: {domain}")
 
-    for label, key in (("Subdomains file", "subdomains"), ("URL list", "files")):
+    for label, key in (
+        ("Subdomains file", "subdomains"),
+        ("URL list", "files"),
+        ("Domain list", "domain_list"),
+        ("Exclude patterns", "exclude_pattern"),
+        ("Include patterns", "include_pattern"),
+    ):
         path = (opts.get(key) or "").strip()
         if path and not Path(path).expanduser().is_file():
             errors.append(f"{label} not found: {path}")
@@ -208,7 +246,7 @@ class PipelineRunner:
                 raise RuntimeError("A scan is already running.")
 
             argv = rp.argv_from_options(opts)
-            domain = opts["domain"].strip()
+            domain = (opts.get("domain") or "").strip() or "multi"
             out = (opts.get("output") or "").strip()
             self.output_dir = Path(out).expanduser() if out else default_output_dir(domain)
             self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -316,6 +354,9 @@ class GuiState:
         self.filter_tier: str = "All"
         self.filter_query: str = ""
         self.min_confidence: int = 0
+        self.filter_severity: str = "All"
+        self.scan_queue: List[str] = []
+        self.dark_on: bool = True
 
 
 STATE = GuiState()
@@ -323,7 +364,8 @@ STATE = GuiState()
 
 # Build UI
 def build_ui() -> None:
-    ui.dark_mode().enable()
+    dark_mode = ui.dark_mode()
+    dark_mode.enable()
     ui.colors(
         primary="#e85d04",
         secondary="#3a3a3a",
@@ -457,7 +499,16 @@ def build_ui() -> None:
             ui.element("span").classes("rp-brand-mark")
             ui.label("ReconPipe").classes("rp-title text-base")
             ui.label("Host intel · Key hunter").classes("rp-header-meta")
-        ui.label("v1.1").classes("text-xs text-gray-500 font-mono")
+        with ui.row().classes("items-center gap-2"):
+            def toggle_dark() -> None:
+                STATE.dark_on = not STATE.dark_on
+                if STATE.dark_on:
+                    dark_mode.enable()
+                else:
+                    dark_mode.disable()
+
+            ui.button("Dark/Light", on_click=toggle_dark, color="secondary").props("flat dense")
+            ui.label("v1.2").classes("text-xs text-gray-500 font-mono")
 
     with ui.tabs().classes("w-full") as tabs:
         tab_scan = ui.tab("Scan")
@@ -527,6 +578,32 @@ def build_ui() -> None:
                         shopify_in = ui.input(
                             "Shopify store host (--shopify-domain)",
                             placeholder="store.myshopify.com",
+                        ).classes("w-full").props("outlined dense")
+                        domain_list_in = ui.input(
+                            "Domain list (--domain-list)",
+                            placeholder="/path/to/domains.txt",
+                        ).classes("w-full").props("outlined dense")
+                        with ui.row().classes("w-full gap-2"):
+                            include_in = ui.input(
+                                "Include hosts (--include-pattern)",
+                                placeholder="*.api.example.com file",
+                            ).classes("flex-1").props("outlined dense")
+                            exclude_in = ui.input(
+                                "Exclude hosts (--exclude-pattern)",
+                                placeholder="*.cdn.example.com file",
+                            ).classes("flex-1").props("outlined dense")
+                        with ui.row().classes("w-full gap-2"):
+                            vault_in = ui.input(
+                                "Vault address (--vault-addr)",
+                                placeholder="https://vault.example.com",
+                            ).classes("flex-1").props("outlined dense")
+                            grafana_in = ui.input(
+                                "Grafana host (--grafana-url)",
+                                placeholder="grafana.example.com",
+                            ).classes("flex-1").props("outlined dense")
+                        webhook_in = ui.input(
+                            "Notify webhook (--notify-webhook)",
+                            placeholder="Slack/Discord/custom URL",
                         ).classes("w-full").props("outlined dense")
                         config_in = ui.textarea(
                             "Config overlays (--config, one path per line)",
@@ -646,6 +723,8 @@ def build_ui() -> None:
                                 censys_secret_in.set_value(saved["censys_secret"])
                             if saved.get("zoomeye"):
                                 zoomeye_in.set_value(saved["zoomeye"])
+                            if saved.get("notify_webhook"):
+                                webhook_in.set_value(saved["notify_webhook"])
                             n = sum(1 for ok in rp.saved_keys_status().values() if ok)
                             keys_hint.set_text(
                                 f"{n} key(s) on disk · {rp.user_data_dir() / 'keys.yaml'}"
@@ -661,6 +740,7 @@ def build_ui() -> None:
                                     "censys_id": (censys_id_in.value or "").strip(),
                                     "censys_secret": (censys_secret_in.value or "").strip(),
                                     "zoomeye": (zoomeye_in.value or "").strip(),
+                                    "notify_webhook": (webhook_in.value or "").strip(),
                                 }
                             )
                             fill_saved_keys()
@@ -679,6 +759,7 @@ def build_ui() -> None:
                         ui.label("Pipeline options").classes("rp-section")
                         with ui.row().classes("w-full flex-wrap gap-4"):
                             skip_chaos = ui.checkbox("Skip Chaos (--skip-chaos)")
+                            skip_subfinder = ui.checkbox("Skip subfinder (--skip-subfinder)")
                             skip_httpx = ui.checkbox("Skip httpx (--skip-httpx)")
                             skip_gau = ui.checkbox("Skip passive archives (--skip-gau)")
                             skip_discovery = ui.checkbox(
@@ -692,6 +773,11 @@ def build_ui() -> None:
                             no_fail = ui.checkbox(
                                 "Do not fail on valid keys (--no-fail-on-valid)"
                             )
+                            no_notify = ui.checkbox("No desktop notify (--no-notify)")
+                            skip_amass = ui.checkbox("Skip amass (--skip-amass)")
+                            polite = ui.checkbox("Polite mode (--polite)")
+                            nuclei_on = ui.checkbox("Run nuclei (--nuclei)")
+                            docker_fb = ui.checkbox("Docker fallback (--docker-fallback)")
                         with ui.row().classes("w-full gap-4"):
                             conc_in = ui.number(
                                 "Validation concurrency", value=10, min=1, max=200
@@ -699,6 +785,72 @@ def build_ui() -> None:
                             gau_in = ui.number(
                                 "gau threads", value=5, min=1, max=100
                             ).classes("w-40")
+                        proxy_in = ui.input("Proxy (--proxy)", placeholder="http://127.0.0.1:8080").classes("w-full").props("outlined dense")
+                        header_in = ui.textarea(
+                            "Extra headers (-H), one NAME: VALUE per line"
+                        ).classes("w-full").props("outlined dense")
+                        proxy_auth_in = ui.input("Proxy auth (--proxy-auth)", password=True).classes("w-full").props("outlined dense")
+                        burp_in = ui.input("Burp XML (--burp-import)").classes("w-full").props("outlined dense")
+                        repo_in = ui.input("Git repo to clone (--repo)").classes("w-full").props("outlined dense")
+                        creds_in = ui.input("Scan credentials YAML (--credentials)").classes("w-full").props("outlined dense")
+                        with ui.row().classes("w-full gap-2"):
+                            queue_in = ui.input("Queue domain").classes("flex-1").props("outlined dense")
+                            queue_box = ui.column().classes("w-full")
+
+                            def render_queue() -> None:
+                                queue_box.clear()
+                                with queue_box:
+                                    if not STATE.scan_queue:
+                                        ui.label("Queue empty").classes("text-xs text-slate-500")
+                                        return
+                                    for d in STATE.scan_queue:
+                                        ui.label(d).classes("font-mono text-sm")
+
+                            def add_queue() -> None:
+                                d = (queue_in.value or "").strip()
+                                if d:
+                                    STATE.scan_queue.append(d)
+                                    queue_in.set_value("")
+                                    render_queue()
+
+                            def run_queue() -> None:
+                                if not STATE.scan_queue:
+                                    ui.notify("Queue is empty", type="warning")
+                                    return
+                                domain = STATE.scan_queue.pop(0)
+                                domain_in.set_value(domain)
+                                render_queue()
+                                start_scan()
+
+                            ui.button("Add to queue", on_click=add_queue, color="secondary").props("dense outline")
+                            ui.button("Run next queued", on_click=run_queue, color="primary").props("dense unelevated")
+                        render_queue()
+                        profile_in = ui.input("Scan profile name").classes("w-full").props("outlined dense")
+
+                        def save_profile() -> None:
+                            name = (profile_in.value or "").strip()
+                            if not name:
+                                ui.notify("Name the profile", type="warning")
+                                return
+                            path = rp.user_data_dir() / "profiles.yaml"
+                            rp.save_scan_profile(path, name, collect_opts())
+                            ui.notify(f"Saved profile {name}", type="positive")
+
+                        def load_profile() -> None:
+                            name = (profile_in.value or "").strip()
+                            path = rp.user_data_dir() / "profiles.yaml"
+                            profiles = rp.load_scan_profiles(path)
+                            opts = profiles.get(name)
+                            if not opts:
+                                ui.notify("Profile not found", type="warning")
+                                return
+                            if opts.get("domain"):
+                                domain_in.set_value(opts["domain"])
+                            ui.notify(f"Loaded profile {name}", type="positive")
+
+                        with ui.row().classes("gap-2"):
+                            ui.button("Save profile", on_click=save_profile, color="secondary").props("dense outline")
+                            ui.button("Load profile", on_click=load_profile, color="secondary").props("dense outline")
 
                     form_error = ui.label("").classes("text-red-400 text-sm")
 
@@ -725,9 +877,16 @@ def build_ui() -> None:
                             "censys_secret": (censys_secret_in.value or "").strip() or None,
                             "zoomeye_key": (zoomeye_in.value or "").strip() or None,
                             "shopify_domain": (shopify_in.value or "").strip() or None,
+                            "domain_list": (domain_list_in.value or "").strip() or None,
+                            "exclude_pattern": (exclude_in.value or "").strip() or None,
+                            "include_pattern": (include_in.value or "").strip() or None,
+                            "vault_addr": (vault_in.value or "").strip() or None,
+                            "grafana_url": (grafana_in.value or "").strip() or None,
+                            "notify_webhook": (webhook_in.value or "").strip() or None,
                             "config": configs,
                             "ignore_hash": hashes,
                             "skip_chaos": bool(skip_chaos.value),
+                            "skip_subfinder": bool(skip_subfinder.value),
                             "skip_httpx": bool(skip_httpx.value),
                             "skip_gau": bool(skip_gau.value),
                             "skip_discovery": bool(skip_discovery.value),
@@ -735,6 +894,21 @@ def build_ui() -> None:
                             "no_validate": bool(no_validate.value),
                             "headless": bool(headless.value),
                             "no_fail_on_valid": bool(no_fail.value),
+                            "no_notify": bool(no_notify.value),
+                            "skip_amass": bool(skip_amass.value),
+                            "polite": bool(polite.value),
+                            "nuclei": bool(nuclei_on.value),
+                            "docker_fallback": bool(docker_fb.value),
+                            "proxy": (proxy_in.value or "").strip() or None,
+                            "proxy_auth": (proxy_auth_in.value or "").strip() or None,
+                            "burp_import": (burp_in.value or "").strip() or None,
+                            "repo": (repo_in.value or "").strip() or None,
+                            "credentials": (creds_in.value or "").strip() or None,
+                            "header": [
+                                ln.strip()
+                                for ln in (header_in.value or "").splitlines()
+                                if ln.strip()
+                            ],
                             "skip_intel": bool(skip_intel.value),
                             "skip_crtsh": bool(skip_crtsh.value),
                             "concurrency": int(conc_in.value or 10),
@@ -976,6 +1150,11 @@ def build_ui() -> None:
                         value="All",
                         label="Tier",
                     ).classes("w-40").props("dense outlined")
+                    f_sev = ui.select(
+                        ["All", "critical", "high", "medium", "low"],
+                        value="All",
+                        label="Severity",
+                    ).classes("w-36").props("dense outlined")
                     f_query = ui.input("Search source / note / hash").classes(
                         "flex-1"
                     ).props("dense outlined")
@@ -987,6 +1166,7 @@ def build_ui() -> None:
                         STATE.filter_type = f_type.value or "All"
                         STATE.filter_status = f_status.value or "All"
                         STATE.filter_tier = f_tier.value or "All"
+                        STATE.filter_severity = f_sev.value or "All"
                         STATE.filter_query = (f_query.value or "").strip().lower()
                         STATE.min_confidence = int(f_conf.value or 0)
                         render_findings()
@@ -997,6 +1177,25 @@ def build_ui() -> None:
                     ui.button(
                         "Reload files", on_click=lambda: reload_findings(), color="secondary"
                     ).props("outline dense")
+
+                    def export_h1() -> None:
+                        text = rp.export_hackerone_markdown(STATE.findings)
+                        ui.notify("HackerOne markdown generated — see Artifacts", type="positive")
+                        preview_path = (STATE.workspace or STATE.runner.output_dir)
+                        if preview_path:
+                            Path(preview_path).mkdir(parents=True, exist_ok=True)
+                            (Path(preview_path) / "export_hackerone.md").write_text(text, encoding="utf-8")
+
+                    def export_jira() -> None:
+                        text = rp.export_jira_markdown(STATE.findings)
+                        preview_path = (STATE.workspace or STATE.runner.output_dir)
+                        if preview_path:
+                            Path(preview_path).mkdir(parents=True, exist_ok=True)
+                            (Path(preview_path) / "export_jira.md").write_text(text, encoding="utf-8")
+                        ui.notify("Jira markdown generated", type="positive")
+
+                    ui.button("Export HackerOne", on_click=export_h1, color="secondary").props("flat dense")
+                    ui.button("Export Jira", on_click=export_jira, color="secondary").props("flat dense")
 
                 findings_meta = ui.label("0 findings").classes("text-sm text-slate-400")
                 findings_host = ui.column().classes("w-full gap-2 mt-2")
@@ -1018,6 +1217,8 @@ def build_ui() -> None:
                     out: List[Dict] = []
                     for f in rows:
                         if STATE.filter_tier != "All" and f.get("_tier") != STATE.filter_tier:
+                            continue
+                        if STATE.filter_severity != "All" and str(f.get("severity") or "").lower() != STATE.filter_severity:
                             continue
                         if STATE.filter_type != "All" and f.get("type") != STATE.filter_type:
                             continue
@@ -1114,7 +1315,9 @@ def build_ui() -> None:
                                 ):
                                     with ui.column().classes("gap-0 flex-1"):
                                         ui.label(
-                                            f"[{f.get('type', 'unknown')}]  conf={f.get('confidence', '—')}  ·  {badge}"
+                                            f"[{f.get('type', 'unknown')}]  "
+                                            f"{f.get('severity', '')}  "
+                                            f"conf={f.get('confidence', '—')}  ·  {badge}"
                                         ).classes(f"font-semibold {color}")
                                         ui.label(
                                             redact_secret(key, reveal=revealed)
@@ -1145,11 +1348,28 @@ def build_ui() -> None:
 
                                             return _rev
 
+                                        def make_copy(val=key):
+                                            async def _cp():
+                                                try:
+                                                    await ui.run_javascript(
+                                                        f"navigator.clipboard.writeText({json.dumps(val)})"
+                                                    )
+                                                except Exception:
+                                                    pass
+                                                ui.notify("Copied to clipboard", type="positive")
+
+                                            return _cp
+
                                         ui.button(
                                             "Inspect",
                                             on_click=make_select(),
                                             color="primary",
                                         ).props("dense unelevated")
+                                        ui.button(
+                                            "Copy",
+                                            on_click=make_copy(),
+                                            color="secondary",
+                                        ).props("dense flat")
                                         ui.button(
                                             "Reveal" if not revealed else "Hide",
                                             on_click=make_reveal(),
@@ -1299,10 +1519,10 @@ def build_ui() -> None:
             with ui.card().classes("w-full rp-card"):
                 ui.label("Key Tester").classes("rp-section")
                 ui.label(
-                    "Paste a discovered API key and run the configured provider check "
-                    "(keyhacks-style). Google AIza keys are sprayed across cheap Maps JSON, "
-                    "YouTube, and Gemini models-list probes — not billed image APIs. "
-                    "LIVE means the credential is accepted."
+                    "Paste one or more API keys (one per line) and run the configured "
+                    "provider check (keyhacks-style). Google AIza keys are sprayed across "
+                    "cheap Maps JSON, YouTube, and Gemini models-list probes — not billed "
+                    "image APIs. LIVE means the credential is accepted. Batch mode fills the table below."
                 ).classes("text-xs text-gray-500 mb-3")
 
                 with ui.row().classes("w-full gap-2 flex-wrap"):
@@ -1322,8 +1542,8 @@ def build_ui() -> None:
                     ).classes("flex-1").props("dense outlined")
 
                 tester_key = ui.textarea(
-                    "API key / token",
-                    placeholder="paste credential",
+                    "API key / token (one per line for batch)",
+                    placeholder="paste credential(s), one per line",
                 ).classes("w-full").props("outlined dense")
 
                 with ui.row().classes("w-full gap-2"):
@@ -1346,6 +1566,7 @@ def build_ui() -> None:
                 tester_detail = ui.label("").classes(
                     "text-sm text-gray-400 font-mono mt-2 whitespace-pre-wrap"
                 )
+                tester_batch = ui.column().classes("w-full gap-1 mt-2")
 
                 def apply_guess() -> None:
                     hits = guess_key_types(tester_key.value or "")
@@ -1360,9 +1581,9 @@ def build_ui() -> None:
                 tester_key.on("blur", lambda: apply_guess())
 
                 async def run_manual_test() -> None:
-                    key = (tester_key.value or "").strip()
+                    keys = rp.split_tester_keys(tester_key.value or "")
                     ktype = tester_type.value
-                    if not key:
+                    if not keys:
                         ui.notify("Paste an API key first", type="warning")
                         return
                     if not ktype:
@@ -1380,39 +1601,89 @@ def build_ui() -> None:
                         (tester_shop.value or "").strip()
                         or STATE.shopify_domain
                     )
-                    finding: Dict[str, Any] = {
-                        "type": ktype,
-                        "key": key,
-                        "source_url": "gui://key-tester",
-                    }
                     secret = (tester_secret.value or "").strip()
                     session = (tester_session.value or "").strip()
-                    if secret:
-                        if ktype == "aws_access_key":
-                            finding["aws_secret"] = secret
-                        if ktype in ("twilio_sid", "twilio_token"):
-                            finding["twilio_token"] = secret
-                    if session:
-                        finding["aws_session_token"] = session
-                    ui.notify(f"Testing {ktype}…", type="info")
-                    try:
-                        result = await ui.run_io_bound(
-                            rp.validate_finding_configured_sync,
-                            finding,
-                            domain,
-                            shop,
-                            STATE.config_overlays,
-                        )
-                    except Exception as exc:
-                        tester_verdict.set_content(
-                            '<div class="rp-verdict dead">ERROR</div>'
-                        )
-                        tester_detail.set_text(str(exc))
-                        ui.notify(f"Validation error: {exc}", type="negative")
-                        return
-                    valid = bool(result.get("valid"))
-                    validated = bool(result.get("validated"))
-                    note = str(result.get("note") or "")
+                    ui.notify(f"Testing {len(keys)} {ktype} key(s)…", type="info")
+                    rows: List[Dict[str, Any]] = []
+                    last_result: Dict[str, Any] = {}
+                    last_label = "INCONCLUSIVE"
+                    last_valid = False
+                    for key in keys:
+                        hits = guess_key_types(key)
+                        use_type = ktype
+                        if len(keys) > 1 and hits:
+                            preferred = [h for h in hits if h in rp.VALIDATORS]
+                            if preferred:
+                                use_type = preferred[0]
+                        finding: Dict[str, Any] = {
+                            "type": use_type,
+                            "key": key,
+                            "source_url": "gui://key-tester",
+                        }
+                        if use_type in {"grafana_token"}:
+                            finding["grafana_url"] = domain
+                        if use_type in {"hashicorp_vault"}:
+                            finding["vault_addr"] = domain
+                        if secret:
+                            if use_type == "aws_access_key":
+                                finding["aws_secret"] = secret
+                            if use_type in ("twilio_sid", "twilio_token"):
+                                finding["twilio_token"] = secret
+                        if session:
+                            finding["aws_session_token"] = session
+                        try:
+                            result = await ui.run_io_bound(
+                                rp.validate_finding_configured_sync,
+                                finding,
+                                domain,
+                                shop,
+                                STATE.config_overlays,
+                            )
+                        except Exception as exc:
+                            result = {
+                                "type": use_type,
+                                "key": key,
+                                "valid": False,
+                                "validated": False,
+                                "note": str(exc),
+                            }
+                        rows.append(result)
+                        last_result = result
+                    tester_batch.clear()
+                    with tester_batch:
+                        if len(rows) > 1:
+                            with ui.row().classes("w-full text-xs text-slate-500"):
+                                ui.label("type").classes("w-40")
+                                ui.label("verdict").classes("w-24")
+                                ui.label("key").classes("flex-1")
+                                ui.label("note").classes("flex-1")
+                            for r in rows:
+                                valid = bool(r.get("valid"))
+                                note = str(r.get("note") or "")
+                                skipped = note.lower().startswith("skip")
+                                label = (
+                                    "LIVE"
+                                    if valid
+                                    else ("SKIP" if skipped else "DEAD")
+                                )
+                                with ui.row().classes("w-full items-center gap-2"):
+                                    ui.label(str(r.get("type") or "")).classes(
+                                        "w-40 font-mono text-xs"
+                                    )
+                                    ui.label(label).classes(
+                                        "w-24 text-emerald-400"
+                                        if valid
+                                        else "w-24 text-amber-300"
+                                    )
+                                    ui.label(
+                                        redact_secret(str(r.get("key") or ""), False)
+                                    ).classes("flex-1 rp-secret text-xs")
+                                    ui.label(note[:80]).classes(
+                                        "flex-1 text-xs text-slate-400"
+                                    )
+                    valid = bool(last_result.get("valid"))
+                    validated = bool(last_result.get("validated"))
+                    note = str(last_result.get("note") or "")
                     skipped = note.lower().startswith("skip") or (
                         "no validator" in note.lower()
                     )
@@ -1424,31 +1695,44 @@ def build_ui() -> None:
                         cls, label = "dead", "DEAD"
                     else:
                         cls, label = "skip", "INCONCLUSIVE"
+                    last_label = label
+                    last_valid = valid
                     tester_verdict.set_content(
-                        f'<div class="rp-verdict {cls}">{label}</div>'
+                        f'<div class="rp-verdict {cls}">{label}'
+                        + (f" · {len(rows)} keys" if len(rows) > 1 else "")
+                        + "</div>"
                     )
                     stamp = datetime.now().strftime("%H:%M:%S")
-                    services = result.get("google_services")
+                    services = last_result.get("google_services")
                     extra = ""
                     if isinstance(services, dict) and services:
                         extra = "\nservices=" + ", ".join(
                             f"{k}:{v}" for k, v in services.items()
                         )
+                    scopes = last_result.get("github_scopes")
+                    if scopes:
+                        extra += "\nscopes=" + ",".join(str(s) for s in scopes)
                     tester_detail.set_text(
-                        f"[{stamp}] type={result.get('type')}\n"
-                        f"valid={result.get('valid')}  validated={result.get('validated')}  "
-                        f"http={result.get('status_code')}\n"
+                        f"[{stamp}] type={last_result.get('type')}\n"
+                        f"valid={last_result.get('valid')}  validated={last_result.get('validated')}  "
+                        f"http={last_result.get('status_code')}\n"
                         f"note={note}{extra}"
                     )
-                    footer_status.set_text(f"LAST TEST  {label}")
-                    ui.notify(f"Key test: {label}", type="positive" if valid else "warning")
+                    footer_status.set_text(f"LAST TEST  {last_label}")
+                    live_n = sum(1 for r in rows if r.get("valid"))
+                    ui.notify(
+                        f"Key test: {live_n}/{len(rows)} LIVE"
+                        if len(rows) > 1
+                        else f"Key test: {last_label}",
+                        type="positive" if last_valid or live_n else "warning",
+                    )
 
                 with ui.row().classes("gap-2 mt-3"):
                     ui.button(
                         "Detect type", on_click=apply_guess, color="secondary"
                     ).props("outline")
                     ui.button(
-                        "Test key", on_click=run_manual_test, color="primary"
+                        "Test key(s)", on_click=run_manual_test, color="primary"
                     ).props("unelevated")
 
         # Artifacts 
@@ -1679,6 +1963,27 @@ def build_ui() -> None:
 
         if STATE.runner.running:
             update_stats()
+            ws = Path(STATE.workspace or STATE.runner.output_dir or "")
+            stream_file = ws / "findings_stream.jsonl" if str(ws) else None
+            if stream_file and stream_file.is_file():
+                streamed = load_jsonl_list(stream_file)
+                n = len(streamed)
+                if n != getattr(STATE, "_stream_n", 0):
+                    STATE._stream_n = n
+                    known = {
+                        (f.get("hash"), f.get("type"), f.get("key"))
+                        for f in STATE.findings
+                    }
+                    added = 0
+                    for f in streamed:
+                        ident = (f.get("hash"), f.get("type"), f.get("key"))
+                        if ident in known:
+                            continue
+                        STATE.findings.append(f)
+                        known.add(ident)
+                        added += 1
+                    if added and hasattr(build_ui, "render_findings"):
+                        build_ui.render_findings()  # type: ignore[attr-defined]
         elif STATE.runner.finished_at and STATE.runner.exit_code is not None:
             # Finalize once
             code = STATE.runner.exit_code

@@ -1,7 +1,10 @@
 import argparse
 import asyncio
 import base64
+import csv
+import fnmatch
 import hmac
+import html
 import json
 import math
 import os
@@ -15,12 +18,16 @@ import threading
 import time
 import urllib.request
 import urllib.error
+import smtplib
+import xml.etree.ElementTree as ET
+from email.message import EmailMessage
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass, field, fields
-from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import urlparse, quote, urlencode
+from typing import Any, Callable, Dict, List, Optional, Tuple
+from urllib.parse import parse_qs, urlparse, quote, urlencode, unquote
 
 try:
     import yaml
@@ -28,6 +35,8 @@ try:
 except ImportError:
     yaml = None  
     YAML_AVAILABLE = False
+
+import reconpipe_addons as addons
 
 try:
     import aiohttp
@@ -93,6 +102,11 @@ class ValidatorSpec:
     slack_webhook_probe: bool = False
     webhook: bool = False
     google_api_spray: bool = False
+    azure_sas_inspect: bool = False
+    gcp_sa_inspect: bool = False
+    uri_inspect: bool = False
+    needs_vault: bool = False
+    needs_grafana: bool = False
 
     def note_for(self, status: int, default: str = "") -> str:
         if status in self.notes:
@@ -108,6 +122,22 @@ INFORMATIONAL_NOTES: Dict[str, str] = {}
 EXPOSURE_TYPES: frozenset = frozenset()
 EXPOSURE_NOTES: Dict[str, str] = {}
 MIN_CONFIDENCE = 30
+SCOPE_INCLUDE: List[str] = []
+SCOPE_EXCLUDE: List[str] = []
+SEVERITY_MAP: Dict[str, str] = {}
+REVOCATION_URLS: Dict[str, str] = {}
+COMPLIANCE_TAGS: Dict[str, List[str]] = {}
+SCAN_PROXY = ""
+SCAN_PROXY_AUTH = ""
+SCAN_EXTRA_HEADERS: Dict[str, str] = {}
+SCAN_POLITE_DELAY = 0.0
+SCAN_RPS = 0.0
+SCAN_CREDENTIALS: Optional["ScanCredentials"] = None
+DOCKER_FALLBACK = False
+FINDINGS_STREAM: Optional["FindingsStream"] = None
+PIPELINE_METRICS: Optional["PipelineMetrics"] = None
+_POLITE_LOCK = threading.Lock()
+_POLITE_LAST = 0.0
 
 _VALIDATOR_FIELD_NAMES = {f.name for f in fields(ValidatorSpec)}
 
@@ -193,6 +223,8 @@ def apply_config_dict(data: Dict[str, Any], *, replace: bool = False) -> None:
     """
     global PATTERNS, VALIDATORS, CONFIDENCE, MIN_CONFIDENCE
     global INFORMATIONAL_TYPES, INFORMATIONAL_NOTES, EXPOSURE_TYPES, EXPOSURE_NOTES
+    global SCOPE_INCLUDE, SCOPE_EXCLUDE
+    global SEVERITY_MAP, REVOCATION_URLS, COMPLIANCE_TAGS
 
     if replace:
         PATTERNS = {}
@@ -200,6 +232,11 @@ def apply_config_dict(data: Dict[str, Any], *, replace: bool = False) -> None:
         CONFIDENCE = {}
         INFORMATIONAL_NOTES = {}
         EXPOSURE_NOTES = {}
+        SCOPE_INCLUDE = []
+        SCOPE_EXCLUDE = []
+        SEVERITY_MAP = {}
+        REVOCATION_URLS = {}
+        COMPLIANCE_TAGS = {}
 
     if "min_confidence" in data and data["min_confidence"] is not None:
         MIN_CONFIDENCE = int(data["min_confidence"])
@@ -253,6 +290,41 @@ def apply_config_dict(data: Dict[str, Any], *, replace: bool = False) -> None:
     INFORMATIONAL_TYPES = frozenset(INFORMATIONAL_NOTES.keys())
     EXPOSURE_TYPES = frozenset(EXPOSURE_NOTES.keys())
 
+    scope = data.get("scope")
+    if isinstance(scope, dict):
+        if "include" in scope:
+            raw_inc = scope.get("include") or []
+            SCOPE_INCLUDE = [str(x) for x in raw_inc if x] if isinstance(raw_inc, list) else []
+            if "exclude" in scope:
+                raw_exc = scope.get("exclude") or []
+                SCOPE_EXCLUDE = [str(x) for x in raw_exc if x] if isinstance(raw_exc, list) else []
+
+    sev = data.get("severity")
+    if isinstance(sev, dict):
+        for name, level in sev.items():
+            if level is None:
+                SEVERITY_MAP.pop(str(name), None)
+            else:
+                SEVERITY_MAP[str(name)] = str(level).lower()
+
+    rev = data.get("revocation")
+    if isinstance(rev, dict):
+        for name, url in rev.items():
+            if url is None:
+                REVOCATION_URLS.pop(str(name), None)
+            else:
+                REVOCATION_URLS[str(name)] = str(url)
+
+    comp = data.get("compliance")
+    if isinstance(comp, dict):
+        for name, tags in comp.items():
+            if tags is None:
+                COMPLIANCE_TAGS.pop(str(name), None)
+            elif isinstance(tags, list):
+                COMPLIANCE_TAGS[str(name)] = [str(t) for t in tags if t]
+            else:
+                COMPLIANCE_TAGS[str(name)] = [str(tags)]
+
 
 def load_config_file(path: Path, *, replace: bool = False) -> None:
     apply_config_dict(_load_yaml_file(path), replace=replace)
@@ -296,6 +368,11 @@ CONTEXT_WORDS = {
     "sendgrid", "mailgun", "heroku", "herokuapp", "platform-api", "shopify", "discord",
     "openai", "anthropic", "gitlab", "mapbox", "npm", "pypi", "digitalocean",
     "aws_session", "session_token",
+    "cloudflare", "huggingface", "notion", "grafana", "vault", "datadog",
+    "linear", "supabase", "azure", "sas",
+    "vercel", "netlify", "railway", "render", "flyio", "planetscale",
+    "circleci", "sentry", "doppler", "pagerduty", "atlassian", "clerk",
+    "mongodb", "postgres", "redis", "stripe", "algolia",
 }
 
 IGNORED_PATH_PATTERNS = [
@@ -317,8 +394,69 @@ SOURCE_MAP_PATH_RE = re.compile(r"\.map(?:$|\?|#)", re.I)
 BASELINE_FILE = ".reconpipe_ignore.json"
 
 load_default_config()
+addons.bind_config_lookups(REVOCATION_URLS, COMPLIANCE_TAGS)
 
-
+parse_header_list = addons.parse_header_list
+polite_delay_seconds = addons.polite_delay_seconds
+get_proxy_handler = addons.get_proxy_handler
+install_urllib_proxy = addons.install_urllib_proxy
+aiohttp_proxy_url = addons.aiohttp_proxy_url
+merge_subdomain_sources = addons.merge_subdomain_sources
+extract_js_urls = addons.extract_js_urls
+extract_endpoints_from_js = addons.extract_endpoints_from_js
+extract_js_secret_assignments = addons.extract_js_secret_assignments
+parse_source_map = addons.parse_source_map
+normalize_url = addons.normalize_url
+dedupe_urls = addons.dedupe_urls
+AdaptiveConcurrency = addons.AdaptiveConcurrency
+PipelineCheckpoint = addons.PipelineCheckpoint
+save_checkpoint = addons.save_checkpoint
+load_checkpoint = addons.load_checkpoint
+checkpoint_reached = addons.checkpoint_reached
+ScanCredentials = addons.ScanCredentials
+load_credentials = addons.load_credentials
+credentials_to_headers = addons.credentials_to_headers
+parse_burp_xml = addons.parse_burp_xml
+parse_nuclei_output = addons.parse_nuclei_output
+StageMetrics = addons.StageMetrics
+PipelineMetrics = addons.PipelineMetrics
+FindingsStream = addons.FindingsStream
+docker_cmd_for = addons.docker_cmd_for
+build_amass_cmd = addons.build_amass_cmd
+build_assetfinder_cmd = addons.build_assetfinder_cmd
+build_findomain_cmd = addons.build_findomain_cmd
+build_dnsx_cmd = addons.build_dnsx_cmd
+build_waybackurls_cmd = addons.build_waybackurls_cmd
+build_hakrawler_cmd = addons.build_hakrawler_cmd
+build_paramspider_cmd = addons.build_paramspider_cmd
+build_linkfinder_cmd = addons.build_linkfinder_cmd
+build_naabu_cmd = addons.build_naabu_cmd
+build_whatweb_cmd = addons.build_whatweb_cmd
+build_wappalyzer_cmd = addons.build_wappalyzer_cmd
+build_gowitness_cmd = addons.build_gowitness_cmd
+build_nuclei_cmd = addons.build_nuclei_cmd
+inspect_connection_uri = addons.inspect_connection_uri
+is_supabase_anon = addons.is_supabase_anon
+jwt_provider_kind = addons.jwt_provider_kind
+jwt_age_days = addons.jwt_age_days
+finding_cvss = addons.finding_cvss
+executive_summary = addons.executive_summary
+write_jsonld_report = addons.write_jsonld_report
+write_nuclei_templates = addons.write_nuclei_templates
+update_global_fingerprints = addons.update_global_fingerprints
+notify_telegram = addons.notify_telegram
+notify_email = addons.notify_email
+notify_pagerduty = addons.notify_pagerduty
+notify_opsgenie = addons.notify_opsgenie
+clone_repo = addons.clone_repo
+list_repo_files = addons.list_repo_files
+is_iac_file = addons.is_iac_file
+collect_iac_files = addons.collect_iac_files
+export_hackerone_markdown = addons.export_hackerone_markdown
+export_jira_markdown = addons.export_jira_markdown
+load_scan_profiles = addons.load_scan_profiles
+save_scan_profile = addons.save_scan_profile
+collect_tool_stdout_lines = addons.collect_tool_stdout_lines
 
 # Logging
 _FIND_LOGGED = 0
@@ -422,6 +560,7 @@ class ScanEta:
         self.skip_discovery = False
         self.skip_gau = False
         self.skip_intel = False
+        self.skip_subfinder = False
         self.no_trufflehog = False
         self.no_validate = False
         self.concurrency = 20
@@ -487,6 +626,8 @@ class ScanEta:
         tools = self.tools or {}
 
         chaos = 4.0 if self.skip_chaos else 22.0
+        if not getattr(self, "skip_subfinder", False) and tools.get("subfinder"):
+            chaos += 20.0
         if not self.skip_intel:
             chaos += 18.0
         httpx = 3.0 if self.skip_httpx else min(1500.0, max(20.0, (subs / 50.0) * 6.0 + 12.0))
@@ -661,6 +802,11 @@ USER_KEY_FIELDS = (
     ("censys_id", "censys_id", ("CENSYS_API_ID",)),
     ("censys_secret", "censys_secret", ("CENSYS_API_SECRET",)),
     ("zoomeye", "zoomeye_key", ("ZOOMEYE_API_KEY", "ZOOMEYE_KEY")),
+    ("notify_webhook", "notify_webhook", ("RECONPIPE_NOTIFY_WEBHOOK",)),
+    ("telegram_bot", "telegram_bot", ("TELEGRAM_BOT_TOKEN",)),
+    ("telegram_chat", "telegram_chat", ("TELEGRAM_CHAT_ID",)),
+    ("pagerduty", "pagerduty_key", ("PAGERDUTY_ROUTING_KEY",)),
+    ("opsgenie", "opsgenie_key", ("OPSGENIE_API_KEY",)),
 )
 HIT_SOURCE_EXT = {".js", ".jsx", ".ts", ".tsx", ".map", ".json", ".html", ".htm", ".env"}
 
@@ -823,6 +969,710 @@ def download_filename(url: str) -> str:
     return re.sub(r"[^a-zA-Z0-9._-]", "_", fname)[:120]
 
 
+SKIP_CONTENT_PREFIXES = (
+    "image/",
+    "video/",
+    "audio/",
+    "font/",
+    "application/octet-stream",
+    "application/pdf",
+    "application/zip",
+    "application/gzip",
+    "application/x-gzip",
+    "application/x-tar",
+    "application/x-rar",
+    "application/wasm",
+    "application/x-font",
+    "application/font",
+    "application/vnd.ms-fontobject",
+)
+KEEP_CONTENT_HINTS = (
+    "javascript",
+    "json",
+    "xml",
+    "html",
+    "text/",
+    "typescript",
+    "ecmascript",
+    "x-www-form-urlencoded",
+)
+
+
+def content_type_allowed(content_type: str) -> bool:
+    """False for binaries/images so downloaders skip them."""
+    ct = (content_type or "").split(";")[0].strip().lower()
+    if not ct:
+        return True
+    if any(h in ct for h in KEEP_CONTENT_HINTS):
+        return True
+    return not any(ct.startswith(p) for p in SKIP_CONTENT_PREFIXES)
+
+
+def _scope_patterns() -> Tuple[List[str], List[str]]:
+    return list(SCOPE_INCLUDE), list(SCOPE_EXCLUDE)
+
+
+def load_pattern_file(path: Optional[Path]) -> List[str]:
+    if not path:
+        return []
+    p = Path(path)
+    if not p.is_file():
+        return []
+    out: List[str] = []
+    for ln in p.read_text(encoding="utf-8", errors="ignore").splitlines():
+        text = ln.strip()
+        if text and not text.startswith("#"):
+            out.append(text)
+    return out
+
+
+def apply_scope_files(
+    include_file: Optional[str] = None,
+    exclude_file: Optional[str] = None,
+) -> None:
+    global SCOPE_INCLUDE, SCOPE_EXCLUDE
+    extra_inc = load_pattern_file(Path(include_file) if include_file else None)
+    extra_exc = load_pattern_file(Path(exclude_file) if exclude_file else None)
+    if extra_inc:
+        SCOPE_INCLUDE = list(dict.fromkeys(SCOPE_INCLUDE + extra_inc))
+    if extra_exc:
+        SCOPE_EXCLUDE = list(dict.fromkeys(SCOPE_EXCLUDE + extra_exc))
+
+
+def _host_from_target(value: str) -> str:
+    text = (value or "").strip().lower()
+    if "://" in text:
+        text = (urlparse(text).hostname or "") or text
+    return text.strip().rstrip(".")
+
+
+def _glob_match_host(pattern: str, host: str) -> bool:
+    pat = (pattern or "").strip().lower()
+    h = (host or "").strip().lower().rstrip(".")
+    if not pat or not h:
+        return False
+    if pat.startswith("^"):
+        try:
+            return bool(re.search(pat, h, re.I))
+        except re.error:
+            return False
+    if pat.startswith("*."):
+        suffix = pat[1:]  # .example.com
+        return h == pat[2:] or h.endswith(suffix)
+    return fnmatch.fnmatch(h, pat) or h == pat
+
+
+def host_in_scope(host: str, include: Optional[List[str]] = None, exclude: Optional[List[str]] = None) -> bool:
+    h = _host_from_target(host)
+    if not h:
+        return False
+    inc = include if include is not None else SCOPE_INCLUDE
+    exc = exclude if exclude is not None else SCOPE_EXCLUDE
+    if inc and not any(_glob_match_host(p, h) for p in inc):
+        return False
+    if exc and any(_glob_match_host(p, h) for p in exc):
+        return False
+    return True
+
+
+def url_in_scope(url: str, include: Optional[List[str]] = None, exclude: Optional[List[str]] = None) -> bool:
+    return host_in_scope(_host_from_target(url), include, exclude)
+
+
+def filter_hosts_in_scope(hosts: List[str]) -> List[str]:
+    if not SCOPE_INCLUDE and not SCOPE_EXCLUDE:
+        return list(hosts)
+    return [h for h in hosts if host_in_scope(h)]
+
+
+def filter_urls_in_scope(urls: List[str]) -> List[str]:
+    if not SCOPE_INCLUDE and not SCOPE_EXCLUDE:
+        return list(urls)
+    return [u for u in urls if url_in_scope(u)]
+
+
+SEVERITY_CRITICAL = frozenset({
+    "aws_access_key", "aws_secret", "gcp_service_acct", "private_key_pem",
+    "stripe_live", "hashicorp_vault",
+})
+SEVERITY_HIGH = frozenset({
+    "github_pat", "github_fine_pat", "github_oauth", "github_app", "gitlab_pat",
+    "openai_key", "anthropic_key", "sendgrid", "heroku_api", "cloudflare_api",
+    "huggingface_token", "notion_token", "linear_api_key", "supabase_service",
+    "digitalocean_pat", "npm_token", "pypi_token", "shopify_token", "shopify_secret",
+    "slack_token", "twilio_sid", "twilio_token", "azure_sas",
+})
+SEVERITY_MEDIUM = frozenset({
+    "stripe_test", "stripe_restricted", "firebase_key", "mailgun", "mailchimp",
+    "discord_token", "discord_webhook", "telegram_bot", "grafana_token",
+    "datadog_api_key", "mapbox_token", "source_map_exposure", "google_api",
+    "google_oauth", "slack_webhook",
+})
+SEVERITY_LOW = frozenset({
+    "jwt", "generic_secret", "uuid_candidate", "stripe_publishable", "firebase_url",
+})
+
+
+def finding_severity(finding: Dict) -> str:
+    """Exploitability tier, independent of regex confidence."""
+    t = str(finding.get("type") or "")
+    note = str(finding.get("note") or "").lower()
+    if t in INFORMATIONAL_TYPES:
+        return "low"
+    mapped = SEVERITY_MAP.get(t)
+    if mapped in {"critical", "high", "medium", "low"}:
+        if mapped == "high" and "restricted" in note:
+            return "medium"
+        return mapped
+    if t in SEVERITY_CRITICAL:
+        return "critical"
+    if t in SEVERITY_HIGH:
+        if "restricted" in note:
+            return "medium"
+        return "high"
+    if t in SEVERITY_MEDIUM:
+        return "medium"
+    if t in SEVERITY_LOW or t in EXPOSURE_TYPES:
+        return "low"
+    if finding.get("valid"):
+        return "high"
+    return "medium"
+
+
+def redact_key(value: str, reveal: bool = False) -> str:
+    text = value or ""
+    if reveal or len(text) <= 8:
+        return text if reveal else ("*" * len(text))
+    return f"{text[:4]}…{text[-4:]}"
+
+
+def annotate_severity(findings: List[Dict]) -> List[Dict]:
+    out = []
+    for f in findings:
+        item = dict(f)
+        item["severity"] = finding_severity(item)
+        item["cvss"] = finding_cvss(item["severity"])
+        typ = str(item.get("type") or "")
+        if typ in REVOCATION_URLS:
+            item["revocation"] = REVOCATION_URLS[typ]
+        if typ in COMPLIANCE_TAGS:
+            item["compliance"] = list(COMPLIANCE_TAGS[typ])
+        key = str(item.get("key") or "")
+        if key and item.get("entropy") is None:
+            try:
+                item["entropy"] = round(entropy(key), 3)
+            except Exception:
+                pass
+        jwt_meta = item.get("jwt") if isinstance(item.get("jwt"), dict) else None
+        age = jwt_age_days(jwt_meta)
+        if age is not None:
+            item["secret_age_days"] = round(age, 2)
+        out.append(item)
+    return out
+
+
+def _report_rows(
+    findings: List[Dict],
+    exposures: Optional[List[Dict]] = None,
+    informational: Optional[List[Dict]] = None,
+) -> List[Dict]:
+    rows: List[Dict] = []
+    for f in findings or []:
+        item = dict(f)
+        item.setdefault("bucket", "finding")
+        rows.append(item)
+    for e in exposures or []:
+        item = dict(e)
+        item.setdefault("bucket", "exposure")
+        rows.append(item)
+    for i in informational or []:
+        item = dict(i)
+        item.setdefault("bucket", "informational")
+        rows.append(item)
+    for row in rows:
+        row["severity"] = finding_severity(row)
+        row["cvss"] = finding_cvss(row["severity"])
+        row["redacted"] = redact_key(str(row.get("key") or ""))
+        typ = str(row.get("type") or "")
+        row.setdefault("revocation", REVOCATION_URLS.get(typ, ""))
+        if typ in COMPLIANCE_TAGS:
+            row.setdefault("compliance", list(COMPLIANCE_TAGS[typ]))
+    return rows
+
+
+def write_csv_report(
+    path: Path,
+    findings: List[Dict],
+    exposures: Optional[List[Dict]] = None,
+    informational: Optional[List[Dict]] = None,
+) -> Path:
+    rows = _report_rows(findings, exposures, informational)
+    path = Path(path)
+    with path.open("w", encoding="utf-8", newline="") as fh:
+        writer = csv.DictWriter(
+            fh,
+            fieldnames=[
+                "severity", "type", "valid", "validated", "status_code",
+                "key", "source_url", "note", "hash", "github_scopes",
+                "cvss", "revocation", "compliance",
+            ],
+        )
+        writer.writeheader()
+        for row in rows:
+            scopes = row.get("github_scopes")
+            writer.writerow({
+                "severity": row.get("severity") or "",
+                "type": row.get("type") or "",
+                "valid": row.get("valid"),
+                "validated": row.get("validated"),
+                "status_code": row.get("status_code") or "",
+                "key": row.get("redacted") or redact_key(str(row.get("key") or "")),
+                "source_url": row.get("source_url") or "",
+                "note": row.get("note") or "",
+                "hash": row.get("hash") or "",
+                "github_scopes": ",".join(scopes) if isinstance(scopes, list) else (scopes or ""),
+                "cvss": row.get("cvss") or "",
+                "revocation": row.get("revocation") or "",
+                "compliance": ",".join(row.get("compliance") or []) if isinstance(row.get("compliance"), list) else (row.get("compliance") or ""),
+            })
+    return path
+
+
+def write_markdown_report(
+    path: Path,
+    domain: str,
+    findings: List[Dict],
+    exposures: Optional[List[Dict]] = None,
+    informational: Optional[List[Dict]] = None,
+    extra: Optional[Dict[str, Any]] = None,
+) -> Path:
+    rows = _report_rows(findings, exposures, informational)
+    extra = extra or {}
+    valid_n = sum(1 for f in findings if f.get("valid"))
+    exec_txt = extra.get("executive") or executive_summary(
+        domain, findings, valid_n, len(exposures or [])
+    )
+    lines = [
+        f"# ReconPipe report — {domain}",
+        "",
+        f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        "",
+        "## Executive summary",
+        "",
+        exec_txt,
+        "",
+        f"- Unique findings: {len(findings)}",
+        f"- Valid: {valid_n}",
+        f"- Exposures: {len(exposures or [])}",
+        f"- Informational: {len(informational or [])}",
+    ]
+    if extra.get("new_count") is not None:
+        lines.append(f"- New since last scan: {extra['new_count']}")
+    lines += ["", "## Findings", ""]
+    if not rows:
+        lines.append("_No findings._")
+    else:
+        lines.append("| Severity | Type | Valid | Key | Source | Note |")
+        lines.append("|---|---|---|---|---|---|")
+        for row in rows:
+            note = str(row.get("note") or "").replace("|", "\\|").replace("\n", " ")
+            src = str(row.get("source_url") or "").replace("|", "\\|")
+            revoke = str(row.get("revocation") or "").replace("|", "\\|")
+            tags = row.get("compliance") or []
+            if isinstance(tags, list) and tags:
+                note = note + " [" + ",".join(str(t) for t in tags) + "]"
+            if revoke:
+                note = note + f" revoke:{revoke}"
+            lines.append(
+                f"| {row.get('severity')} | `{row.get('type')}` | {row.get('valid')} | "
+                f"`{row.get('redacted')}` | {src} | {note} |"
+            )
+    path = Path(path)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
+
+
+def write_html_report(
+    path: Path,
+    domain: str,
+    findings: List[Dict],
+    exposures: Optional[List[Dict]] = None,
+    informational: Optional[List[Dict]] = None,
+    extra: Optional[Dict[str, Any]] = None,
+) -> Path:
+    rows = _report_rows(findings, exposures, informational)
+    extra = extra or {}
+    valid_n = sum(1 for f in findings if f.get("valid"))
+    exec_txt = html.escape(
+        str(extra.get("executive") or executive_summary(domain, findings, valid_n, len(exposures or [])))
+    )
+    colors = {
+        "critical": "#b91c1c",
+        "high": "#c2410c",
+        "medium": "#a16207",
+        "low": "#64748b",
+    }
+    cards = []
+    for row in rows:
+        sev = str(row.get("severity") or "medium")
+        color = colors.get(sev, "#64748b")
+        src = html.escape(str(row.get("source_url") or ""))
+        note = html.escape(str(row.get("note") or ""))
+        key = html.escape(str(row.get("redacted") or ""))
+        typ = html.escape(str(row.get("type") or ""))
+        valid = "VALID" if row.get("valid") else ("checked" if row.get("validated") else "unverified")
+        cvss = finding_cvss(sev)
+        revoke = html.escape(str(row.get("revocation") or ""))
+        tags = row.get("compliance") or []
+        tag_html = ""
+        if isinstance(tags, list) and tags:
+            tag_html = " · " + html.escape(",".join(str(t) for t in tags))
+        preview = ""
+        if row.get("response_preview"):
+            preview = (
+                "<pre class='preview'>"
+                + html.escape(str(row.get("response_preview"))[:800])
+                + "</pre>"
+            )
+        cards.append(
+            "<article class='hit'>"
+            f"<div class='sev' style='background:{color}'>{html.escape(sev)}</div>"
+            f"<div class='meta'><strong>{typ}</strong> · {valid} · CVSS {cvss}{tag_html}</div>"
+            f"<div class='key'>{key}</div>"
+            f"<div class='src'><a href='{src}'>{src}</a></div>"
+            f"<div class='note'>{note}</div>"
+            + (f"<div class='note'>Revoke: {revoke}</div>" if revoke else "")
+            + preview
+            + "</article>"
+        )
+    new_line = ""
+    if extra.get("new_count") is not None:
+        new_line = f"<div class='stat'>New since last scan <b>{extra['new_count']}</b></div>"
+    body = f"""<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"/>
+<title>ReconPipe — {html.escape(domain)}</title>
+<style>
+body {{ font-family: ui-sans-serif, system-ui, sans-serif; background:#0b1220; color:#e2e8f0; margin:0; }}
+main {{ max-width: 980px; margin: 0 auto; padding: 24px; }}
+h1 {{ margin: 0 0 8px; }}
+.stats {{ display:flex; gap:12px; flex-wrap:wrap; margin: 16px 0 24px; }}
+.stat {{ background:#111827; border:1px solid #1f2937; padding:10px 14px; border-radius:8px; }}
+.hit {{ background:#111827; border:1px solid #1f2937; border-radius:10px; padding:14px; margin:10px 0; }}
+.sev {{ display:inline-block; color:#fff; font-size:12px; padding:2px 8px; border-radius:999px; text-transform:uppercase; }}
+.key {{ font-family: ui-monospace, monospace; margin:8px 0; }}
+.src a {{ color:#93c5fd; font-size:12px; word-break:break-all; }}
+.note {{ color:#94a3b8; font-size:13px; margin-top:6px; }}
+.exec {{ color:#cbd5e1; line-height:1.45; }}
+.preview {{ background:#0b1220; padding:8px; font-size:11px; overflow:auto; }}
+</style></head><body><main>
+<h1>ReconPipe report</h1>
+<p>{html.escape(domain)} · {html.escape(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))}</p>
+<p class="exec">{exec_txt}</p>
+<div class="stats">
+  <div class="stat">Findings <b>{len(findings)}</b></div>
+  <div class="stat">Valid <b>{sum(1 for f in findings if f.get("valid"))}</b></div>
+  <div class="stat">Exposures <b>{len(exposures or [])}</b></div>
+  {new_line}
+</div>
+{''.join(cards) or '<p>No findings.</p>'}
+</main></body></html>
+"""
+    path = Path(path)
+    path.write_text(body, encoding="utf-8")
+    return path
+
+
+def split_tester_keys(text: str) -> List[str]:
+    """Split a Key Tester paste into one credential per non-empty line."""
+    out: List[str] = []
+    for ln in (text or "").splitlines():
+        item = ln.strip().strip(",")
+        if item:
+            out.append(item)
+    return out
+
+
+def attach_github_scopes(result: Dict, headers: Optional[Dict[str, str]]) -> None:
+    if not headers:
+        return
+    lowered = {str(k).lower(): v for k, v in headers.items()}
+    scopes = lowered.get("x-oauth-scopes") or lowered.get("x-accepted-oauth-scopes")
+    accepted = lowered.get("x-accepted-oauth-scopes")
+    if scopes:
+        parsed = [s.strip() for s in str(scopes).split(",") if s.strip()]
+        result["github_scopes"] = parsed
+        extra = "scopes=" + ",".join(parsed)
+        note = str(result.get("note") or "")
+        if extra not in note:
+            result["note"] = (note + " | " + extra).strip(" |")
+    if accepted and "x-oauth-scopes" not in lowered:
+        parsed = [s.strip() for s in str(accepted).split(",") if s.strip()]
+        result.setdefault("github_scopes", parsed)
+
+
+def compare_scan_runs(
+    previous: List[Dict],
+    current: List[Dict],
+) -> Dict[str, List[Dict]]:
+    def _hid(item: Dict) -> str:
+        h = str(item.get("hash") or "").strip().lower()
+        if h:
+            return h
+        return finding_hash(str(item.get("type") or ""), str(item.get("key") or ""))
+
+    prev_map = {_hid(x): x for x in previous or [] if _hid(x)}
+    curr_map = {_hid(x): x for x in current or [] if _hid(x)}
+    new_items = [curr_map[h] for h in curr_map if h not in prev_map]
+    gone = [prev_map[h] for h in prev_map if h not in curr_map]
+    unchanged = [curr_map[h] for h in curr_map if h in prev_map]
+    return {"new": new_items, "resolved": gone, "unchanged": unchanged}
+
+
+def write_run_diff(output_dir: Path, current: List[Dict]) -> Dict[str, Any]:
+    prev_path = Path(output_dir) / "previous_findings.json"
+    findings_path = Path(output_dir) / "findings.json"
+    previous: List[Dict] = []
+    src = prev_path if prev_path.is_file() else findings_path
+    if src.is_file():
+        try:
+            loaded = json.loads(src.read_text(encoding="utf-8"))
+            if isinstance(loaded, list):
+                previous = loaded
+        except Exception:
+            previous = []
+    diff = compare_scan_runs(previous, current)
+    payload = {
+        "new_count": len(diff["new"]),
+        "resolved_count": len(diff["resolved"]),
+        "unchanged_count": len(diff["unchanged"]),
+        "new": [
+            {
+                "type": f.get("type"),
+                "hash": f.get("hash"),
+                "severity": finding_severity(f),
+                "source_url": f.get("source_url"),
+                "key": redact_key(str(f.get("key") or "")),
+            }
+            for f in diff["new"]
+        ],
+        "resolved": [
+            {
+                "type": f.get("type"),
+                "hash": f.get("hash"),
+                "source_url": f.get("source_url"),
+            }
+            for f in diff["resolved"]
+        ],
+    }
+    (Path(output_dir) / "findings_diff.json").write_text(
+        json.dumps(payload, indent=2), encoding="utf-8"
+    )
+    if findings_path.is_file():
+        try:
+            shutil.copy2(findings_path, prev_path)
+        except OSError:
+            pass
+    return payload
+
+
+def _safe_notify_text(text: str) -> str:
+    return re.sub(r"[^A-Za-z0-9 .,_:()\[\]/+-]", " ", text or "")[:180]
+
+
+def notify_desktop(title: str, body: str) -> bool:
+    """Best-effort desktop toast. Never raises."""
+    title = _safe_notify_text(title) or "ReconPipe"
+    body = _safe_notify_text(body)
+    try:
+        if sys.platform.startswith("linux"):
+            if shutil.which("notify-send"):
+                subprocess.Popen(
+                    ["notify-send", title, body],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                return True
+        elif sys.platform == "darwin":
+            script = (
+                f'display notification "{body.replace(chr(34), "")}" '
+                f'with title "{title.replace(chr(34), "")}"'
+            )
+            subprocess.Popen(
+                ["osascript", "-e", script],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            return True
+        elif sys.platform == "win32":
+            ps = (
+                "Add-Type -AssemblyName System.Windows.Forms; "
+                "$n=New-Object System.Windows.Forms.NotifyIcon; "
+                "$n.Icon=[System.Drawing.SystemIcons]::Information; $n.Visible=$true; "
+                f"$n.ShowBalloonTip(6000,'{title}','{body}','Info')"
+            )
+            subprocess.Popen(
+                ["powershell", "-NoProfile", "-Command", ps],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            return True
+    except Exception:
+        return False
+    return False
+
+
+def notify_webhook(url: str, payload: Dict[str, Any]) -> bool:
+    """POST a redacted payload. Discord/Slack wrappers when the URL matches."""
+    target = (url or "").strip()
+    if not target:
+        return False
+    body: Any = payload
+    if "discord.com/api/webhooks" in target or "discordapp.com/api/webhooks" in target:
+        text = payload.get("text") or json.dumps(payload)[:1800]
+        body = {"content": str(text)[:1900]}
+    elif "hooks.slack.com" in target:
+        body = {"text": payload.get("text") or json.dumps(payload)[:1800]}
+    raw = json.dumps(body).encode("utf-8")
+    req = urllib.request.Request(
+        target,
+        data=raw,
+        headers={"Content-Type": "application/json", "User-Agent": "ReconPipe/1.1"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=12) as resp:
+            return 200 <= int(resp.status) < 300
+    except urllib.error.HTTPError as exc:
+        return 200 <= int(exc.code) < 300
+    except Exception:
+        return False
+
+
+def notify_scan_complete(
+    domain: str,
+    valid_findings: List[Dict],
+    webhook: str = "",
+    desktop: bool = True,
+) -> None:
+    n = len(valid_findings or [])
+    title = "ReconPipe"
+    if n:
+        body = f"{n} valid key(s) on {domain}"
+    else:
+        body = f"Scan complete for {domain} — no valid keys"
+    if desktop:
+        notify_desktop(title, body)
+    if webhook and n:
+        payload = {
+            "text": body,
+            "domain": domain,
+            "valid_count": n,
+            "keys": [
+                {
+                    "type": f.get("type"),
+                    "severity": finding_severity(f),
+                    "key": redact_key(str(f.get("key") or "")),
+                    "note": f.get("note"),
+                    "source_url": f.get("source_url"),
+                }
+                for f in valid_findings[:25]
+            ],
+        }
+        try:
+            ok = notify_webhook(webhook, payload)
+            if ok:
+                log(f"Webhook notified ({n} valid)", "success")
+            else:
+                log("Webhook notify failed", "warn")
+        except Exception as exc:
+            log(f"Webhook notify error: {exc}", "warn")
+
+
+def notify_stage_progress(webhook: str, stage: str, progress: float, metrics: Optional[Dict] = None) -> bool:
+    if not (webhook or "").strip():
+        return False
+    payload = {
+        "event": "stage_progress",
+        "text": f"ReconPipe stage {stage} ({int(float(progress) * 100)}%)",
+        "stage": stage,
+        "progress": progress,
+        "metrics": metrics or {},
+        "timestamp": datetime.now().isoformat(),
+    }
+    return notify_webhook(webhook, payload)
+
+
+def download_url_file(
+    url: str,
+    dl_dir: Path,
+    ua: str,
+    timeout: int = 8,
+) -> str:
+    """Download one URL. Returns downloaded|cached|skipped|error."""
+    fname = download_filename(url)
+    out_path = Path(dl_dir) / fname
+    if out_path.is_file() and out_path.stat().st_size > 0:
+        return "cached"
+    apply_polite_delay()
+    try:
+        req = urllib.request.Request(url, method="HEAD", headers={"User-Agent": ua, **SCAN_EXTRA_HEADERS})
+        with urllib.request.urlopen(req, timeout=min(5, timeout)) as resp:
+            ct = resp.headers.get("Content-Type") or ""
+            if not content_type_allowed(ct):
+                return "skipped"
+    except Exception:
+        pass
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": ua, **SCAN_EXTRA_HEADERS})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            ct = resp.headers.get("Content-Type") or ""
+            if not content_type_allowed(ct):
+                return "skipped"
+            out_path.write_bytes(resp.read() or b"")
+        return "downloaded"
+    except Exception:
+        return "error"
+
+
+def download_files_parallel(
+    urls: List[str],
+    dl_dir: Path,
+    *,
+    workers: int = 16,
+    timeout: int = 8,
+) -> Dict[str, int]:
+    dl_dir = Path(dl_dir)
+    dl_dir.mkdir(parents=True, exist_ok=True)
+    ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+    counts = {"downloaded": 0, "cached": 0, "skipped": 0, "error": 0}
+    workers = max(1, min(int(workers or 16), 32))
+    if SCAN_POLITE_DELAY > 0:
+        workers = 1
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futs = [
+            pool.submit(download_url_file, url, dl_dir, ua, timeout)
+            for url in urls
+        ]
+        done = 0
+        for fut in as_completed(futs):
+            status = "error"
+            try:
+                status = fut.result()
+            except Exception:
+                status = "error"
+            counts[status] = counts.get(status, 0) + 1
+            done += 1
+            if done % 100 == 0:
+                log(
+                    f"  Downloaded: {counts['downloaded']}/{len(urls)} "
+                    f"(cached {counts['cached']}, skipped {counts['skipped']})...",
+                    "info",
+                )
+                if _ETA is not None:
+                    _ETA.set_work(progress=min(0.55, done / max(len(urls), 1) * 0.55))
+    return counts
+
+
 def _link_or_copy(src: Path, dest: Path) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
     if dest.exists():
@@ -858,6 +1708,10 @@ def pack_hit_bundle(
         "summary.txt",
         "results.sarif",
         "files_to_scan.txt",
+        "report.html",
+        "report.md",
+        "findings.csv",
+        "findings_diff.json",
     ):
         src = Path(output_dir) / name
         if src.is_file():
@@ -899,7 +1753,10 @@ def pack_hit_bundle(
 
 # Tool helpers
 PIPELINE_TOOLS = [
-    "chaos", "httpx", "katana", "waymore", "gospider", "gau", "waybackurls", "trufflehog",
+    "chaos", "subfinder", "amass", "assetfinder", "findomain", "dnsx",
+    "httpx", "katana", "waymore", "gospider", "gau", "waybackurls",
+    "hakrawler", "paramspider", "linkfinder", "naabu", "whatweb",
+    "wappalyzer", "gowitness", "nuclei", "trufflehog",
 ]
 
 
@@ -1081,6 +1938,23 @@ def _extend_if(cmd: List[str], blob: str, flag: str, *values: str) -> None:
         cmd.extend(values)
 
 
+def build_subfinder_cmd(
+    domain: str,
+    output_file: str,
+    help_blob: Optional[str] = None,
+) -> List[str]:
+    blob = help_blob if help_blob is not None else _cmd_blob("subfinder", "-h")
+    cmd = ["subfinder"]
+    _extend_if(cmd, blob, "-d", domain)
+    _extend_if(cmd, blob, "-o", output_file)
+    _extend_if(cmd, blob, "-silent")
+    if "-d" not in cmd:
+        cmd.extend(["-d", domain])
+    if "-o" not in cmd:
+        cmd.extend(["-o", output_file])
+    return cmd
+
+
 def build_chaos_cmd(
     domain: str,
     output_file: str,
@@ -1143,6 +2017,7 @@ def build_gospider_cmd(list_file: str, output_dir: str, help_blob: Optional[str]
     _extend_if(cmd, blob, "-t", "20")
     _extend_if(cmd, blob, "--sitemap")
     _extend_if(cmd, blob, "--robots")
+    _extend_if(cmd, blob, "--delay", "1")
     _extend_if(cmd, blob, "-q")
     _extend_if(cmd, blob, "-o", output_dir)
     if "-S" not in cmd:
@@ -1167,6 +2042,8 @@ def build_gau_cmd(host: str, threads: int = 5, help_blob: Optional[str] = None) 
     cmd = ["gau"]
     if help_has_flag(blob, "threads"):
         cmd.extend(["--threads", str(threads)])
+    if help_has_flag(blob, "timeout"):
+        cmd.extend(["--timeout", "30"])
     cmd.append(host)
     return cmd
 
@@ -1283,6 +2160,17 @@ def run_cmd(cmd: List[str], output_file: Optional[str] = None,
     except (FileNotFoundError, OSError):
         log(f"Tool not found: {cmd[0]}", "error")
         return CMD_NOTFOUND_RC, b""
+
+
+def run_cmd_with_retry(
+    cmd: List[str],
+    max_retries: int = 3,
+    base_delay: float = 1.0,
+    **kwargs: Any,
+) -> Tuple[int, bytes]:
+    return addons.run_cmd_with_retry(
+        run_cmd, cmd, max_retries=max_retries, base_delay=base_delay, **kwargs
+    )
 
 
 # Dedup / filters / scanner
@@ -1473,10 +2361,124 @@ def inspect_jwt(token: str) -> Dict:
 
     keep = (
         "iss", "aud", "sub", "exp", "iat", "nbf", "azp", "scope", "scp",
-        "email", "preferred_username", "cid", "client_id",
+        "email", "preferred_username", "cid", "client_id", "role", "ref",
     )
     info["claims"] = {k: payload[k] for k in keep if k in payload}
+    if "role" in payload:
+        info["role"] = payload.get("role")
     return info
+
+
+def is_supabase_service(jwt_meta: Optional[Dict]) -> bool:
+    """True when a JWT is a Supabase service_role / project token."""
+    if not jwt_meta or not jwt_meta.get("ok"):
+        return False
+    iss = str(jwt_meta.get("iss") or "")
+    claims = jwt_meta.get("claims") or {}
+    role = str(jwt_meta.get("role") or claims.get("role") or "")
+    blob = " ".join(
+        [
+            iss,
+            str(claims.get("iss") or ""),
+            str(claims.get("ref") or ""),
+            role,
+        ]
+    ).lower()
+    if role == "anon":
+        return False
+    if "supabase" in blob:
+        return True
+    if role == "service_role" and ("supabase.co" in iss.lower() or claims.get("ref")):
+        return True
+    return False
+
+
+def validate_azure_sas(token: str) -> Dict[str, Any]:
+    """Local SAS parse: require sig=, classify by se= expiry. No HTTP."""
+    text = (token or "").strip()
+    qs = text.split("?", 1)[-1] if "?" in text else text
+    params = parse_qs(qs.replace("&amp;", "&"), keep_blank_values=True)
+    sig = (params.get("sig") or [""])[0]
+    se = unquote((params.get("se") or [""])[0])
+    st = unquote((params.get("st") or [""])[0])
+    result: Dict[str, Any] = {
+        "validated": True,
+        "status_code": None,
+        "valid": False,
+        "note": "",
+        "azure_sas": {"sig": bool(sig), "se": se, "st": st},
+    }
+    if not sig:
+        result["note"] = "Invalid SAS: missing sig="
+        return result
+    expired = None
+    if se:
+        try:
+            exp = datetime.fromisoformat(se.replace("Z", "+00:00"))
+            if exp.tzinfo is None:
+                exp = exp.replace(tzinfo=timezone.utc)
+            expired = datetime.now(timezone.utc) > exp
+        except Exception:
+            expired = None
+    bits = [f"se={se}" if se else "no se=", f"st={st}" if st else ""]
+    bits = [b for b in bits if b]
+    if expired is True:
+        result["note"] = "INTEL (expired Azure SAS); " + "; ".join(bits)
+        result["valid"] = False
+        return result
+    if expired is False:
+        result["valid"] = True
+        result["note"] = "LIVE Azure SAS; " + "; ".join(bits)
+        return result
+    result["valid"] = True
+    result["note"] = "Azure SAS (sig present; expiry unknown); " + "; ".join(bits)
+    return result
+
+
+def validate_gcp_service_account(blob: str) -> Dict[str, Any]:
+    """Local JSON inspect — do not authenticate to Google with leaked material."""
+    result: Dict[str, Any] = {
+        "validated": True,
+        "status_code": None,
+        "valid": False,
+        "note": "",
+    }
+    data = None
+    try:
+        data = json.loads(blob)
+    except Exception:
+        m = re.search(r"\{.*\}", blob or "", re.S)
+        if m:
+            try:
+                data = json.loads(m.group(0))
+            except Exception:
+                data = None
+    if not isinstance(data, dict):
+        email = ""
+        proj = ""
+        em = re.search(r'"client_email"\s*:\s*"([^"]+)"', blob or "")
+        pm = re.search(r'"project_id"\s*:\s*"([^"]+)"', blob or "")
+        if em:
+            email = em.group(1)
+        if pm:
+            proj = pm.group(1)
+        if "service_account" in (blob or "") and "BEGIN" in (blob or ""):
+            result["valid"] = True
+            result["note"] = f"GCP service account JSON (client_email={email or '?'}; project={proj or '?'})"
+            result["gcp_sa"] = {"client_email": email, "project_id": proj}
+            return result
+        result["note"] = "Could not parse GCP service account JSON"
+        return result
+    email = str(data.get("client_email") or "")
+    proj = str(data.get("project_id") or "")
+    pk = str(data.get("private_key") or "")
+    if str(data.get("type") or "") == "service_account" and pk:
+        result["valid"] = True
+        result["note"] = f"GCP service account JSON; client_email={email or '?'}; project={proj or '?'}"
+        result["gcp_sa"] = {"client_email": email, "project_id": proj}
+        return result
+    result["note"] = "JSON is not a GCP service_account blob"
+    return result
 
 
 def validate_jwt_inspect(token: str) -> Dict:
@@ -1877,7 +2879,10 @@ def custom_scan(urls_file: str, output_dir: Optional[Path] = None) -> List[Dict]
                 _ETA.set_work(progress=i / max(len(urls), 1), log_now=True)
 
         try:
-            req = urllib.request.Request(url, headers={"User-Agent": ua})
+            req_headers = {"User-Agent": ua}
+            req_headers.update(SCAN_EXTRA_HEADERS)
+            apply_polite_delay()
+            req = urllib.request.Request(url, headers=req_headers)
             with urllib.request.urlopen(req, timeout=8) as resp:
                 page = resp.read().decode("utf-8", errors="ignore")
 
@@ -1926,7 +2931,9 @@ def custom_scan(urls_file: str, output_dir: Optional[Path] = None) -> List[Dict]
                     # Weak detectors need nearby credential context
                     needs_context = key_type in {
                         "generic_secret", "uuid_candidate", "jwt",
-                        "discord_token",
+                        "discord_token", "datadog_api_key", "hashicorp_vault",
+                        "vercel_token", "netlify_pat", "algolia_api", "algolia_admin",
+                        "pagerduty_api", "trello_api", "okta_api", "clerk_secret",
                     }
                     if needs_context and not has_context(page, m.start(), m.end()):
                         baseline_record(baseline, h, key_type, url)
@@ -1979,17 +2986,41 @@ def custom_scan(urls_file: str, output_dir: Optional[Path] = None) -> List[Dict]
                             continue
 
                     jwt_meta: Optional[Dict] = None
-                    if key_type == "jwt":
+                    if key_type in {"jwt", "supabase_service", "supabase_anon", "monday_api", "onepassword_connect"}:
                         jwt_meta = inspect_jwt(key)
                         if not jwt_meta.get("ok"):
                             baseline_record(baseline, h, key_type, url)
                             quarantine.append({
-                                "type": "jwt",
+                                "type": key_type,
                                 "key": key[:40],
                                 "source_url": url,
                                 "reason": f"jwt_{jwt_meta.get('error', 'decode_failed')}",
                             })
                             continue
+                        if key_type == "supabase_service" and not is_supabase_service(jwt_meta):
+                            continue
+                        if key_type == "supabase_anon" and not is_supabase_anon(jwt_meta):
+                            continue
+                        if key_type == "jwt" and is_supabase_service(jwt_meta):
+                            key_type = "supabase_service"
+                            h = finding_hash(key_type, key)
+                            if baseline_should_suppress(baseline, h, url) or (h, url) in seen_pairs:
+                                continue
+                            seen_pairs.add((h, url))
+                        elif key_type == "jwt" and is_supabase_anon(jwt_meta):
+                            key_type = "supabase_anon"
+                            h = finding_hash(key_type, key)
+                            if baseline_should_suppress(baseline, h, url) or (h, url) in seen_pairs:
+                                continue
+                            seen_pairs.add((h, url))
+                        else:
+                            kind = jwt_provider_kind(jwt_meta)
+                            if key_type == "jwt" and kind:
+                                key_type = kind
+                                h = finding_hash(key_type, key)
+                                if baseline_should_suppress(baseline, h, url) or (h, url) in seen_pairs:
+                                    continue
+                                seen_pairs.add((h, url))
 
                     confidence = score_confidence(key_type, key, page, m.start(), m.end())
                     if key_type == "jwt" and jwt_meta:
@@ -1999,6 +3030,8 @@ def custom_scan(urls_file: str, output_dir: Optional[Path] = None) -> List[Dict]
                             confidence = max(confidence, 78)
                         elif jwt_meta.get("kid") or jwt_meta.get("iss"):
                             confidence = max(confidence, 70)
+                    if key_type == "supabase_service":
+                        confidence = max(confidence, 90)
                     if confidence < MIN_CONFIDENCE:
                         baseline_record(baseline, h, key_type, url)
                         quarantine.append({
@@ -2023,6 +3056,8 @@ def custom_scan(urls_file: str, output_dir: Optional[Path] = None) -> List[Dict]
                     if from_source_map:
                         finding["from_source_map"] = True
                     findings.append(finding)
+                    if FINDINGS_STREAM is not None:
+                        FINDINGS_STREAM.emit(finding)
 
         except Exception:
             pass
@@ -2933,7 +3968,14 @@ def _key_datacenter(key: str) -> str:
 
 
 def _format_tpl(template: str, key: str, host: Optional[str] = "") -> str:
-    return (template or "").format(key=key, domain=host or "", dc=_key_datacenter(key))
+    host = host or ""
+    return (template or "").format(
+        key=key,
+        domain=host,
+        dc=_key_datacenter(key),
+        vault=host,
+        grafana=host,
+    )
 
 
 def _redirect_to_login(original_url: str, final_url: str) -> bool:
@@ -3013,10 +4055,25 @@ def _normalize_host(host: Optional[str]) -> str:
     return host.split("/")[0].strip() or ""
 
 
-def _validator_domain(validator: ValidatorSpec, domain: str, shop_domain: str = "") -> Optional[str]:
-    """Pick the host for this validator, or None if a required store domain is missing."""
+def _validator_domain(
+    validator: ValidatorSpec,
+    domain: str,
+    shop_domain: str = "",
+    vault_addr: str = "",
+    grafana_url: str = "",
+) -> Optional[str]:
+    """Pick the host for this validator, or None if a required host is missing."""
+    if validator.needs_vault:
+        base = (vault_addr or "").strip().rstrip("/")
+        if not base:
+            return None
+        if not base.startswith(("http://", "https://")):
+            base = "https://" + base
+        return base
+    if validator.needs_grafana:
+        return _normalize_host(grafana_url) or None
     if validator.needs_domain:
-        return shop_domain or None
+        return _normalize_host(shop_domain) or _normalize_host(domain) or None
     return domain
 
 
@@ -3027,6 +4084,7 @@ def _apply_http_verdict(
     body_text: str,
     original_url: str,
     final_url: str,
+    headers: Optional[Dict[str, str]] = None,
 ) -> None:
     result["validated"] = True
     result["status_code"] = status
@@ -3051,6 +4109,8 @@ def _apply_http_verdict(
             result["note"] = "Invalid: ok=false in response"
         else:
             result["note"] = "Inconclusive: non-object JSON 200"
+        if str(result.get("type") or "").startswith("github"):
+            attach_github_scopes(result, headers)
         return
 
     is_valid, note = classify_http_status(
@@ -3058,10 +4118,15 @@ def _apply_http_verdict(
     )
     result["valid"] = is_valid
     result["note"] = note
+    if is_valid and body_text:
+        result["response_preview"] = str(body_text)[:400]
+    if str(result.get("type") or "").startswith("github"):
+        attach_github_scopes(result, headers)
 
 
 async def validate_one(session, finding: Dict, limiter: "DomainRateLimiter",
-                        domain: str, shop_domain: str = "") -> Dict:
+                        domain: str, shop_domain: str = "",
+                        vault_addr: str = "", grafana_url: str = "") -> Dict:
     result = {**finding, "validated": False, "status_code": None, "valid": False, "note": ""}
     validator = VALIDATORS.get(finding.get("type", ""))
     if not validator:
@@ -3069,6 +4134,21 @@ async def validate_one(session, finding: Dict, limiter: "DomainRateLimiter",
         return result
     if validator.skip_reason:
         result["note"] = validator.skip_reason
+        return result
+
+    vault_addr = vault_addr or finding.get("vault_addr") or ""
+    grafana_url = grafana_url or finding.get("grafana_url") or ""
+
+    if validator.azure_sas_inspect:
+        result.update(validate_azure_sas(finding.get("key") or ""))
+        return result
+
+    if validator.gcp_sa_inspect:
+        result.update(validate_gcp_service_account(finding.get("key") or ""))
+        return result
+
+    if validator.uri_inspect:
+        result.update(inspect_connection_uri(finding.get("key") or ""))
         return result
 
     if validator.google_api_spray:
@@ -3081,6 +4161,19 @@ async def validate_one(session, finding: Dict, limiter: "DomainRateLimiter",
     # JWT — local header/payload inspection (no remote call)
     if validator.jwt_inspect:
         result.update(validate_jwt_inspect(finding.get("key") or ""))
+        jwt_meta = result.get("jwt") if isinstance(result.get("jwt"), dict) else None
+        if finding.get("type") == "supabase_service" or is_supabase_service(jwt_meta):
+            result["type"] = "supabase_service"
+            if result.get("valid"):
+                result["note"] = "VALID Supabase service JWT; " + str(result.get("note") or "")
+        elif finding.get("type") == "supabase_anon" or is_supabase_anon(jwt_meta):
+            result["type"] = "supabase_anon"
+            if result.get("valid"):
+                result["note"] = "VALID Supabase anon JWT; " + str(result.get("note") or "")
+        else:
+            kind = jwt_provider_kind(jwt_meta)
+            if kind and finding.get("type") in {"jwt", "onepassword_connect", "monday_api"}:
+                result["type"] = kind
         return result
 
     # AWS STS — requires paired secret on the finding (+ session for ASIA)
@@ -3119,9 +4212,17 @@ async def validate_one(session, finding: Dict, limiter: "DomainRateLimiter",
             limiter.release(dsem)
         return result
 
-    host = _validator_domain(validator, domain, shop_domain)
+    host = _validator_domain(
+        validator, domain, shop_domain, vault_addr=vault_addr, grafana_url=grafana_url
+    )
     if validator.needs_domain and not host:
         result["note"] = "Skipped: pass --shopify-domain <store.myshopify.com>"
+        return result
+    if validator.needs_vault and not host:
+        result["note"] = "Skipped: pass --vault-addr https://vault.example.com"
+        return result
+    if validator.needs_grafana and not host:
+        result["note"] = "Skipped: pass --grafana-url grafana.example.com"
         return result
 
     key = finding["key"]
@@ -3137,11 +4238,13 @@ async def validate_one(session, finding: Dict, limiter: "DomainRateLimiter",
                 k: _format_tpl(v, key, host)
                 for k, v in validator.headers.items()
             }
-            if host:
+            if host and not str(host).startswith(("http://", "https://")):
                 headers.setdefault("Referer", f"https://{host}/")
                 headers.setdefault("Origin", f"https://{host}")
             headers.setdefault("User-Agent",
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+            for hk, hv in SCAN_EXTRA_HEADERS.items():
+                headers.setdefault(hk, hv)
 
             auth = None
             if validator.auth:
@@ -3152,12 +4255,17 @@ async def validate_one(session, finding: Dict, limiter: "DomainRateLimiter",
 
             timeout = aiohttp.ClientTimeout(total=10)
             for attempt in range(max_attempts):
+                if SCAN_POLITE_DELAY:
+                    await asyncio.sleep(SCAN_POLITE_DELAY)
                 req_kwargs = {
                     "headers": headers,
                     "auth": auth,
                     "timeout": timeout,
                     "allow_redirects": True,
                 }
+                proxy = aiohttp_proxy_url(SCAN_PROXY, SCAN_PROXY_AUTH)
+                if proxy:
+                    req_kwargs["proxy"] = proxy
                 if validator.json_body is not None:
                     req_kwargs["json"] = validator.json_body
 
@@ -3171,6 +4279,7 @@ async def validate_one(session, finding: Dict, limiter: "DomainRateLimiter",
                         or validator.check_body
                         or validator.slack_webhook_probe
                         or status in (400, 401, 403)
+                        or status in validator.valid_codes
                     )
                     body_text = await resp.text() if need_body else ""
                     hdrs = resp.headers
@@ -3184,7 +4293,8 @@ async def validate_one(session, finding: Dict, limiter: "DomainRateLimiter",
                     continue
 
                 _apply_http_verdict(
-                    result, validator, status, body_text, url, final_url
+                    result, validator, status, body_text, url, final_url,
+                    headers={k: v for k, v in (hdrs.items() if hdrs else [])},
                 )
                 break
             else:
@@ -3210,17 +4320,35 @@ async def validate_one(session, finding: Dict, limiter: "DomainRateLimiter",
 
 async def validate_all(findings: List[Dict], domain: str,
                         concurrency: int = 10,
-                        shop_domain: str = "") -> List[Dict]:
+                        shop_domain: str = "",
+                        vault_addr: str = "",
+                        grafana_url: str = "") -> List[Dict]:
     findings = pair_credential_findings(findings)
     per_domain = max(1, min(3, concurrency // 3 or 1))
     limiter = DomainRateLimiter(global_limit=concurrency, per_domain=per_domain)
+    adaptive = AdaptiveConcurrency(initial=max(2, concurrency), min_=2, max_=max(concurrency, 50))
+    remaining = list(findings)
+    results: List[Dict] = []
     async with aiohttp.TCPConnector(limit=concurrency, limit_per_host=per_domain) as connector:
         async with aiohttp.ClientSession(connector=connector) as session:
-            tasks = [
-                validate_one(session, f, limiter, domain, shop_domain)
-                for f in findings
-            ]
-            return await asyncio.gather(*tasks)
+            while remaining:
+                batch_n = max(adaptive.min, min(adaptive.current, len(remaining)))
+                batch = remaining[:batch_n]
+                remaining = remaining[batch_n:]
+                t0 = time.monotonic()
+                batch_results = await asyncio.gather(*[
+                    validate_one(
+                        session, f, limiter, domain, shop_domain,
+                        vault_addr=vault_addr, grafana_url=grafana_url,
+                    )
+                    for f in batch
+                ])
+                elapsed = (time.monotonic() - t0) / max(len(batch), 1)
+                for item in batch_results:
+                    status = int(item.get("status_code") or 0)
+                    adaptive.record(elapsed, status or 200)
+                    results.append(item)
+            return results
 
 
 async def validate_finding_configured(
@@ -3282,8 +4410,32 @@ def validate_sync_fallback(findings: List[Dict], domain: str,
             results.append(result)
             continue
 
+        if validator.azure_sas_inspect:
+            result.update(validate_azure_sas(f.get("key") or ""))
+            results.append(result)
+            continue
+
+        if validator.gcp_sa_inspect:
+            result.update(validate_gcp_service_account(f.get("key") or ""))
+            results.append(result)
+            continue
+
+        if validator.uri_inspect:
+            result.update(inspect_connection_uri(f.get("key") or ""))
+            results.append(result)
+            continue
+
         if validator.jwt_inspect:
             result.update(validate_jwt_inspect(f.get("key") or ""))
+            jwt_meta = result.get("jwt") if isinstance(result.get("jwt"), dict) else None
+            if f.get("type") == "supabase_service" or is_supabase_service(jwt_meta):
+                result["type"] = "supabase_service"
+                if result.get("valid"):
+                    result["note"] = "VALID Supabase service JWT; " + str(result.get("note") or "")
+            elif f.get("type") == "supabase_anon" or is_supabase_anon(jwt_meta):
+                result["type"] = "supabase_anon"
+                if result.get("valid"):
+                    result["note"] = "VALID Supabase anon JWT; " + str(result.get("note") or "")
             results.append(result)
             continue
 
@@ -3314,9 +4466,22 @@ def validate_sync_fallback(findings: List[Dict], domain: str,
             results.append(result)
             continue
 
-        host = _validator_domain(validator, domain, shop_domain)
+        vault_addr = f.get("vault_addr") or ""
+        grafana_url = f.get("grafana_url") or ""
+        host = _validator_domain(
+            validator, domain, shop_domain,
+            vault_addr=vault_addr, grafana_url=grafana_url,
+        )
         if validator.needs_domain and not host:
             result["note"] = "Skipped: pass --shopify-domain <store.myshopify.com>"
+            results.append(result)
+            continue
+        if validator.needs_vault and not host:
+            result["note"] = "Skipped: pass --vault-addr https://vault.example.com"
+            results.append(result)
+            continue
+        if validator.needs_grafana and not host:
+            result["note"] = "Skipped: pass --grafana-url grafana.example.com"
             results.append(result)
             continue
 
@@ -3325,7 +4490,7 @@ def validate_sync_fallback(findings: List[Dict], domain: str,
         max_attempts = 4
         try:
             headers = {k: _format_tpl(v, key, host) for k, v in validator.headers.items()}
-            if host:
+            if host and not str(host).startswith(("http://", "https://")):
                 headers.setdefault("Referer", f"https://{host}/")
                 headers.setdefault("Origin", f"https://{host}")
             headers.setdefault("User-Agent",
@@ -3369,7 +4534,8 @@ def validate_sync_fallback(findings: List[Dict], domain: str,
                     continue
 
                 _apply_http_verdict(
-                    result, validator, status, body_text, url, final_url
+                    result, validator, status, body_text, url, final_url,
+                    headers=hdrs,
                 )
                 break
             else:
@@ -3434,6 +4600,7 @@ def write_sarif(
                 "key_prefix": key[:32],
                 "valid": bool(f.get("valid")),
                 "confidence": f.get("confidence"),
+                "severity": finding_severity(f),
                 "hash": f.get("hash"),
                 "scanner": f.get("scanner"),
             },
@@ -3715,6 +4882,153 @@ def merge_host_lists(*lists: List[str]) -> List[str]:
     return sorted(out)
 
 
+def run_tool_maybe_docker(
+    tool: str,
+    cmd: List[str],
+    *,
+    timeout: int = 180,
+    output_file: Optional[str] = None,
+    discard_stdout: bool = False,
+    mount_dir: Optional[Path] = None,
+) -> Tuple[int, bytes]:
+    """Run cmd; on missing binary optionally try docker. Retries transient failures."""
+    rc, out = run_cmd_with_retry(
+        cmd, max_retries=2, base_delay=0.4,
+        output_file=output_file, timeout=timeout, discard_stdout=discard_stdout,
+    )
+    if rc != CMD_NOTFOUND_RC or not DOCKER_FALLBACK:
+        return rc, out
+    docker_cmd = docker_cmd_for(tool, cmd[1:], mount_dir or Path("."))
+    if not docker_cmd:
+        return rc, out
+    log(f"{tool} missing — trying docker image", "warn")
+    return run_cmd(docker_cmd, output_file=output_file, timeout=timeout, discard_stdout=discard_stdout)
+
+
+def skip_completed_stage(resume_from: str, stage: str) -> bool:
+    """True when --resume-from is later than this stage (it already finished)."""
+    order = ["chaos", "httpx", "discovery", "trufflehog", "validate"]
+    if not resume_from or resume_from not in order or stage not in order:
+        return False
+    return order.index(stage) < order.index(resume_from)
+
+
+def apply_polite_delay() -> None:
+    """Serialize a global delay between outbound HTTP requests."""
+    global _POLITE_LAST
+    delay = float(SCAN_POLITE_DELAY or 0)
+    if delay <= 0:
+        return
+    with _POLITE_LOCK:
+        now = time.monotonic()
+        wait = delay - (now - _POLITE_LAST)
+        if wait > 0:
+            time.sleep(wait)
+        _POLITE_LAST = time.monotonic()
+
+
+def _metrics_start(name: str, items_in: int = 0) -> None:
+    if PIPELINE_METRICS is not None:
+        PIPELINE_METRICS.start_stage(name, items_in)
+
+
+def _metrics_finish(name: str, items_out: int = 0, errors: int = 0) -> None:
+    if PIPELINE_METRICS is not None:
+        PIPELINE_METRICS.finish_stage(name, items_out, errors)
+
+
+def configure_scan_runtime(args: Any, output_dir: Path) -> None:
+    global SCAN_PROXY, SCAN_PROXY_AUTH, SCAN_EXTRA_HEADERS, SCAN_POLITE_DELAY
+    global SCAN_RPS, SCAN_CREDENTIALS, DOCKER_FALLBACK, FINDINGS_STREAM, PIPELINE_METRICS
+    SCAN_PROXY = (getattr(args, "proxy", None) or "").strip()
+    SCAN_PROXY_AUTH = (getattr(args, "proxy_auth", None) or "").strip()
+    SCAN_EXTRA_HEADERS = parse_header_list(getattr(args, "header", None) or [])
+    SCAN_RPS = float(getattr(args, "requests_per_second", 0) or 0)
+    SCAN_POLITE_DELAY = polite_delay_seconds(bool(getattr(args, "polite", False)), SCAN_RPS)
+    DOCKER_FALLBACK = bool(getattr(args, "docker_fallback", False))
+    creds_file = (getattr(args, "credentials", None) or "").strip()
+    SCAN_CREDENTIALS = None
+    if creds_file:
+        SCAN_CREDENTIALS = load_credentials(Path(creds_file))
+        SCAN_EXTRA_HEADERS.update(credentials_to_headers(SCAN_CREDENTIALS))
+    install_urllib_proxy(SCAN_PROXY, SCAN_PROXY_AUTH, SCAN_EXTRA_HEADERS)
+    FINDINGS_STREAM = FindingsStream(output_dir)
+    PIPELINE_METRICS = PipelineMetrics()
+    addons.bind_config_lookups(REVOCATION_URLS, COMPLIANCE_TAGS)
+
+
+def merge_tool_hosts(sub_list: List[str], extra: List[str], label: str, output_dir: Path) -> List[str]:
+    if not extra:
+        log(f"{label}: no additional hosts", "info")
+        return sub_list
+    before = len(sub_list)
+    merged = merge_host_lists(sub_list, extra)
+    added = len(merged) - before
+    (output_dir / "subdomains.txt").write_text("\n".join(merged) + "\n")
+    log(f"{label}: {C.BOLD}{added}{C.RESET} new host(s) → {len(merged)} total", "success")
+    return merged
+
+
+def analyze_js_bundle(urls: List[str], output_dir: Path) -> List[str]:
+    js_urls = extract_js_urls(urls)
+    endpoints: List[str] = []
+    js_secrets: List[Dict[str, str]] = []
+    ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+    for url in js_urls[:200]:
+        try:
+            apply_polite_delay()
+            req = urllib.request.Request(url, headers={"User-Agent": ua, **SCAN_EXTRA_HEADERS})
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                page = resp.read().decode("utf-8", errors="ignore")
+            endpoints.extend(extract_endpoints_from_js(page))
+            js_secrets.extend(extract_js_secret_assignments(page))
+            if looks_like_source_map_json(page):
+                parse_source_map(page)
+        except Exception:
+            continue
+        if SCAN_POLITE_DELAY:
+            time.sleep(SCAN_POLITE_DELAY)
+    extra = []
+    for ep in endpoints:
+        if ep.startswith("http://") or ep.startswith("https://"):
+            extra.append(ep)
+        elif ep.startswith("/"):
+            # relative — skip host join here; callers keep as intel
+            extra.append(ep)
+    (output_dir / "js_endpoints.json").write_text(
+        json.dumps(sorted(set(endpoints)), indent=2), encoding="utf-8"
+    )
+    (output_dir / "js_secrets.json").write_text(
+        json.dumps(js_secrets[:500], indent=2), encoding="utf-8"
+    )
+    log(f"JS analysis: {len(js_urls)} files, {len(set(endpoints))} endpoint(s), {len(js_secrets)} secret assignment(s)", "info")
+    return extra
+
+
+def send_extra_alerts(domain: str, valid_findings: List[Dict], args: Any) -> None:
+    n = len(valid_findings or [])
+    if n == 0:
+        return
+    text = f"ReconPipe: {n} valid key(s) on {domain}"
+    if getattr(args, "telegram_bot", None) and getattr(args, "telegram_chat", None):
+        if notify_telegram(args.telegram_bot, args.telegram_chat, text):
+            log("Telegram notified", "success")
+    if getattr(args, "smtp_host", None) and getattr(args, "smtp_to", None):
+        if notify_email(
+            args.smtp_host, args.smtp_to, text, text,
+            port=int(getattr(args, "smtp_port", 587) or 587),
+            user=getattr(args, "smtp_user", "") or "",
+            password=getattr(args, "smtp_password", "") or "",
+        ):
+            log("Email notified", "success")
+    if getattr(args, "pagerduty_key", None):
+        if notify_pagerduty(args.pagerduty_key, text, "error"):
+            log("PagerDuty notified", "success")
+    if getattr(args, "opsgenie_key", None):
+        if notify_opsgenie(args.opsgenie_key, text):
+            log("Opsgenie notified", "success")
+
+
 # Main
 def build_parser() -> argparse.ArgumentParser:
     """Construct the CLI ArgumentParser (shared by CLI and GUI)."""
@@ -3733,11 +5047,14 @@ Examples:
   python reconpipe.py -d example.com --files urls.txt --sarif out.sarif
         """
     )
-    parser.add_argument("-d", "--domain",      required=True,  help="Target domain")
+    parser.add_argument("-d", "--domain", help="Target domain (required unless --domain-list)")
+    parser.add_argument("--domain-list", metavar="FILE",
+                        help="Scan one domain per line (each gets its own output directory)")
     parser.add_argument("--subdomains",        metavar="FILE", help="Use existing subdomain list (skips Chaos)")
     parser.add_argument("--files",             metavar="FILE",
                         help="Use existing URL list (skips URL discovery: katana/waymore/gau/gospider)")
     parser.add_argument("--skip-chaos",        action="store_true", help="Skip Chaos step")
+    parser.add_argument("--skip-subfinder",    action="store_true", help="Skip subfinder subdomain enumeration")
     parser.add_argument("--skip-httpx",        action="store_true", help="Skip httpx live-host filter")
     parser.add_argument("--skip-gau",          action="store_true",
                         help="Skip passive archives only (waymore/gau/waybackurls); katana/gospider still run")
@@ -3787,6 +5104,62 @@ Examples:
         action="store_true",
         help="Do not exit 1 when validated live keys are found (default: exit 1 to gate CI)",
     )
+    parser.add_argument("--exclude-pattern", metavar="FILE",
+                        help="Host globs to exclude (one per line, e.g. *.cdn.example.com)")
+    parser.add_argument("--include-pattern", metavar="FILE",
+                        help="Only scan hosts matching these globs (one per line)")
+    parser.add_argument("--vault-addr", metavar="URL",
+                        help="Vault address for hvs/hvb token lookup-self")
+    parser.add_argument("--grafana-url", metavar="HOST",
+                        help="Grafana host for glsa_ token checks")
+    parser.add_argument("--notify-webhook", metavar="URL",
+                        help="POST redacted valid-key JSON to Slack/Discord/custom webhook")
+    parser.add_argument("--no-notify", action="store_true",
+                        help="Do not send a desktop notification when the scan finishes")
+    parser.add_argument("--download-workers", type=int, default=16,
+                        help="Parallel file download workers (default: 16)")
+    parser.add_argument("--resume", action="store_true",
+                        help="Reuse files_to_scan.txt and skip re-download of existing files")
+    parser.add_argument("--skip-amass", action="store_true", help="Skip amass subdomain enumeration")
+    parser.add_argument("--amass-active", action="store_true", help="Run amass without -passive")
+    parser.add_argument("--skip-assetfinder", action="store_true", help="Skip assetfinder")
+    parser.add_argument("--skip-findomain", action="store_true", help="Skip findomain")
+    parser.add_argument("--skip-dnsx", action="store_true", help="Skip dnsx resolution before httpx")
+    parser.add_argument("--skip-hakrawler", action="store_true", help="Skip hakrawler")
+    parser.add_argument("--skip-paramspider", action="store_true", help="Skip paramspider")
+    parser.add_argument("--skip-naabu", action="store_true", help="Skip naabu port scan")
+    parser.add_argument("--skip-whatweb", action="store_true", help="Skip whatweb fingerprinting")
+    parser.add_argument("--skip-gowitness", action="store_true", help="Skip gowitness screenshots")
+    parser.add_argument("--nuclei", action="store_true", help="Run nuclei exposures/misconfig templates")
+    parser.add_argument("--nuclei-templates", metavar="PATH", action="append", default=[],
+                        help="Nuclei template path (repeatable)")
+    parser.add_argument("--nuclei-import", metavar="FILE", help="Import nuclei JSONL/text output")
+    parser.add_argument("--proxy", metavar="URL", help="HTTP proxy for requests (e.g. http://127.0.0.1:8080)")
+    parser.add_argument("--proxy-auth", metavar="USER:PASS", help="Proxy authentication credentials")
+    parser.add_argument("-H", "--header", action="append", default=[],
+                        metavar="NAME:VALUE", help="Custom header for HTTP requests (repeatable)")
+    parser.add_argument("--polite", action="store_true", help="Add 500ms delay between requests")
+    parser.add_argument("--requests-per-second", type=float, default=0,
+                        help="Global rate limit (0 = unlimited)")
+    parser.add_argument("--resume-from", choices=["chaos", "httpx", "discovery", "trufflehog", "validate"],
+                        help="Resume pipeline from a checkpoint stage")
+    parser.add_argument("--credentials", metavar="FILE",
+                        help="YAML/JSON cookies+headers for authenticated scanning")
+    parser.add_argument("--burp-import", metavar="FILE", help="Import URLs from Burp Suite XML export")
+    parser.add_argument("--docker-fallback", action="store_true",
+                        help="Run missing tools via docker run --rm when an image is known")
+    parser.add_argument("--repo", metavar="URL", help="Clone a git repo and scan its files")
+    parser.add_argument("--iac-scan", action="store_true",
+                        help="Also walk Docker/K8s/Terraform files under --repo or output dir")
+    parser.add_argument("--telegram-bot", metavar="TOKEN", help="Telegram bot token for alerts")
+    parser.add_argument("--telegram-chat", metavar="ID", help="Telegram chat id for alerts")
+    parser.add_argument("--smtp-host", metavar="HOST", help="SMTP host for email alerts")
+    parser.add_argument("--smtp-port", type=int, default=587, help="SMTP port (default 587)")
+    parser.add_argument("--smtp-user", metavar="USER", help="SMTP username")
+    parser.add_argument("--smtp-password", metavar="PASS", help="SMTP password")
+    parser.add_argument("--smtp-to", metavar="EMAIL", help="Alert recipient")
+    parser.add_argument("--pagerduty-key", metavar="KEY", help="PagerDuty Events v2 routing key")
+    parser.add_argument("--opsgenie-key", metavar="KEY", help="Opsgenie API key")
     return parser
 
 
@@ -3797,9 +5170,11 @@ def argv_from_options(opts: Dict[str, Any]) -> List[str]:
     """
     argv: List[str] = []
     domain = (opts.get("domain") or "").strip()
-    if not domain:
+    domain_list = (opts.get("domain_list") or "").strip()
+    if not domain and not domain_list:
         raise ValueError("domain is required")
-    argv += ["-d", domain]
+    if domain:
+        argv += ["-d", domain]
 
     mapping_flags = {
         "skip_chaos": "--skip-chaos",
@@ -3812,6 +5187,23 @@ def argv_from_options(opts: Dict[str, Any]) -> List[str]:
         "no_fail_on_valid": "--no-fail-on-valid",
         "skip_intel": "--skip-intel",
         "skip_crtsh": "--skip-crtsh",
+        "skip_subfinder": "--skip-subfinder",
+        "no_notify": "--no-notify",
+        "resume": "--resume",
+        "skip_amass": "--skip-amass",
+        "amass_active": "--amass-active",
+        "skip_assetfinder": "--skip-assetfinder",
+        "skip_findomain": "--skip-findomain",
+        "skip_dnsx": "--skip-dnsx",
+        "skip_hakrawler": "--skip-hakrawler",
+        "skip_paramspider": "--skip-paramspider",
+        "skip_naabu": "--skip-naabu",
+        "skip_whatweb": "--skip-whatweb",
+        "skip_gowitness": "--skip-gowitness",
+        "nuclei": "--nuclei",
+        "polite": "--polite",
+        "docker_fallback": "--docker-fallback",
+        "iac_scan": "--iac-scan",
     }
     for key, flag in mapping_flags.items():
         if opts.get(key):
@@ -3828,6 +5220,27 @@ def argv_from_options(opts: Dict[str, Any]) -> List[str]:
         "output": "--output",
         "shopify_domain": "--shopify-domain",
         "sarif": "--sarif",
+        "domain_list": "--domain-list",
+        "exclude_pattern": "--exclude-pattern",
+        "include_pattern": "--include-pattern",
+        "vault_addr": "--vault-addr",
+        "grafana_url": "--grafana-url",
+        "notify_webhook": "--notify-webhook",
+        "proxy": "--proxy",
+        "proxy_auth": "--proxy-auth",
+        "credentials": "--credentials",
+        "burp_import": "--burp-import",
+        "nuclei_import": "--nuclei-import",
+        "repo": "--repo",
+        "resume_from": "--resume-from",
+        "telegram_bot": "--telegram-bot",
+        "telegram_chat": "--telegram-chat",
+        "smtp_host": "--smtp-host",
+        "smtp_user": "--smtp-user",
+        "smtp_password": "--smtp-password",
+        "smtp_to": "--smtp-to",
+        "pagerduty_key": "--pagerduty-key",
+        "opsgenie_key": "--opsgenie-key",
     }
     for key, flag in value_flags.items():
         val = opts.get(key)
@@ -3838,6 +5251,18 @@ def argv_from_options(opts: Dict[str, Any]) -> List[str]:
         argv += ["--concurrency", str(int(opts["concurrency"]))]
     if opts.get("gau_threads") is not None:
         argv += ["--gau-threads", str(int(opts["gau_threads"]))]
+    if opts.get("download_workers") is not None:
+        argv += ["--download-workers", str(int(opts["download_workers"]))]
+    if opts.get("requests_per_second") not in (None, "", 0, "0"):
+        argv += ["--requests-per-second", str(opts["requests_per_second"])]
+    if opts.get("smtp_port") not in (None, ""):
+        argv += ["--smtp-port", str(int(opts["smtp_port"]))]
+    for hdr in opts.get("header") or []:
+        if str(hdr).strip():
+            argv += ["--header", str(hdr).strip()]
+    for tmpl in opts.get("nuclei_templates") or []:
+        if str(tmpl).strip():
+            argv += ["--nuclei-templates", str(tmpl).strip()]
 
     for cfg in opts.get("config") or []:
         if str(cfg).strip():
@@ -3848,6 +5273,55 @@ def argv_from_options(opts: Dict[str, Any]) -> List[str]:
     return argv
 
 
+def _strip_flag(argv: List[str], *flags: str) -> List[str]:
+    out: List[str] = []
+    skip_next = False
+    for i, item in enumerate(argv or []):
+        if skip_next:
+            skip_next = False
+            continue
+        if item in flags:
+            # value flags take the next token unless the next is another flag
+            if i + 1 < len(argv) and not str(argv[i + 1]).startswith("-"):
+                skip_next = True
+            continue
+        out.append(item)
+    return out
+
+
+def load_domain_list(path: str) -> List[str]:
+    rows = []
+    for ln in Path(path).read_text(encoding="utf-8", errors="ignore").splitlines():
+        text = ln.strip()
+        if text and not text.startswith("#"):
+            rows.append(text)
+    return rows
+
+
+def run_domain_list(args: Any, argv: Optional[List[str]]) -> int:
+    path = Path(args.domain_list)
+    if not path.is_file():
+        log(f"Domain list not found: {path}", "error")
+        return 1
+    domains = load_domain_list(str(path))
+    if not domains:
+        log("Domain list is empty", "error")
+        return 1
+    base = _strip_flag(
+        list(argv or []),
+        "--domain-list", "-d", "--domain", "-o", "--output",
+    )
+    parent = Path(args.output) if args.output else Path(".")
+    worst = 0
+    for domain in domains:
+        out = parent / f"recon_{domain.replace('.', '_')}"
+        log(f"Multi-target: {domain} → {out}", "info")
+        rc = main(base + ["-d", domain, "--output", str(out)])
+        if rc:
+            worst = rc
+    return worst
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     reset_log_counters()
     print(BANNER)
@@ -3856,12 +5330,28 @@ def main(argv: Optional[List[str]] = None) -> int:
     args = parser.parse_args(argv)
     apply_saved_keys(args)
 
+    if args.domain_list and not (args.domain or "").strip():
+        return run_domain_list(args, argv)
+
+    if not (args.domain or "").strip():
+        log("Need -d/--domain or --domain-list", "error")
+        return 2
+
     if args.subdomains and not Path(args.subdomains).exists():
         log(f"Subdomains file not found: {args.subdomains}", "error")
         return 1
     if args.files and not Path(args.files).exists():
         log(f"URL list file not found: {args.files}", "error")
         return 1
+    if args.exclude_pattern and not Path(args.exclude_pattern).exists():
+        log(f"Exclude pattern file not found: {args.exclude_pattern}", "error")
+        return 1
+    if args.include_pattern and not Path(args.include_pattern).exists():
+        log(f"Include pattern file not found: {args.include_pattern}", "error")
+        return 1
+    if args.domain_list and not Path(args.domain_list).exists() and (args.domain or "").strip():
+        # per-domain run with leftover flag should not happen; ignore
+        pass
     for cfg in args.config:
         if not Path(cfg).exists():
             log(f"Config file not found: {cfg}", "error")
@@ -3881,6 +5371,36 @@ def main(argv: Optional[List[str]] = None) -> int:
             f"min_confidence={MIN_CONFIDENCE}",
             "info",
         )
+    apply_scope_files(args.include_pattern, args.exclude_pattern)
+    if SCOPE_INCLUDE or SCOPE_EXCLUDE:
+        log(
+            f"Scope: {len(SCOPE_INCLUDE)} include / {len(SCOPE_EXCLUDE)} exclude pattern(s)",
+            "info",
+        )
+    configure_scan_runtime(args, output_dir)
+    checkpoint = load_checkpoint(output_dir) if (args.resume or args.resume_from) else None
+    resume_from = (args.resume_from or "").strip()
+    if resume_from and checkpoint:
+        log(f"Resume-from checkpoint stage={checkpoint.get('stage')}", "info")
+    if skip_completed_stage(resume_from, "chaos") and (output_dir / "subdomains.txt").is_file():
+        args.subdomains = str(output_dir / "subdomains.txt")
+        log("Resume-from: reusing subdomains.txt", "info")
+        args.skip_subfinder = True
+        args.skip_amass = True
+        args.skip_assetfinder = True
+        args.skip_findomain = True
+        args.skip_intel = True
+        args.skip_dnsx = True
+        args.skip_naabu = True
+    if skip_completed_stage(resume_from, "httpx") and (output_dir / "live_hosts.txt").is_file():
+        args.skip_httpx = True
+        args.skip_whatweb = True
+        args.skip_gowitness = True
+        log("Resume-from: skipping httpx, reusing live_hosts.txt", "info")
+    if skip_completed_stage(resume_from, "discovery") and (output_dir / "files_to_scan.txt").is_file():
+        args.files = str(output_dir / "files_to_scan.txt")
+        log("Resume-from: reusing files_to_scan.txt", "info")
+    skip_scan_stage = skip_completed_stage(resume_from, "trufflehog")
 
     if args.ignore_hash:
         n = apply_ignore_hashes(output_dir, args.ignore_hash)
@@ -3915,6 +5435,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         skip_discovery=bool(args.skip_discovery or args.files),
         skip_gau=bool(args.skip_gau),
         skip_intel=bool(args.skip_intel),
+        skip_subfinder=bool(args.skip_subfinder),
         no_trufflehog=bool(args.no_trufflehog),
         no_validate=bool(args.no_validate),
         concurrency=int(args.concurrency),
@@ -3924,6 +5445,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     # Subdomains
     step_header(1, "Subdomain Acquisition (Chaos)")
+    _metrics_start("chaos")
     subdomains_file = output_dir / "subdomains.txt"
 
     if args.subdomains:
@@ -3949,6 +5471,85 @@ def main(argv: Optional[List[str]] = None) -> int:
     log(f"Subdomains: {C.BOLD}{sub_count}{C.RESET} (pre-intel)", "success")
     if _ETA is not None:
         _ETA.set_work(subs=sub_count)
+
+    if not args.skip_subfinder and tools_status.get("subfinder"):
+        sf_out = output_dir / "subfinder.txt"
+        log("Running subfinder...", "info")
+        rc, _ = run_cmd(
+            build_subfinder_cmd(args.domain, str(sf_out)),
+            timeout=180,
+            discard_stdout=True,
+        )
+        extra_sf: List[str] = []
+        if sf_out.is_file():
+            extra_sf = [s.strip() for s in sf_out.read_text().splitlines() if s.strip()]
+        if extra_sf:
+            before = len(sub_list)
+            sub_list = merge_host_lists(sub_list, extra_sf)
+            added = len(sub_list) - before
+            merged_path = output_dir / "subdomains.txt"
+            merged_path.write_text("\n".join(sub_list) + "\n")
+            subdomains_file = merged_path
+            log(f"subfinder: {C.BOLD}{added}{C.RESET} new host(s) → {len(sub_list)} total", "success")
+        else:
+            log("subfinder: no additional hosts", "info")
+    elif not args.skip_subfinder:
+        log("subfinder not found — Chaos/OSINT only", "warn")
+        log("Install: go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest", "warn")
+
+    source_map: Dict[str, List[str]] = {"seed": list(sub_list)}
+
+    if not args.skip_amass and tools_status.get("amass"):
+        am_out = output_dir / "amass.txt"
+        log("Running amass...", "info")
+        rc, _ = run_tool_maybe_docker(
+            "amass",
+            build_amass_cmd(args.domain, str(am_out), passive_only=not args.amass_active),
+            timeout=240, discard_stdout=True, mount_dir=output_dir,
+        )
+        extra_am = []
+        if am_out.is_file():
+            extra_am = [s.strip() for s in am_out.read_text(encoding="utf-8", errors="ignore").splitlines() if s.strip()]
+        source_map["amass"] = extra_am
+        sub_list = merge_tool_hosts(sub_list, extra_am, "amass", output_dir)
+        subdomains_file = output_dir / "subdomains.txt"
+    elif not args.skip_amass:
+        log("amass not found — skipping", "info")
+
+    if not args.skip_assetfinder and tools_status.get("assetfinder"):
+        log("Running assetfinder...", "info")
+        rc, output = run_tool_maybe_docker(
+            "assetfinder", build_assetfinder_cmd(args.domain), timeout=120, mount_dir=output_dir,
+        )
+        extra_af = collect_tool_stdout_lines(output) if output else []
+        source_map["assetfinder"] = extra_af
+        sub_list = merge_tool_hosts(sub_list, extra_af, "assetfinder", output_dir)
+        subdomains_file = output_dir / "subdomains.txt"
+
+    if not args.skip_findomain and tools_status.get("findomain"):
+        fd_out = output_dir / "findomain.txt"
+        log("Running findomain...", "info")
+        run_tool_maybe_docker(
+            "findomain", build_findomain_cmd(args.domain, str(fd_out)),
+            timeout=120, discard_stdout=True, mount_dir=output_dir,
+        )
+        extra_fd = []
+        if fd_out.is_file():
+            extra_fd = [s.strip() for s in fd_out.read_text(encoding="utf-8", errors="ignore").splitlines() if s.strip()]
+        source_map["findomain"] = extra_fd
+        sub_list = merge_tool_hosts(sub_list, extra_fd, "findomain", output_dir)
+        subdomains_file = output_dir / "subdomains.txt"
+
+    unique_subs, tracked = merge_subdomain_sources(source_map)
+    if unique_subs:
+        # Keep discovery order from merge_host_lists (sorted) plus any extras already merged
+        pass
+    (output_dir / "subdomain_sources.json").write_text(json.dumps(tracked, indent=2), encoding="utf-8")
+    save_checkpoint(output_dir, "chaos", {"subs": len(sub_list)})
+    _metrics_finish("chaos", len(sub_list))
+    webhook = (args.notify_webhook or "").strip()
+    if webhook:
+        notify_stage_progress(webhook, "subdomains", 0.16, {"subs": len(sub_list)})
 
     if not args.skip_intel:
         log("Passive intel: Shodan / Censys / ZoomEye / crt.sh", "info")
@@ -3981,16 +5582,66 @@ def main(argv: Optional[List[str]] = None) -> int:
     else:
         log("Passive intel skipped (--skip-intel)", "info")
 
+    scoped = filter_hosts_in_scope(sub_list)
+    if len(scoped) != len(sub_list):
+        log(
+            f"Scope filter: {len(sub_list)} → {len(scoped)} host(s)",
+            "info",
+        )
+        sub_list = scoped
+        (output_dir / "subdomains.txt").write_text("\n".join(sub_list) + "\n")
+
     sub_count = len(sub_list)
     log(f"Subdomains: {C.BOLD}{sub_count}{C.RESET}", "success")
     if _ETA is not None:
         _ETA.set_work(subs=sub_count, log_now=True)
 
+    if not args.skip_dnsx and tools_status.get("dnsx") and sub_list:
+        dnsx_in = output_dir / "dnsx_input.txt"
+        dnsx_out = output_dir / "dnsx.txt"
+        dnsx_in.write_text("\n".join(sub_list) + "\n")
+        log("Running dnsx...", "info")
+        run_tool_maybe_docker(
+            "dnsx", build_dnsx_cmd(str(dnsx_in), str(dnsx_out)),
+            timeout=180, discard_stdout=True, mount_dir=output_dir,
+        )
+        if dnsx_out.is_file() and dnsx_out.stat().st_size > 0:
+            resolved = [s.strip() for s in dnsx_out.read_text(encoding="utf-8", errors="ignore").splitlines() if s.strip()]
+            if resolved:
+                sub_list = merge_host_lists(resolved)
+                sub_count = len(sub_list)
+                (output_dir / "subdomains.txt").write_text("\n".join(sub_list) + "\n")
+                log(f"dnsx: {C.BOLD}{sub_count}{C.RESET} resolved host(s)", "success")
+
+    if not args.skip_naabu and tools_status.get("naabu") and sub_list:
+        naabu_in = output_dir / "subdomains.txt"
+        naabu_out = output_dir / "naabu.txt"
+        (output_dir / "subdomains.txt").write_text("\n".join(sub_list) + "\n")
+        log("Running naabu...", "info")
+        run_tool_maybe_docker(
+            "naabu", build_naabu_cmd(str(naabu_in), str(naabu_out)),
+            timeout=180, discard_stdout=True, mount_dir=output_dir,
+        )
+        if naabu_out.is_file():
+            extra_ports = [s.strip() for s in naabu_out.read_text(encoding="utf-8", errors="ignore").splitlines() if s.strip()]
+            if extra_ports:
+                sub_list = merge_host_lists(sub_list, extra_ports)
+                sub_count = len(sub_list)
+                log(f"naabu: {len(extra_ports)} host:port row(s)", "success")
+
     # Live hosts
     step_header(2, "Live Host Filtering (httpx)")
+    _metrics_start("httpx", sub_count)
     live_hosts_file = output_dir / "live_hosts.txt"
+    reuse_live = (
+        skip_completed_stage(resume_from, "httpx")
+        and live_hosts_file.is_file()
+        and live_hosts_file.stat().st_size > 0
+    )
 
-    if args.skip_httpx or not httpx_bin:
+    if reuse_live:
+        log("Resume-from: reusing live_hosts.txt", "info")
+    elif args.skip_httpx or not httpx_bin:
         if not args.skip_httpx:
             log_httpx_missing()
         live_hosts_file.write_text("\n".join(sub_list))
@@ -4059,15 +5710,46 @@ def main(argv: Optional[List[str]] = None) -> int:
     log(f"Live hosts: {C.BOLD}{live_count}{C.RESET} / {sub_count}", "success")
     if _ETA is not None:
         _ETA.set_work(subs=sub_count, live=live_count, log_now=True)
+    save_checkpoint(output_dir, "httpx", {"live": live_count})
+    _metrics_finish("httpx", live_count)
+    if (args.notify_webhook or "").strip():
+        notify_stage_progress(args.notify_webhook, "httpx", 0.32, {"live": live_count})
+
+    if not args.skip_whatweb and tools_status.get("whatweb") and live_list:
+        ww_in = output_dir / "live_hosts.txt"
+        ww_out = output_dir / "whatweb.json"
+        log("Running whatweb...", "info")
+        run_cmd(build_whatweb_cmd(str(ww_in), str(ww_out)), timeout=180, discard_stdout=True)
+
+    if not args.skip_gowitness and tools_status.get("gowitness") and live_list:
+        gw_dir = output_dir / "screenshots"
+        gw_dir.mkdir(exist_ok=True)
+        log("Running gowitness...", "info")
+        run_cmd(build_gowitness_cmd(str(live_hosts_file), str(gw_dir)), timeout=240, discard_stdout=True)
+
+    if tools_status.get("wappalyzer") and live_list and not skip_completed_stage(resume_from, "httpx"):
+        wap_out = output_dir / "wappalyzer.json"
+        rows: List[str] = []
+        log("Running wappalyzer...", "info")
+        for host in live_list[:25]:
+            target = host if host.startswith("http") else f"https://{host}"
+            rc, output = run_cmd(build_wappalyzer_cmd(target), timeout=30)
+            rows.extend(collect_tool_stdout_lines(output))
+        if rows:
+            wap_out.write_text("\n".join(rows) + "\n", encoding="utf-8")
+            log(f"wappalyzer: {len(rows)} line(s)", "info")
 
     # URL discovery
     step_header(3, "URL Discovery (Katana + waymore + gospider)")
+    _metrics_start("discovery", live_count)
     files_to_scan = output_dir / "files_to_scan.txt"
     file_exts = re.compile(r'\.(js|json|jsx|ts|tsx|map|html|htm|css|env|config|conf|yml|yaml|xml|ini|php|asp|aspx)(\?|$|#)', re.I)
 
     if args.files:
         files_to_scan = Path(args.files)
         log(f"Using existing URL list: {files_to_scan}", "info")
+    elif args.resume and files_to_scan.is_file() and files_to_scan.stat().st_size > 0:
+        log(f"Resume: reusing URL list {files_to_scan}", "info")
     elif args.skip_discovery:
         log("URL discovery skipped (--skip-discovery) — scanning live hosts directly", "warn")
         files_to_scan.write_text("\n".join(live_list))
@@ -4175,7 +5857,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             before = len(all_urls)
             log("Using waybackurls as last-resort passive fallback", "warn")
             for host in live_list:
-                rc, output = run_cmd(["waybackurls", host], timeout=60)
+                rc, output = run_cmd(build_waybackurls_cmd(host), timeout=60)
                 if output:
                     for line in output.decode("utf-8", errors="ignore").splitlines():
                         line = line.strip()
@@ -4222,10 +5904,91 @@ def main(argv: Optional[List[str]] = None) -> int:
             log("gospider not found — skipping active spider layer", "warn")
             log("Install: go install github.com/jaeles-project/gospider@latest", "warn")
 
-        sorted_urls = sorted(all_urls)
+        if not args.skip_gau and tools_status.get("waybackurls"):
+            before = len(all_urls)
+            log("waybackurls: extra Wayback pass...", "info")
+            for host in live_list[:80]:
+                rc, output = run_cmd(build_waybackurls_cmd(host), timeout=45)
+                for line in collect_tool_stdout_lines(output):
+                    if file_exts.search(line):
+                        all_urls.add(line)
+            log(f"waybackurls extra: +{len(all_urls) - before} URLs", "info")
+
+        if not args.skip_hakrawler and tools_status.get("hakrawler"):
+            before = len(all_urls)
+            log("hakrawler: form-aware crawl...", "info")
+            for host in live_list[:40]:
+                target = host if host.startswith("http") else f"https://{host}"
+                rc, output = run_cmd(build_hakrawler_cmd(target), timeout=60)
+                for line in collect_tool_stdout_lines(output):
+                    all_urls.add(line)
+            log(f"hakrawler: +{len(all_urls) - before} URLs", "info")
+
+        if not args.skip_paramspider and tools_status.get("paramspider"):
+            ps_dir = output_dir / "paramspider"
+            ps_dir.mkdir(exist_ok=True)
+            log("paramspider: parameterized URLs...", "info")
+            run_cmd(build_paramspider_cmd(args.domain, str(ps_dir)), timeout=120, discard_stdout=True)
+            for gf in ps_dir.rglob("*.txt"):
+                try:
+                    for line in gf.read_text(encoding="utf-8", errors="ignore").splitlines():
+                        if line.strip():
+                            all_urls.add(line.strip())
+                except Exception:
+                    pass
+
+        sorted_urls = dedupe_urls(sorted(all_urls))
         files_to_scan.write_text("\n".join(sorted_urls))
 
     url_list = [u for u in files_to_scan.read_text().splitlines() if u.strip()]
+    scoped_urls = filter_urls_in_scope(url_list)
+    if len(scoped_urls) != len(url_list):
+        log(f"Scope filter: {len(url_list)} → {len(scoped_urls)} URL(s)", "info")
+        url_list = scoped_urls
+        if not args.files:
+            files_to_scan.write_text("\n".join(url_list))
+    extra_urls: List[str] = []
+    if getattr(args, "burp_import", None):
+        burp_path = Path(args.burp_import)
+        if burp_path.is_file():
+            extra_urls.extend(parse_burp_xml(burp_path))
+            log(f"Burp import: {len(extra_urls)} URL(s)", "info")
+    if getattr(args, "nuclei_import", None):
+        ni = Path(args.nuclei_import)
+        if ni.is_file():
+            imported = parse_nuclei_output(ni)
+            (output_dir / "nuclei_imported.json").write_text(json.dumps(imported, indent=2), encoding="utf-8")
+            log(f"Nuclei import: {len(imported)} row(s)", "info")
+    if getattr(args, "repo", None):
+        repo_dir = output_dir / "repo_scan"
+        ok, repo_dir = clone_repo(args.repo, repo_dir)
+        if ok:
+            repo_files = list_repo_files(repo_dir)
+            if args.iac_scan:
+                iac = collect_iac_files(repo_dir)
+                log(f"IaC files: {len(iac)}", "info")
+            for p in repo_files:
+                extra_urls.append(str(p))
+            log(f"Repo clone: {len(repo_files)} file(s)", "info")
+        else:
+            log("git clone failed — skipping --repo", "warn")
+    js_extra = analyze_js_bundle(url_list, output_dir)
+    extra_urls.extend(u for u in js_extra if u.startswith("http"))
+    if tools_status.get("linkfinder"):
+        js_files = extract_js_urls(url_list)[:30]
+        lf_out = output_dir / "linkfinder.txt"
+        lines: List[str] = []
+        for js in js_files:
+            rc, output = run_cmd(build_linkfinder_cmd(js), timeout=30)
+            lines.extend(collect_tool_stdout_lines(output))
+        if lines:
+            lf_out.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            extra_urls.extend(ln for ln in lines if ln.startswith("http"))
+            log(f"LinkFinder: {len(lines)} line(s)", "info")
+    if extra_urls:
+        url_list = dedupe_urls(url_list + extra_urls)
+        if not args.files:
+            files_to_scan.write_text("\n".join(url_list))
     url_count = len(url_list)
 
     if url_count == 0:
@@ -4236,48 +5999,60 @@ def main(argv: Optional[List[str]] = None) -> int:
         log(f"Total URLs to scan: {C.BOLD}{url_count}{C.RESET}", "success")
     if _ETA is not None:
         _ETA.set_work(urls=url_count, live=live_count, log_now=True)
+    save_checkpoint(output_dir, "discovery", {"urls": url_count})
+    _metrics_finish("discovery", url_count)
+    if (args.notify_webhook or "").strip():
+        notify_stage_progress(args.notify_webhook, "discovery", 0.48, {"urls": url_count})
 
     # Secret scanning
     step_header(4, "Secret Scanning (TruffleHog / Custom)")
-    raw_findings: List[Dict] = []
-    use_trufflehog = not args.no_trufflehog and tools_status["trufflehog"]
+    _metrics_start("trufflehog", url_count)
+    unique_path = output_dir / "unique_findings.json"
+    unique_findings: List[Dict] = []
+    exposures: List[Dict] = []
+    informational: List[Dict] = []
+    resumed_scan = False
+    if skip_scan_stage and unique_path.is_file():
+        try:
+            loaded = json.loads(unique_path.read_text(encoding="utf-8"))
+            if isinstance(loaded, list):
+                unique_findings = loaded
+                resumed_scan = True
+                log(
+                    f"Resume-from: reusing unique_findings.json ({len(unique_findings)} finding(s))",
+                    "info",
+                )
+        except Exception:
+            resumed_scan = False
 
-    if use_trufflehog:
+    if resumed_scan:
+        raw_findings = list(unique_findings)
+        use_trufflehog = False
+    else:
+        raw_findings = []
+        use_trufflehog = not args.no_trufflehog and tools_status["trufflehog"]
+
+    if not resumed_scan and use_trufflehog:
         # TruffleHog filesystem mode needs local files
         log("Downloading remote files for TruffleHog scan...", "info")
         dl_dir = output_dir / "downloaded_files"
         dl_dir.mkdir(exist_ok=True)
 
-        ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-        downloaded = 0
-        cached = 0
         to_fetch = url_list[:2000]
+        workers = max(1, min(int(getattr(args, "download_workers", 16) or 16), 32))
         with eta_heartbeat(90):
-            for i, url in enumerate(to_fetch, 1):
-                try:
-                    fname = download_filename(url)
-                    out_path = dl_dir / fname
-                    if out_path.exists():
-                        cached += 1
-                        continue
-                    req = urllib.request.Request(url, headers={"User-Agent": ua})
-                    with urllib.request.urlopen(req, timeout=8) as resp:
-                        out_path.write_bytes(resp.read())
-                        downloaded += 1
-                    if downloaded % 100 == 0:
-                        log(f"  Downloaded: {downloaded}/{len(to_fetch)} files...", "info")
-                        if _ETA is not None:
-                            _ETA.set_work(
-                                progress=min(0.55, i / max(len(to_fetch), 1) * 0.55)
-                            )
-                except Exception:
-                    pass
-
+            counts = download_files_parallel(
+                to_fetch, dl_dir, workers=workers, timeout=8
+            )
+        downloaded = counts.get("downloaded", 0)
+        cached = counts.get("cached", 0)
+        skipped = counts.get("skipped", 0)
         ready = downloaded + cached
-        if cached:
-            log(f"Downloaded {downloaded} files ({cached} cached) → {dl_dir}", "success")
-        else:
-            log(f"Downloaded {downloaded} files → {dl_dir}", "success")
+        extra = f", skipped {skipped} binary" if skipped else ""
+        log(
+            f"Downloaded {downloaded} files ({cached} cached{extra}) → {dl_dir}",
+            "success",
+        )
 
         if ready > 0:
             log("Running TruffleHog on downloaded files...", "info")
@@ -4334,7 +6109,9 @@ def main(argv: Optional[List[str]] = None) -> int:
                                     continue
                                 needs_context = key_type in {
                                     "generic_secret", "uuid_candidate", "jwt",
-                                    "discord_token",
+                                    "discord_token", "datadog_api_key", "hashicorp_vault",
+                                    "vercel_token", "netlify_pat", "algolia_api", "algolia_admin",
+                                    "pagerduty_api", "trello_api", "okta_api", "clerk_secret",
                                 }
                                 if needs_context and not has_context(
                                     content_text, m.start(), m.end()
@@ -4352,10 +6129,22 @@ def main(argv: Optional[List[str]] = None) -> int:
                                     if is_dictionary_word(key):
                                         continue
                                 jwt_meta = None
-                                if key_type == "jwt":
+                                if key_type in {"jwt", "supabase_service", "supabase_anon", "monday_api", "onepassword_connect"}:
                                     jwt_meta = inspect_jwt(key)
                                     if not jwt_meta.get("ok"):
                                         continue
+                                    if key_type == "supabase_service" and not is_supabase_service(jwt_meta):
+                                        continue
+                                    if key_type == "supabase_anon" and not is_supabase_anon(jwt_meta):
+                                        continue
+                                    if key_type == "jwt" and is_supabase_service(jwt_meta):
+                                        key_type = "supabase_service"
+                                    elif key_type == "jwt" and is_supabase_anon(jwt_meta):
+                                        key_type = "supabase_anon"
+                                    elif key_type == "jwt":
+                                        kind = jwt_provider_kind(jwt_meta)
+                                        if kind:
+                                            key_type = kind
                                 confidence = score_confidence(
                                     key_type, key, content_text, m.start(), m.end()
                                 )
@@ -4366,6 +6155,10 @@ def main(argv: Optional[List[str]] = None) -> int:
                                         confidence = max(confidence, 78)
                                     elif jwt_meta.get("kid") or jwt_meta.get("iss"):
                                         confidence = max(confidence, 70)
+                                if key_type == "supabase_service":
+                                    confidence = max(confidence, 90)
+                                if key_type == "supabase_anon":
+                                    confidence = max(confidence, 70)
                                 if confidence < MIN_CONFIDENCE:
                                     continue
                                 item = {
@@ -4385,7 +6178,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             log("No files downloaded — falling back to custom HTTP scanner", "warn")
             with eta_heartbeat(90):
                 raw_findings = custom_scan(str(files_to_scan), output_dir)
-    else:
+    elif not resumed_scan:
         if not args.no_trufflehog:
             log("trufflehog not found — using built-in regex scanner", "warn")
             log("Install: https://github.com/trufflesecurity/trufflehog#installation", "warn")
@@ -4393,38 +6186,42 @@ def main(argv: Optional[List[str]] = None) -> int:
         with eta_heartbeat(90):
             raw_findings = custom_scan(str(files_to_scan), output_dir)
 
-    raw_findings, informational = split_informational(raw_findings)
-
-    raw_findings, exposures = split_exposures(raw_findings)
-    baseline = load_baseline(output_dir)
-    exposures = filter_by_baseline(exposures, baseline)
-    if exposures and output_dir:
-        n = save_exposures(output_dir, exposures)
-        if n:
-            log(f"Source map exposures: {n} → source_map_exposures.json", "warn")
-        for e in exposures:
-            src = e.get("source_url", "")
-            src_short = ("…" + src[-55:]) if len(src) > 55 else src
-            log(f"{C.YELLOW}[source_map_exposure]{C.RESET} {src_short}", "find")
-        record_findings_in_baseline(output_dir, exposures)
+    if not resumed_scan:
+        raw_findings, informational = split_informational(raw_findings)
+        raw_findings, exposures = split_exposures(raw_findings)
         baseline = load_baseline(output_dir)
+        exposures = filter_by_baseline(exposures, baseline)
+        if exposures and output_dir:
+            n = save_exposures(output_dir, exposures)
+            if n:
+                log(f"Source map exposures: {n} → source_map_exposures.json", "warn")
+            for e in exposures:
+                src = e.get("source_url", "")
+                src_short = ("…" + src[-55:]) if len(src) > 55 else src
+                log(f"{C.YELLOW}[source_map_exposure]{C.RESET} {src_short}", "find")
+            record_findings_in_baseline(output_dir, exposures)
+            baseline = load_baseline(output_dir)
 
-    informational = filter_by_baseline(informational, baseline)
-    if informational and output_dir:
-        n = save_informational(output_dir, informational)
-        if n:
-            log(f"Informational: {n} public-by-design hits → informational.json", "info")
-        record_findings_in_baseline(output_dir, informational)
-        baseline = load_baseline(output_dir)
+        informational = filter_by_baseline(informational, baseline)
+        if informational and output_dir:
+            n = save_informational(output_dir, informational)
+            if n:
+                log(f"Informational: {n} public-by-design hits → informational.json", "info")
+            record_findings_in_baseline(output_dir, informational)
+            baseline = load_baseline(output_dir)
 
-    before_bl = len(raw_findings)
-    raw_findings = filter_by_baseline(raw_findings, baseline)
-    suppressed = before_bl - len(raw_findings)
-    if suppressed:
-        log(f"Baseline suppressed {suppressed} known type+source hit(s)", "info")
+        before_bl = len(raw_findings)
+        raw_findings = filter_by_baseline(raw_findings, baseline)
+        suppressed = before_bl - len(raw_findings)
+        if suppressed:
+            log(f"Baseline suppressed {suppressed} known type+source hit(s)", "info")
 
-    unique_findings = deduplicate(raw_findings)
+        unique_findings = deduplicate(raw_findings)
+        unique_path.write_text(json.dumps(unique_findings, indent=2), encoding="utf-8")
+
     log(f"Unique findings: {C.BOLD}{len(unique_findings)}{C.RESET} (from {len(raw_findings)} raw)", "success")
+    save_checkpoint(output_dir, "trufflehog", {"findings": len(unique_findings)})
+    _metrics_finish("trufflehog", len(unique_findings))
     if _ETA is not None:
         _ETA.set_work(findings=len(unique_findings), urls=url_count, log_now=True)
 
@@ -4437,6 +6234,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     # Validation
     step_header(5, "Key Validation (Async)")
+    _metrics_start("validate", len(unique_findings))
     validated: List[Dict] = []
 
     if args.no_validate or not unique_findings:
@@ -4450,10 +6248,22 @@ def main(argv: Optional[List[str]] = None) -> int:
         with eta_heartbeat(90):
             if AIOHTTP_AVAILABLE:
                 validated = asyncio.run(
-                    validate_all(unique_findings, args.domain, args.concurrency, shop_domain)
+                    validate_all(
+                        unique_findings,
+                        args.domain,
+                        args.concurrency,
+                        shop_domain,
+                        vault_addr=args.vault_addr or "",
+                        grafana_url=args.grafana_url or "",
+                    )
                 )
             else:
                 log("Using synchronous validator (install aiohttp for async)...", "warn")
+                for f in unique_findings:
+                    if args.vault_addr:
+                        f["vault_addr"] = args.vault_addr
+                    if args.grafana_url:
+                        f["grafana_url"] = args.grafana_url
                 validated = validate_sync_fallback(unique_findings, args.domain, shop_domain)
 
         valid_count = sum(1 for f in validated if f.get("valid"))
@@ -4473,7 +6283,60 @@ def main(argv: Optional[List[str]] = None) -> int:
     # Output
     step_header(6, "Saving Results")
 
+    validated = annotate_severity(validated)
+    exposures = annotate_severity(exposures)
+    informational = annotate_severity(informational)
+
+    prev_findings: List[Dict] = []
     findings_json = output_dir / "findings.json"
+    if findings_json.is_file():
+        try:
+            loaded = json.loads(findings_json.read_text(encoding="utf-8"))
+            if isinstance(loaded, list):
+                prev_findings = loaded
+        except Exception:
+            prev_findings = []
+        try:
+            shutil.copy2(findings_json, output_dir / "previous_findings.json")
+        except OSError:
+            pass
+    diff = compare_scan_runs(prev_findings, validated)
+    (output_dir / "findings_diff.json").write_text(
+        json.dumps(
+            {
+                "new_count": len(diff["new"]),
+                "resolved_count": len(diff["resolved"]),
+                "unchanged_count": len(diff["unchanged"]),
+                "new": [
+                    {
+                        "type": f.get("type"),
+                        "hash": f.get("hash"),
+                        "severity": finding_severity(f),
+                        "source_url": f.get("source_url"),
+                        "key": redact_key(str(f.get("key") or "")),
+                    }
+                    for f in diff["new"]
+                ],
+                "resolved": [
+                    {
+                        "type": f.get("type"),
+                        "hash": f.get("hash"),
+                        "source_url": f.get("source_url"),
+                    }
+                    for f in diff["resolved"]
+                ],
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    if prev_findings:
+        log(
+            f"Run diff: {len(diff['new'])} new / {len(diff['resolved'])} gone / "
+            f"{len(diff['unchanged'])} unchanged → findings_diff.json",
+            "info",
+        )
+
     findings_json.write_text(json.dumps(validated, indent=2))
     log(f"findings.json  → {findings_json}", "success")
 
@@ -4515,6 +6378,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             sf.write("-" * 60 + "\n")
             for f in valid_only:
                 sf.write(f"Type    : {f.get('type','unknown')}\n")
+                sf.write(f"Severity: {f.get('severity','')}\n")
                 sf.write(f"Key     : {f.get('key','')}\n")
                 sf.write(f"Source  : {f.get('source_url','')}\n")
                 sf.write(f"Note    : {f.get('note','')}\n")
@@ -4545,6 +6409,49 @@ def main(argv: Optional[List[str]] = None) -> int:
     write_sarif(sarif_findings, sarif_path, domain=args.domain)
     log(f"results.sarif  → {sarif_path}", "success")
 
+    extra_rep = {
+        "new_count": len(diff.get("new") or []),
+        "executive": executive_summary(
+            args.domain, validated, len(valid_only), len(exposures)
+        ),
+    }
+    html_path = write_html_report(
+        output_dir / "report.html", args.domain, validated, exposures, informational, extra_rep
+    )
+    md_path = write_markdown_report(
+        output_dir / "report.md", args.domain, validated, exposures, informational, extra_rep
+    )
+    csv_path = write_csv_report(
+        output_dir / "findings.csv", validated, exposures, informational
+    )
+    log(f"report.html    → {html_path}", "success")
+    log(f"report.md      → {md_path}", "success")
+    log(f"findings.csv   → {csv_path}", "success")
+    jsonld_path = write_jsonld_report(output_dir / "report.jsonld", args.domain, validated)
+    log(f"report.jsonld  → {jsonld_path}", "success")
+    n_tpl = write_nuclei_templates(output_dir, valid_only)
+    if n_tpl:
+        log(f"nuclei templates: {n_tpl}", "success")
+    fp = update_global_fingerprints(validated)
+    log(f"Global fingerprints: {len(fp.get('new') or [])} new / {fp.get('total')} total", "info")
+    if PIPELINE_METRICS is not None:
+        (output_dir / "pipeline_metrics.json").write_text(
+            json.dumps(PIPELINE_METRICS.to_report(), indent=2), encoding="utf-8"
+        )
+    (output_dir / "export_hackerone.md").write_text(export_hackerone_markdown(validated), encoding="utf-8")
+    (output_dir / "export_jira.md").write_text(export_jira_markdown(validated), encoding="utf-8")
+    save_checkpoint(output_dir, "validate", {"valid": len(valid_only)})
+    _metrics_finish("validate", len(valid_only))
+
+    if args.nuclei and tools_status.get("nuclei") and url_list:
+        nuc_out = output_dir / "nuclei.txt"
+        log("Running nuclei...", "info")
+        run_tool_maybe_docker(
+            "nuclei",
+            build_nuclei_cmd(str(files_to_scan), str(nuc_out), args.nuclei_templates or None),
+            timeout=300, discard_stdout=True, mount_dir=output_dir,
+        )
+
     try:
         remember_scan_target(
             args.domain,
@@ -4574,6 +6481,15 @@ def main(argv: Optional[List[str]] = None) -> int:
             )
 
     valid_count = sum(1 for f in validated if f.get("valid"))
+    webhook = (args.notify_webhook or "").strip()
+    if not args.no_notify or webhook:
+        notify_scan_complete(
+            args.domain,
+            valid_only if valid_only else [f for f in validated if f.get("valid")],
+            webhook=webhook,
+            desktop=not args.no_notify,
+        )
+    send_extra_alerts(args.domain, valid_only, args)
     elapsed_txt = fmt_hms(_ETA.snapshot()["elapsed_s"]) if _ETA is not None else ""
     if _ETA is not None:
         _ETA.finish()

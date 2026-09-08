@@ -228,3 +228,669 @@ patterns:
     - api_key = "short"
     - hello world
     - no assignment here AbCdEfGhIjKlMnOp1234
+  cloudflare_api:
+    good:
+    - cfpat-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    - CF_API_TOKEN=BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB
+    junk:
+    - cfpat-short
+    - not-a-token
+  azure_sas:
+    good:
+    - sv=2021-08-06&ss=b&srt=sco&sp=r&se=2099-12-31T00:00:00Z&sig=abcdefghijklmnopqrstuv
+    junk:
+    - sv=2021&sig=short
+    - not-a-sas
+  huggingface_token:
+    good:
+    - hf_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    junk:
+    - hf_short
+    - sk-hf-nope
+  notion_token:
+    good:
+    - secret_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    - ntn_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+    junk:
+    - secret_short
+    - ntn_short
+  grafana_token:
+    good:
+    - glsa_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa_deadbeef
+    junk:
+    - glsa_short
+    - glsa_aaaaaaaaaa
+  hashicorp_vault:
+    good:
+    - hvs.AAAAAAAAAAAAAAAAAAAAAAAA
+    - hvb.BBBBBBBBBBBBBBBBBBBBBBBBBBBBBB
+    junk:
+    - hvs.short
+    - s.notvault
+  datadog_api_key:
+    good:
+    - dd_api_key=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    - DATADOG=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+    junk:
+    - dd_api_key=short
+    - hello=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  gcp_service_acct:
+    good:
+    - '{"type":"service_account","project_id":"demo","private_key":"-----BEGIN PRIVATE
+      KEY-----\nMII\n-----END PRIVATE KEY-----\n","client_email":"foo@demo.iam.gserviceaccount.com"}'
+    junk:
+    - '{"type":"user","private_key":"-----BEGIN PRIVATE KEY-----"}'
+    - not-json
+  linear_api_key:
+    good:
+    - lin_api_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    junk:
+    - lin_api_short
+    - lin_api_aaaaaaaaaa
+  supabase_service:
+    good:
+    - eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxIiwiZXhwIjo5OTk5OTk5OTk5fQ.sigsignature1
+    junk:
+    - eyJhbGciOiJIUzI1NiJ9
+    - not.a.jwt
+  railway_token:
+    good:
+    - railway_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    junk:
+    - railway_short
+  render_api:
+    good:
+    - rnd_aaaaaaaaaaaaaaaaaaaaaaaa
+    junk:
+    - rnd_short
+  flyio_token:
+    good:
+    - fo1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    junk:
+    - fo1_short
+  planetscale_token:
+    good:
+    - pscale_tkn_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    junk:
+    - pscale_tkn_short
+  neon_api:
+    good:
+    - neon_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    junk:
+    - neon_short
+  buildkite_token:
+    good:
+    - bkua_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    junk:
+    - bkua_short
+  sentry_auth:
+    good:
+    - sntrys_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    junk:
+    - sntrys_short
+  newrelic_api:
+    good:
+    - NRAK-AAAAAAAAAAAAAAAAAAAAAAAAAAA
+    junk:
+    - NRAK-SHORT
+  replicate_api:
+    good:
+    - r8_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    junk:
+    - r8_short
+  doppler_token:
+    good:
+    - dp.pt.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    junk:
+    - dp.pt.short
+  pulumi_token:
+    good:
+    - pul-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    junk:
+    - pul-short
+  contentful_cma:
+    good:
+    - CFPAT-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    junk:
+    - CFPAT-short
+  clickup_api:
+    good:
+    - pk_1_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    junk:
+    - pk_1_SHORT
+  posthog_api:
+    good:
+    - phc_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    junk:
+    - phc_short
+  mongodb_srv:
+    good:
+    - mongodb+srv://user:pass@cluster0.mongodb.net
+    junk:
+    - mongodb://localhost
+  postgres_uri:
+    good:
+    - postgres://u:p@host/db
+    junk:
+    - postgres://localhost/db
+  vercel_token:
+    good:
+    - VERCEL_TOKEN=AAAAAAAAAAAAAAAAAAAAAAAA
+    junk:
+    - AAAAAAAAAAAAAAAAAAAAAAAA
+  netlify_pat:
+    good:
+    - NETLIFY_TOKEN=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    junk:
+    - aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  supabase_anon:
+    good:
+    - eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxIiwiZXhwIjo5OTk5OTk5OTk5fQ.sigsignature1
+    junk:
+    - eyJhbGciOiJIUzI1NiJ9
+  upstash_token:
+    good:
+    - UPSTASH_TOKEN=AXaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    junk:
+    - AXaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  circleci_token:
+    good:
+    - circleci_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    - CIRCLE_TOKEN=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+    junk:
+    - circleci_short
+  travis_token:
+    good:
+    - travis_token=aaaaaaaaaaaaaaaaaaaaaa
+    junk:
+    - travis_token=short
+  jenkins_token:
+    good:
+    - jenkins_token=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    junk:
+    - jenkins_token=ab
+  drone_token:
+    good:
+    - drone_token=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    junk:
+    - drone_token=short
+  codefresh_token:
+    good:
+    - codefresh_token=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    junk:
+    - codefresh_token=short
+  teamcity_token:
+    good:
+    - teamcity_token=aaaaaaaaaaaaaaaaaaaa
+    junk:
+    - teamcity_token=ab
+  bitbucket_app_password:
+    good:
+    - ATBBaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    junk:
+    - ATBBSHORT
+  sentry_dsn:
+    good:
+    - https://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa@o.ingest.sentry.io/1
+    junk:
+    - https://x@sentry.io/1
+  newrelic_license:
+    good:
+    - aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaNRAL
+    junk:
+    - abcdNRAL
+  newrelic_insert:
+    good:
+    - NRII-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    junk:
+    - NRII-short
+  splunk_hec:
+    good:
+    - splunk_hec=aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee
+    junk:
+    - splunk_hec=short
+  elastic_api:
+    good:
+    - elastic_api=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    junk:
+    - elastic_api=short
+  logdna_key:
+    good:
+    - logdna_key=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    junk:
+    - logdna_key=ab
+  loggly_token:
+    good:
+    - loggly_token=aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee
+    junk:
+    - loggly_token=x
+  papertrail_token:
+    good:
+    - papertrail_token=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    junk:
+    - papertrail_token=x
+  rollbar_token:
+    good:
+    - rollbar_token=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    junk:
+    - rollbar_token=x
+  bugsnag_api:
+    good:
+    - bugsnag_api=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    junk:
+    - bugsnag_api=x
+  honeybadger_api:
+    good:
+    - honeybadger_api=aaaaaaaaaaaaaaaaaaaa
+    junk:
+    - honeybadger_api=x
+  teams_webhook:
+    good:
+    - https://outlook.webhook.office.com/webhookb2/aaaaaaaa
+    junk:
+    - https://example.com/webhook
+  vonage_api:
+    good:
+    - vonage_api=aaaaaaaa
+    junk:
+    - vonage_api=ab
+  messagebird_key:
+    good:
+    - messagebird_key=aaaaaaaaaaaaaaaaaaaaaaaaa
+    junk:
+    - messagebird_key=x
+  postmark_token:
+    good:
+    - postmark_token=aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee
+    junk:
+    - postmark_token=x
+  mailjet_api:
+    good:
+    - mailjet_api=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    junk:
+    - mailjet_api=x
+  sparkpost_api:
+    good:
+    - sparkpost_api=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    junk:
+    - sparkpost_api=x
+  intercom_token:
+    good:
+    - intercom_token=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    junk:
+    - intercom_token=x
+  zendesk_token:
+    good:
+    - zendesk_token=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    junk:
+    - zendesk_token=x
+  freshdesk_api:
+    good:
+    - freshdesk_api=aaaaaaaaaaaaaaaaaaaa
+    junk:
+    - freshdesk_api=x
+  square_access:
+    good:
+    - sq0atp-aaaaaaaaaaaaaaaaaaaaaa
+    junk:
+    - sq0atp-short
+  square_application:
+    good:
+    - sq0idp-aaaaaaaaaaaaaaaaaaaaaa
+    junk:
+    - sq0idp-short
+  paypal_client_id:
+    good:
+    - paypal_client_id=Aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    junk:
+    - Aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  paypal_secret:
+    good:
+    - paypal_secret=Eaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    junk:
+    - Eaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  braintree_token:
+    good:
+    - braintree_token=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    junk:
+    - braintree_token=x
+  adyen_api:
+    good:
+    - AQEaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    junk:
+    - AQEshort
+  mollie_api:
+    good:
+    - mollie_api=live_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    junk:
+    - live_short
+  klarna_api:
+    good:
+    - klarna_api=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    junk:
+    - klarna_api=x
+  woocommerce_key:
+    good:
+    - ck_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    junk:
+    - ck_short
+  woocommerce_secret:
+    good:
+    - cs_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    junk:
+    - cs_short
+  bigcommerce_token:
+    good:
+    - bigcommerce_token=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    junk:
+    - bigcommerce_token=x
+  algolia_api:
+    good:
+    - algolia_api_key=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    junk:
+    - algolia_api_key=x
+  algolia_admin:
+    good:
+    - algolia_admin_key=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    junk:
+    - algolia_admin_key=x
+  meilisearch_key:
+    good:
+    - meili_master=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    junk:
+    - meili_master=x
+  typesense_api:
+    good:
+    - typesense_api=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    junk:
+    - typesense_api=x
+  mixpanel_token:
+    good:
+    - mixpanel_token=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    junk:
+    - mixpanel_token=x
+  mixpanel_secret:
+    good:
+    - mixpanel_secret=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    junk:
+    - mixpanel_secret=x
+  amplitude_api:
+    good:
+    - amplitude_api=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    junk:
+    - amplitude_api=x
+  segment_write:
+    good:
+    - segment_write=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    junk:
+    - segment_write=x
+  heap_app_id:
+    good:
+    - heap_app_id=123456789
+    junk:
+    - heap_app_id=12
+  plausible_api:
+    good:
+    - plausible_api=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    junk:
+    - plausible_api=x
+  cohere_api:
+    good:
+    - cohere_api=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    junk:
+    - cohere_api=x
+  stability_api:
+    good:
+    - stability_api=sk-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    junk:
+    - sk-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  together_api:
+    good:
+    - together_api=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    junk:
+    - together_api=x
+  anyscale_api:
+    good:
+    - anyscale_api=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    junk:
+    - anyscale_api=x
+  pinecone_api:
+    good:
+    - pinecone_api=aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee
+    junk:
+    - pinecone_api=x
+  weaviate_api:
+    good:
+    - weaviate_api=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    junk:
+    - weaviate_api=x
+  qdrant_api:
+    good:
+    - qdrant_api=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    junk:
+    - qdrant_api=x
+  elevenlabs_api:
+    good:
+    - eleven_labs_api=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    junk:
+    - eleven_labs_api=x
+  deepgram_api:
+    good:
+    - deepgram_api=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    junk:
+    - deepgram_api=x
+  assemblyai_api:
+    good:
+    - assemblyai_api=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    junk:
+    - assemblyai_api=x
+  infisical_token:
+    good:
+    - infisical_token=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    junk:
+    - infisical_token=x
+  onepassword_connect:
+    good:
+    - 1password=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxIiwiZXhwIjo5OTk5OTk5OTk5fQ.sigsignature1
+    junk:
+    - eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxIiwiZXhwIjo5OTk5OTk5OTk5fQ.sigsignature1
+  conjur_api:
+    good:
+    - conjur_api=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    junk:
+    - conjur_api=x
+  akeyless_token:
+    good:
+    - akeyless_token=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    junk:
+    - akeyless_token=x
+  terraform_cloud:
+    good:
+    - atlasv1aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    junk:
+    - atlasv1short
+  spacelift_api:
+    good:
+    - spacelift_api=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    junk:
+    - spacelift_api=x
+  mysql_uri:
+    good:
+    - mysql://u:p@host/db
+    junk:
+    - mysql://localhost/db
+  redis_uri:
+    good:
+    - redis://:p@host
+    junk:
+    - redis://localhost
+  fauna_secret:
+    good:
+    - fnaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    junk:
+    - fnshort
+  cockroachdb_api:
+    good:
+    - cockroach_api=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    junk:
+    - cockroach_api=x
+  airtable_api:
+    good:
+    - airtable_api=pataaaaaaaaaaaaaa
+    junk:
+    - pataaaaaaaaaaaaaa
+  notion_database:
+    good:
+    - notion_database_id=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    junk:
+    - aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  contentful_cda:
+    good:
+    - contentful_cda=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    junk:
+    - contentful_cda=x
+  sanity_token:
+    good:
+    - sanity_token=skaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    junk:
+    - skaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  strapi_token:
+    good:
+    - strapi_token=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    junk:
+    - strapi_token=x
+  azure_client_secret:
+    good:
+    - azure_client_secret=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    junk:
+    - azure_client_secret=x
+  azure_storage_key:
+    good:
+    - account_key=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    junk:
+    - account_key=short
+  azure_cosmos_key:
+    good:
+    - cosmos_key=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    junk:
+    - cosmos_key=x
+  azure_devops_pat:
+    good:
+    - azure_devops_pat=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    junk:
+    - azure_devops_pat=x
+  aws_mws_auth:
+    good:
+    - amzn.mws.aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee
+    junk:
+    - amzn.mws.short
+  oci_api_key:
+    good:
+    - ocid1.tenancy.oc1..aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    junk:
+    - ocid1.tenancy.oc1..short
+  linode_pat:
+    good:
+    - linode_pat=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    junk:
+    - linode_pat=x
+  vultr_api:
+    good:
+    - vultr_api=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    junk:
+    - vultr_api=x
+  hetzner_api:
+    good:
+    - hetzner_api=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    junk:
+    - hetzner_api=x
+  scaleway_secret:
+    good:
+    - scaleway_secret=aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee
+    junk:
+    - scaleway_secret=x
+  pagerduty_api:
+    good:
+    - pagerduty_api=aaaaaaaaaaaaaaaaaaaa
+    junk:
+    - pagerduty_api=x
+  opsgenie_api:
+    good:
+    - opsgenie_api=aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee
+    junk:
+    - opsgenie_api=x
+  atlassian_api:
+    good:
+    - atlassian_token=aaaaaaaaaaaaaaaaaaaa
+    junk:
+    - atlassian_token=x
+  jira_token:
+    good:
+    - jira_token=aaaaaaaaaaaaaaaaaaaaaaaa
+    junk:
+    - jira_token=x
+  confluence_token:
+    good:
+    - confluence_token=aaaaaaaaaaaaaaaaaaaaaaaa
+    junk:
+    - confluence_token=x
+  asana_pat:
+    good:
+    - 1/1111111111111111:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    junk:
+    - 1/123:short
+  monday_api:
+    good:
+    - monday_api=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxIiwiZXhwIjo5OTk5OTk5OTk5fQ.sigsignature1
+    junk:
+    - eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxIiwiZXhwIjo5OTk5OTk5OTk5fQ.sigsignature1
+  trello_api:
+    good:
+    - trello_api=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    junk:
+    - trello_api=x
+  okta_api:
+    good:
+    - okta_api=00aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    junk:
+    - 00aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  auth0_token:
+    good:
+    - auth0_secret=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    junk:
+    - auth0_secret=x
+  clerk_secret:
+    good:
+    - clerk_secret=sk_test_aaaaaaaaaaaaaaaaaaaaaaaaaaa
+    junk:
+    - sk_test_aaaaaaaaaaaaaaaaaaaaaaaaaaa
+  supertokens_key:
+    good:
+    - supertokens_api=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    junk:
+    - supertokens_api=x
+  launchdarkly_sdk:
+    good:
+    - sdk-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee
+    junk:
+    - sdk-short
+  launchdarkly_api:
+    good:
+    - api-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee
+    junk:
+    - api-short
+  split_api:
+    good:
+    - split_api=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    junk:
+    - split_api=x
+  statsig_secret:
+    good:
+    - statsig_secret=secret-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    junk:
+    - secret-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  unleash_token:
+    good:
+    - unleash_token=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    junk:
+    - unleash_token=x

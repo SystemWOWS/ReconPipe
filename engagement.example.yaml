@@ -29,3 +29,9 @@ validators:
     needs_domain: true
     notes:
       200: "VALID: Shopify admin API (engagement)"
+
+scope:
+  include: []
+  exclude:
+    - "*.cdn.example.com"
+    - "*.cloudfront.net"
