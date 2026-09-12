@@ -37,6 +37,7 @@ except ImportError:
     YAML_AVAILABLE = False
 
 import reconpipe_addons as addons
+import reconpipe_wave3 as wave3
 
 try:
     import aiohttp
@@ -141,6 +142,9 @@ _POLITE_LAST = 0.0
 SCAN_WAYBACK_BODIES = True
 SCAN_PUBLIC_APIS = True
 WAYBACK_BY_FILE: Dict[str, Dict[str, str]] = {}
+DOWNLOAD_ETAG_CACHE: Dict[str, Dict[str, str]] = {}
+VALIDATION_STORE = None  # sqlite3 connection or None
+SCAN_VALIDATION_CACHE = True
 
 _VALIDATOR_FIELD_NAMES = {f.name for f in fields(ValidatorSpec)}
 
@@ -499,6 +503,41 @@ parse_jsleak_output = addons.parse_jsleak_output
 extract_jsleak_links = addons.extract_jsleak_links
 WAYBACK_MAX = addons.WAYBACK_MAX
 SENSITIVE_PATHS = addons.SENSITIVE_PATHS
+github_search_queries = wave3.github_search_queries
+github_raw_url = wave3.github_raw_url
+parse_github_search_payload = wave3.parse_github_search_payload
+parse_gitlab_search_payload = wave3.parse_gitlab_search_payload
+collect_code_search_urls = wave3.collect_code_search_urls
+looks_like_openapi = wave3.looks_like_openapi
+looks_like_postman = wave3.looks_like_postman
+parse_openapi_spec = wave3.parse_openapi_spec
+parse_postman_collection = wave3.parse_postman_collection
+harvest_spec_urls = wave3.harvest_spec_urls
+harvest_spec_secret_findings = wave3.harvest_spec_secret_findings
+extract_printable_strings = wave3.extract_printable_strings
+extract_mobile_archive = wave3.extract_mobile_archive
+bucket_name_candidates = wave3.bucket_name_candidates
+parse_s3_listing = wave3.parse_s3_listing
+classify_bucket_response = wave3.classify_bucket_response
+probe_buckets = wave3.probe_buckets
+load_etag_cache = wave3.load_etag_cache
+save_etag_cache = wave3.save_etag_cache
+etag_request_headers = wave3.etag_request_headers
+etag_cache_update = wave3.etag_cache_update
+findings_db_path = wave3.findings_db_path
+connect_store = wave3.connect_store
+upsert_findings = wave3.upsert_findings
+cache_get = wave3.cache_get
+cache_put = wave3.cache_put
+git_commit_for_secret = wave3.git_commit_for_secret
+annotate_repo_findings = wave3.annotate_repo_findings
+pair_generic_findings = wave3.pair_generic_findings
+proximity_partners = wave3.proximity_partners
+apply_ci_defaults = wave3.apply_ci_defaults
+crtsh_hosts_from_payload = wave3.crtsh_hosts_from_payload
+certstream_domains_from_message = wave3.certstream_domains_from_message
+hosts_matching_domain = wave3.hosts_matching_domain
+merge_unique = wave3.merge_unique
 
 # Logging
 _FIND_LOGGED = 0
@@ -849,6 +888,8 @@ USER_KEY_FIELDS = (
     ("telegram_chat", "telegram_chat", ("TELEGRAM_CHAT_ID",)),
     ("pagerduty", "pagerduty_key", ("PAGERDUTY_ROUTING_KEY",)),
     ("opsgenie", "opsgenie_key", ("OPSGENIE_API_KEY",)),
+    ("github", "github_token", ("GITHUB_TOKEN", "GH_TOKEN")),
+    ("gitlab", "gitlab_token", ("GITLAB_TOKEN", "GITLAB_PRIVATE_TOKEN")),
 )
 HIT_SOURCE_EXT = {".js", ".jsx", ".ts", ".tsx", ".map", ".json", ".html", ".htm", ".env"}
 
@@ -1683,6 +1724,16 @@ def download_url_file(
     """Download one URL. Returns downloaded|cached|skipped|error|wayback."""
     fname = download_filename(url)
     out_path = Path(dl_dir) / fname
+    if not (url.startswith("http://") or url.startswith("https://")):
+        src = Path(url)
+        if src.is_file() and src.stat().st_size > 0:
+            try:
+                if not out_path.is_file():
+                    shutil.copy2(src, out_path)
+            except Exception:
+                pass
+            return "cached"
+        return "skipped"
     if out_path.is_file() and out_path.stat().st_size > 0:
         return "cached"
     apply_polite_delay()
@@ -1694,14 +1745,38 @@ def download_url_file(
                 return "skipped"
     except Exception:
         pass
+    cond = etag_request_headers(DOWNLOAD_ETAG_CACHE.get(url) or {})
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": ua, **SCAN_EXTRA_HEADERS})
+        req = urllib.request.Request(url, headers={"User-Agent": ua, **SCAN_EXTRA_HEADERS, **cond})
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             ct = resp.headers.get("Content-Type") or ""
             if not content_type_allowed(ct):
                 return "skipped"
-            out_path.write_bytes(resp.read() or b"")
+            blob = resp.read() or b""
+            out_path.write_bytes(blob)
+            hdrs = {k.lower(): v for k, v in (resp.headers.items() if resp.headers else [])}
+            DOWNLOAD_ETAG_CACHE[url] = etag_cache_update(
+                DOWNLOAD_ETAG_CACHE.get(url) or {},
+                hdrs,
+                hashlib.sha256(blob).hexdigest() if blob else "",
+            )
         return "downloaded"
+    except urllib.error.HTTPError as exc:
+        if int(getattr(exc, "code", 0) or 0) == 304 and out_path.is_file():
+            return "cached"
+        if not wayback or not SCAN_WAYBACK_BODIES:
+            return "error"
+        apply_polite_delay()
+        got = fetch_wayback_body(url, timeout=max(timeout, 15), ua=ua)
+        if not got:
+            return "error"
+        body, meta = got
+        ct = meta.get("content_type") or ""
+        if ct and not content_type_allowed(ct):
+            return "skipped"
+        out_path.write_bytes(body)
+        remember_wayback_file(out_path, {**meta, "original": meta.get("original") or url})
+        return "wayback"
     except Exception:
         if not wayback or not SCAN_WAYBACK_BODIES:
             return "error"
@@ -1728,6 +1803,10 @@ def download_files_parallel(
 ) -> Dict[str, int]:
     dl_dir = Path(dl_dir)
     dl_dir.mkdir(parents=True, exist_ok=True)
+    cache_path = Path(dl_dir).parent / "download_etag.json"
+    global DOWNLOAD_ETAG_CACHE
+    if not DOWNLOAD_ETAG_CACHE:
+        DOWNLOAD_ETAG_CACHE = load_etag_cache(cache_path)
     ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
     counts = {"downloaded": 0, "cached": 0, "skipped": 0, "error": 0, "wayback": 0}
     workers = max(1, min(int(workers or 16), 32))
@@ -1786,6 +1865,10 @@ def download_files_parallel(
             side.write_text(json.dumps(WAYBACK_BY_FILE, indent=2), encoding="utf-8")
         except Exception:
             pass
+    try:
+        save_etag_cache(cache_path, DOWNLOAD_ETAG_CACHE)
+    except Exception:
+        pass
     return counts
 
 
@@ -3571,7 +3654,7 @@ def pair_credential_findings(findings: List[Dict]) -> List[Dict]:
             f"(host-fill={host_filled})",
             "info",
         )
-    return findings
+    return pair_generic_findings(findings)
 
 
 # Back-compat alias
@@ -4592,6 +4675,14 @@ async def validate_one(session, finding: Dict, limiter: "DomainRateLimiter",
         result["note"] = validator.skip_reason
         return result
 
+    key_h = finding_hash(str(finding.get("type") or ""), str(finding.get("key") or ""))
+    if SCAN_VALIDATION_CACHE and VALIDATION_STORE is not None and key_h:
+        cached = cache_get(VALIDATION_STORE, key_h)
+        if cached:
+            result.update(cached)
+            result["validated"] = True
+            return result
+
     vault_addr = vault_addr or finding.get("vault_addr") or ""
     grafana_url = grafana_url or finding.get("grafana_url") or ""
 
@@ -4803,6 +4894,13 @@ async def validate_all(findings: List[Dict], domain: str,
                 for item in batch_results:
                     status = int(item.get("status_code") or 0)
                     adaptive.record(elapsed, status or 200)
+                    if VALIDATION_STORE is not None and not item.get("from_cache"):
+                        kh = finding_hash(str(item.get("type") or ""), str(item.get("key") or ""))
+                        if kh:
+                            try:
+                                cache_put(VALIDATION_STORE, kh, item)
+                            except Exception:
+                                pass
                     results.append(item)
             return results
 
@@ -5223,6 +5321,41 @@ def query_crtsh(domain: str, timeout: int = 20) -> List[str]:
     found: set = set()
     _osint_walk_hosts(data, domain, found)
     return sorted(found)
+
+
+def collect_certstream_hosts(domain: str, seconds: int) -> List[str]:
+    """Listen to certstream CT for `seconds` and return hostnames under domain."""
+    seconds = int(seconds or 0)
+    if seconds <= 0 or not (domain or "").strip():
+        return []
+    if not AIOHTTP_AVAILABLE:
+        log("certstream needs aiohttp — skipping", "warn")
+        return []
+
+    async def _listen() -> List[str]:
+        found: List[str] = []
+        deadline = time.monotonic() + seconds
+        timeout = aiohttp.ClientTimeout(total=seconds + 5)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.ws_connect(wave3.CERTSTREAM_WS, heartbeat=20) as ws:
+                while time.monotonic() < deadline:
+                    remaining = max(0.1, deadline - time.monotonic())
+                    try:
+                        msg = await asyncio.wait_for(ws.receive_json(), timeout=min(2.0, remaining))
+                    except asyncio.TimeoutError:
+                        continue
+                    except Exception:
+                        break
+                    names = certstream_domains_from_message(msg)
+                    found.extend(hosts_matching_domain(names, domain))
+        return merge_unique(found)
+
+    log(f"certstream: listening {seconds}s for {domain}...", "info")
+    try:
+        return asyncio.run(_listen())
+    except Exception as exc:
+        log(f"certstream: {str(exc)[:120]}", "warn")
+        return []
 
 
 def osint_source_status(
@@ -5667,6 +5800,32 @@ Examples:
                         help="Also keep medium-confidence secrets-patterns-db rules")
     parser.add_argument("--skip-jsleak", action="store_true",
                         help="Do not run jsleak on discovered JavaScript URLs")
+    parser.add_argument("--github-token", metavar="TOKEN",
+                        help="GitHub token for code search (or env GITHUB_TOKEN)")
+    parser.add_argument("--gitlab-token", metavar="TOKEN",
+                        help="GitLab token for code search (or env GITLAB_TOKEN)")
+    parser.add_argument("--github-org", metavar="ORG",
+                        help="GitHub org to scope public code search")
+    parser.add_argument("--skip-code-search", action="store_true",
+                        help="Skip GitHub/GitLab public code search")
+    parser.add_argument("--apk", metavar="FILE", action="append", default=[],
+                        help="Unzip and scan an APK/XAPK (repeatable)")
+    parser.add_argument("--ipa", metavar="FILE", action="append", default=[],
+                        help="Unzip and scan an IPA (repeatable)")
+    parser.add_argument("--skip-buckets", action="store_true",
+                        help="Do not guess/probe S3/GCS/Azure bucket names")
+    parser.add_argument("--skip-openapi", action="store_true",
+                        help="Do not parse OpenAPI/Swagger/Postman specs for extra URLs")
+    parser.add_argument("--skip-store", action="store_true",
+                        help="Do not persist findings to ~/.reconpipe/findings.db")
+    parser.add_argument("--no-validation-cache", action="store_true",
+                        help="Do not reuse cached provider validation results")
+    parser.add_argument("--ci", action="store_true",
+                        help="Shift-left: scan local --repo (cwd), skip live recon, write SARIF")
+    parser.add_argument("--watch", metavar="SECONDS", type=int, default=0,
+                        help="Re-run the scan on this interval (CLI loop; 0 = once)")
+    parser.add_argument("--certstream-seconds", metavar="N", type=int, default=0,
+                        help="Listen to certstream CT for N seconds and merge hostnames")
     parser.add_argument("--telegram-bot", metavar="TOKEN", help="Telegram bot token for alerts")
     parser.add_argument("--telegram-chat", metavar="ID", help="Telegram chat id for alerts")
     parser.add_argument("--smtp-host", metavar="HOST", help="SMTP host for email alerts")
@@ -5731,6 +5890,12 @@ def argv_from_options(opts: Dict[str, Any]) -> List[str]:
         "skip_secrets_db": "--skip-secrets-db",
         "secrets_db_medium": "--secrets-db-medium",
         "skip_jsleak": "--skip-jsleak",
+        "skip_code_search": "--skip-code-search",
+        "skip_buckets": "--skip-buckets",
+        "skip_openapi": "--skip-openapi",
+        "skip_store": "--skip-store",
+        "no_validation_cache": "--no-validation-cache",
+        "ci": "--ci",
     }
     for key, flag in mapping_flags.items():
         if opts.get(key):
@@ -5768,6 +5933,11 @@ def argv_from_options(opts: Dict[str, Any]) -> List[str]:
         "smtp_to": "--smtp-to",
         "pagerduty_key": "--pagerduty-key",
         "opsgenie_key": "--opsgenie-key",
+        "github_token": "--github-token",
+        "gitlab_token": "--gitlab-token",
+        "github_org": "--github-org",
+        "watch": "--watch",
+        "certstream_seconds": "--certstream-seconds",
     }
     for key, flag in value_flags.items():
         val = opts.get(key)
@@ -5797,6 +5967,12 @@ def argv_from_options(opts: Dict[str, Any]) -> List[str]:
     for db in opts.get("secrets_db") or []:
         if str(db).strip():
             argv += ["--secrets-db", str(db).strip()]
+    for apk in opts.get("apk") or []:
+        if str(apk).strip():
+            argv += ["--apk", str(apk).strip()]
+    for ipa in opts.get("ipa") or []:
+        if str(ipa).strip():
+            argv += ["--ipa", str(ipa).strip()]
     for h in opts.get("ignore_hash") or []:
         if str(h).strip():
             argv += ["--ignore-hash", str(h).strip()]
@@ -5859,6 +6035,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     apply_saved_keys(args)
+    if getattr(args, "ci", False):
+        apply_ci_defaults(args)
 
     if args.domain_list and not (args.domain or "").strip():
         return run_domain_list(args, argv)
@@ -5929,6 +6107,21 @@ def main(argv: Optional[List[str]] = None) -> int:
             "info",
         )
     configure_scan_runtime(args, output_dir)
+    global VALIDATION_STORE, SCAN_VALIDATION_CACHE, DOWNLOAD_ETAG_CACHE
+    SCAN_VALIDATION_CACHE = not bool(getattr(args, "no_validation_cache", False))
+    if VALIDATION_STORE is not None:
+        try:
+            VALIDATION_STORE.close()
+        except Exception:
+            pass
+    VALIDATION_STORE = None
+    if not getattr(args, "skip_store", False):
+        try:
+            VALIDATION_STORE = connect_store()
+            log(f"Finding store: {findings_db_path()}", "info")
+        except Exception as exc:
+            log(f"Finding store unavailable: {exc}", "warn")
+    DOWNLOAD_ETAG_CACHE = load_etag_cache(output_dir / "download_etag.json")
     if getattr(args, "refresh_public_apis", False):
         try:
             dest, n = refresh_public_apis_catalog()
@@ -6265,6 +6458,13 @@ def main(argv: Optional[List[str]] = None) -> int:
             "warn",
         )
     log(f"Live hosts: {C.BOLD}{live_count}{C.RESET} / {sub_count}", "success")
+    if int(getattr(args, "certstream_seconds", 0) or 0) > 0:
+        cs_hosts = collect_certstream_hosts(args.domain, int(args.certstream_seconds))
+        if cs_hosts:
+            live_list = merge_host_lists(live_list, cs_hosts)
+            live_count = len(live_list)
+            live_hosts_file.write_text("\n".join(live_list) + "\n")
+            log(f"certstream: +{len(cs_hosts)} host(s) → {live_count} live", "success")
     if _ETA is not None:
         _ETA.set_work(subs=sub_count, live=live_count, log_now=True)
     save_checkpoint(output_dir, "httpx", {"live": live_count})
@@ -6553,6 +6753,64 @@ def main(argv: Optional[List[str]] = None) -> int:
             log(f"Repo clone ({mode}): {len(repo_files)} file(s)", "info")
         else:
             log("git clone failed — skipping --repo", "warn")
+
+    apk_inputs = list(getattr(args, "apk", None) or []) + list(getattr(args, "ipa", None) or [])
+    if apk_inputs:
+        apk_dir = output_dir / "mobile_extract"
+        apk_dir.mkdir(exist_ok=True)
+        extracted_n = 0
+        for archive in apk_inputs:
+            ap = Path(str(archive))
+            if not ap.is_file():
+                log(f"Mobile archive not found: {archive}", "warn")
+                continue
+            dest = apk_dir / re.sub(r"[^a-zA-Z0-9._-]", "_", ap.stem)[:80]
+            files = extract_mobile_archive(ap, dest)
+            extra_urls.extend(str(p) for p in files)
+            extracted_n += len(files)
+        log(f"Mobile extract: {extracted_n} file(s) from {len(apk_inputs)} archive(s)", "info")
+
+    if not getattr(args, "skip_code_search", False):
+        gh = (getattr(args, "github_token", None) or "").strip()
+        gl = (getattr(args, "gitlab_token", None) or "").strip()
+        org = (getattr(args, "github_org", None) or "").strip()
+        try:
+            code_urls = collect_code_search_urls(
+                args.domain,
+                github_token=gh,
+                gitlab_token=gl,
+                org=org,
+                extra_hosts=live_list[:15],
+            )
+        except Exception as exc:
+            code_urls = []
+            log(f"code search: {str(exc)[:120]}", "warn")
+        if code_urls:
+            extra_urls.extend(code_urls)
+            (output_dir / "code_search_urls.txt").write_text("\n".join(code_urls) + "\n", encoding="utf-8")
+            log(f"Code search: {len(code_urls)} public file URL(s)", "success")
+        else:
+            log("Code search: no extra URLs (set GITHUB_TOKEN for higher limits)", "info")
+
+    if not getattr(args, "skip_buckets", False):
+        try:
+            bucket_hit = probe_buckets(args.domain)
+        except Exception as exc:
+            bucket_hit = {"buckets": [], "urls": []}
+            log(f"bucket probe: {str(exc)[:120]}", "warn")
+        b_rows = bucket_hit.get("buckets") or []
+        b_urls = bucket_hit.get("urls") or []
+        if b_rows:
+            (output_dir / "buckets.json").write_text(json.dumps(b_rows, indent=2), encoding="utf-8")
+        extra_urls.extend(b_urls)
+        open_n = sum(1 for r in b_rows if r.get("access") == "open")
+        exist_n = sum(1 for r in b_rows if r.get("access") == "exists")
+        if b_rows:
+            log(
+                f"Buckets: {open_n} open / {exist_n} exist-but-closed "
+                f"({len(b_urls)} object URL(s))",
+                "success" if open_n else "info",
+            )
     js_extra = analyze_js_bundle(url_list, output_dir)
     extra_urls.extend(u for u in js_extra if u.startswith("http"))
     if tools_status.get("linkfinder"):
@@ -6601,6 +6859,23 @@ def main(argv: Optional[List[str]] = None) -> int:
             )
             # Stash hits on args for merge after secret scan starts with empty raw_findings
             args._jsleak_findings = js_hits  # type: ignore[attr-defined]
+    if not getattr(args, "skip_openapi", False):
+        spec_extra: List[str] = []
+        spec_findings: List[Dict] = list(getattr(args, "_spec_findings", None) or [])
+        ua_spec = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        candidates = [
+            u for u in (url_list + extra_urls)
+            if re.search(r"(swagger|openapi|postman)", u, re.I)
+        ][:40]
+        for u in candidates:
+            page, _extra = _load_scan_text(u, ua_spec)
+            if not page:
+                continue
+            spec_extra.extend(harvest_spec_urls(page, u))
+            spec_findings.extend(harvest_spec_secret_findings(page, u))
+        extra_urls.extend(spec_extra)
+        if spec_findings:
+            args._spec_findings = spec_findings  # type: ignore[attr-defined]
     if extra_urls:
         url_list = dedupe_urls(url_list + extra_urls)
         if not args.files:
@@ -6826,6 +7101,28 @@ def main(argv: Optional[List[str]] = None) -> int:
                         )
                     except Exception:
                         pass
+            if not getattr(args, "skip_openapi", False):
+                spec_urls: List[str] = []
+                spec_hits = 0
+                for f_path in list(dl_dir.iterdir())[:400]:
+                    try:
+                        if not f_path.is_file() or f_path.stat().st_size > 2_000_000:
+                            continue
+                        text = f_path.read_text(encoding="utf-8", errors="ignore")
+                    except Exception:
+                        continue
+                    spec_urls.extend(harvest_spec_urls(text, str(f_path)))
+                    extra_hits = harvest_spec_secret_findings(text, str(f_path))
+                    if extra_hits:
+                        raw_findings.extend(extra_hits)
+                        spec_hits += len(extra_hits)
+                if spec_urls:
+                    extra_urls.extend(spec_urls)
+                    (output_dir / "openapi_urls.txt").write_text(
+                        "\n".join(merge_unique(spec_urls)) + "\n", encoding="utf-8"
+                    )
+                if spec_urls or spec_hits:
+                    log(f"OpenAPI/Postman: {len(merge_unique(spec_urls))} URL(s), {spec_hits} example secret(s)", "info")
             if use_gitleaks:
                 log("Running Gitleaks on downloaded files...", "info")
                 gl_hits = run_gitleaks_source(
@@ -6879,6 +7176,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     if not resumed_scan and jsleak_hits:
         raw_findings.extend(jsleak_hits)
         log(f"jsleak secrets merged: {len(jsleak_hits)}", "info")
+    spec_hits = getattr(args, "_spec_findings", None) or []
+    if not resumed_scan and spec_hits:
+        raw_findings.extend(spec_hits)
+        log(f"OpenAPI/Postman secrets merged: {len(spec_hits)}", "info")
+    if not resumed_scan and repo_dir_scanned:
+        blamed = annotate_repo_findings(raw_findings, repo_dir_scanned)
+        if blamed:
+            log(f"git log -S: annotated {blamed} finding(s) with commit metadata", "info")
 
     if not resumed_scan:
         annotate_wayback_findings(raw_findings)
@@ -6981,6 +7286,16 @@ def main(argv: Optional[List[str]] = None) -> int:
     validated = annotate_severity(validated)
     exposures = annotate_severity(exposures)
     informational = annotate_severity(informational)
+    if VALIDATION_STORE is not None:
+        try:
+            stats = upsert_findings(VALIDATION_STORE, args.domain, validated)
+            log(
+                f"Finding store: +{stats.get('new', 0)} new / "
+                f"{stats.get('newly_valid', 0)} newly valid",
+                "info",
+            )
+        except Exception as exc:
+            log(f"Finding store write failed: {exc}", "warn")
 
     prev_findings: List[Dict] = []
     findings_json = output_dir / "findings.json"
@@ -7222,4 +7537,19 @@ def main(argv: Optional[List[str]] = None) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    argv = sys.argv[1:]
+    watch = 0
+    if "--watch" in argv:
+        try:
+            watch = int(argv[argv.index("--watch") + 1])
+        except (IndexError, ValueError):
+            watch = 0
+    while True:
+        rc = main(argv)
+        if watch <= 0:
+            sys.exit(rc)
+        print(f"Watch: next scan in {watch}s (Ctrl+C to stop)", flush=True)
+        try:
+            time.sleep(watch)
+        except KeyboardInterrupt:
+            sys.exit(rc)

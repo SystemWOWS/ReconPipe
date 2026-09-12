@@ -415,9 +415,43 @@ ReconPipe stacks several engines. Hits are de-duplicated (SHA-256 of the secret)
 
 Covered families include cloud (AWS, GCP, Azure, OCI), git forges, payments, email/SMS, Slack/Discord/Telegram, AI vendors, PaaS (Vercel, Railway, Render, Fly, Heroku), data stores (Mongo, Postgres, Redis URIs), CI, observability, and generic `api_key=` assignments. Informational hits (publishable keys, client SDK IDs) are stored separately and are not treated as secrets.
 
-Validators send `Referer: https://<target>/` so domain-restricted keys are more likely to exercise than fail as 403 from your IP. AWS access keys pair with nearby secrets for STS. Database URIs are inspected locally — ReconPipe does not connect to leaked database hosts.
+Validators send `Referer: https://<target>/` so domain-restricted keys are more likely to exercise than fail as 403 from your IP. AWS access keys pair with nearby secrets for STS. PayPal, WooCommerce, Mixpanel, and Algolia halves are paired the same way when they share a source. Database URIs are inspected locally — ReconPipe does not connect to leaked database hosts.
 
 Low-confidence or noisy matches can land in `quarantine.json` instead of the main findings list.
+
+---
+
+## Extra leak surfaces
+
+These run during discovery unless you skip them.
+
+**Public code search** — GitHub (and GitLab with a token) for the target domain, then the same regex/validators on the raw files. Set `GITHUB_TOKEN` (or `--github-token`) to raise the search rate limit. `--github-org acme` scopes to an org. `--skip-code-search` disables it.
+
+**Mobile apps** — `--apk app.apk` / `--ipa app.ipa` unzips the archive, keeps JS/JSON/XML/plist, and strings-dumps binaries (Firebase, Maps keys, `.env`).
+
+**Cloud buckets** — Guess S3/GCS/Azure names from the domain, probe listing, and queue readable objects that look like configs. `--skip-buckets` disables it. Only names derived from the target are tried.
+
+**OpenAPI / Swagger / Postman** — Parse discovered specs for extra endpoints and example/auth values. `--skip-openapi` disables it.
+
+**Finding store** — `~/.reconpipe/findings.db` records first-seen / last-seen / last-valid (hashes only, not the secret). Validation results are cached for 6 hours so re-scans skip provider APIs. `--skip-store` / `--no-validation-cache` turn these off.
+
+**`--watch SECONDS`** — CLI loop: run the full scan, sleep, repeat. Combine with the store to spot newly valid keys.
+
+**`--ci`** — Shift-left: skip live recon (including GitHub/GitLab code search and bucket probes), clone/scan `--repo` (default: current directory), write SARIF, still exit 1 on live keys.
+
+```bash
+python3 reconpipe.py --ci --repo .
+# or from git hooks:
+bash scripts/pre-commit
+```
+
+A sample GitHub Action lives in `.github/workflows/reconpipe.yml`.
+
+**`--certstream-seconds N`** — Listen to the public certstream CT feed for N seconds and merge matching hostnames (needs aiohttp).
+
+**Repo git metadata** — After `--repo`, findings from the working tree get `git log -S` author/commit/date when git can see the string.
+
+Downloads send `If-None-Match` / `If-Modified-Since` using `download_etag.json` so `--resume` skips unchanged files.
 
 ---
 
@@ -443,7 +477,7 @@ Start here:
 | `.reconpipe_ignore.json`                 | Baseline (type + source, or `--ignore-hash`) |
 
 
-Useful intermediates: `subdomains.txt`, `live_hosts.txt`, `files_to_scan.txt`, `downloaded_files/`, `js_endpoints.json`, `js_secrets.json`, `gitleaks.json`, `jsleak.txt`, `sensitive_paths.txt`, `wayback_sources.json`, `pipeline_metrics.json`, `checkpoint.json`.
+Useful intermediates: `subdomains.txt`, `live_hosts.txt`, `files_to_scan.txt`, `downloaded_files/`, `js_endpoints.json`, `js_secrets.json`, `gitleaks.json`, `jsleak.txt`, `sensitive_paths.txt`, `wayback_sources.json`, `code_search_urls.txt`, `buckets.json`, `openapi_urls.txt`, `download_etag.json`, `pipeline_metrics.json`, `checkpoint.json`.
 
 Keep the output directory private. `valid_keys.json` is the highest-risk file.
 
@@ -502,6 +536,16 @@ Run `python3 reconpipe.py -h` for the full list. Grouped below.
 | `--skip-secrets-db`                            | Ignore bundled/user extra regexes     |
 | `--secrets-db-medium`                          | Also keep medium-confidence rules     |
 | `--skip-public-apis` / `--refresh-public-apis` | Query-string vendor key catalog       |
+| `--skip-code-search`                           | Skip GitHub/GitLab public code search |
+| `--github-token` / `--gitlab-token`            | Tokens for code search                |
+| `--github-org ORG`                             | Scope GitHub search to an org         |
+| `--apk FILE` / `--ipa FILE`                    | Unzip and scan a mobile app           |
+| `--skip-buckets`                               | Skip S3/GCS/Azure name guesses        |
+| `--skip-openapi`                               | Skip OpenAPI/Swagger/Postman parse    |
+| `--ci`                                         | Local-repo scan, skip live recon      |
+| `--watch SECONDS`                              | Repeat the scan on an interval        |
+| `--certstream-seconds N`                       | Live CT hostnames via certstream      |
+| `--skip-store` / `--no-validation-cache`       | SQLite history / 6h validation cache  |
 
 
 **Runtime**
@@ -573,7 +617,7 @@ reconpipe -d example.com
 ## Tests
 
 ```bash
-python3 -m unittest tests.test_wave2 tests.test_new_features tests.test_cli_and_keys \
+python3 -m unittest tests.test_wave2 tests.test_wave3 tests.test_new_features tests.test_cli_and_keys \
   tests.test_patterns tests.test_user_settings tests.test_httpx_resolve tests.test_osint -q
 
 # GUI wiring (Windows: set PYTHONIOENCODING=utf-8)

@@ -75,6 +75,10 @@ ARTIFACT_FILES = [
     "spray_urls.txt",
     "jsleak.txt",
     "jsleak_secrets.json",
+    "code_search_urls.txt",
+    "buckets.json",
+    "openapi_urls.txt",
+    "download_etag.json",
 ]
 
 def strip_ansi(text: str) -> str:
@@ -374,129 +378,210 @@ def build_ui() -> None:
     dark_mode = ui.dark_mode()
     dark_mode.enable()
     ui.colors(
-        primary="#e85d04",
-        secondary="#3a3a3a",
-        accent="#e85d04",
-        dark="#1a1a1a",
-        positive="#6aa84f",
-        negative="#c62828",
-        warning="#f9a825",
-        info="#5c6b73",
+        primary="#e8620a",
+        secondary="#5b6673",
+        accent="#e8620a",
+        dark="#0d1117",
+        positive="#2ea043",
+        negative="#e5484d",
+        warning="#d29922",
+        info="#58a6ff",
     )
     ui.add_head_html(
         """
         <style>
+          /* ---- Dark theme (default)  */
           :root {
-            --rp-bg: #161616;
-            --rp-panel: #222222;
-            --rp-panel-2: #2a2a2a;
-            --rp-border: #3a3a3a;
-            --rp-orange: #e85d04;
-            --rp-text: #d6d6d6;
-            --rp-muted: #8a8a8a;
-            --rp-green: #6aa84f;
-            --rp-red: #c62828;
+            --rp-bg: #0d1117;
+            --rp-bg-2: #10151c;
+            --rp-panel: #161b22;
+            --rp-panel-2: #1b212b;
+            --rp-border: #2a313c;
+            --rp-border-soft: #20262f;
+            --rp-orange: #f0781f;
+            --rp-orange-soft: rgba(240,120,31,0.12);
+            --rp-text: #c9d1d9;
+            --rp-text-strong: #f0f3f6;
+            --rp-muted: #8b949e;
+            --rp-green: #3fb950;
+            --rp-red: #f85149;
+            --rp-amber: #d29922;
+            --rp-input-bg: #0f141b;
+            --rp-shadow: 0 1px 2px rgba(0,0,0,0.45), 0 4px 14px rgba(0,0,0,0.30);
+            --rp-radius: 10px;
+            --rp-radius-sm: 7px;
+          }
+          /* ---- Light theme (Dark/Light toggle)  */
+          body.body--light {
+            --rp-bg: #f3f4f6;
+            --rp-bg-2: #eceef1;
+            --rp-panel: #ffffff;
+            --rp-panel-2: #f4f6f8;
+            --rp-border: #dde1e6;
+            --rp-border-soft: #e7eaee;
+            --rp-orange: #d95b00;
+            --rp-orange-soft: rgba(217,91,0,0.10);
+            --rp-text: #313a45;
+            --rp-text-strong: #10151b;
+            --rp-muted: #6b7683;
+            --rp-green: #1a7f37;
+            --rp-red: #cf222e;
+            --rp-amber: #9a6700;
+            --rp-input-bg: #ffffff;
+            --rp-shadow: 0 1px 2px rgba(140,149,159,0.16), 0 3px 12px rgba(140,149,159,0.12);
           }
           html, body, .q-layout, .q-page, .nicegui-content {
             background: var(--rp-bg) !important;
             color: var(--rp-text) !important;
-            font-family: "Segoe UI", Tahoma, sans-serif !important;
+            font-family: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif !important;
+            -webkit-font-smoothing: antialiased;
           }
-          /* Thin header wash only — a full-viewport repeating gradient
-             makes Firefox composite the whole page on every frame. */
-          body::before {
-            content: "";
-            position: fixed; top: 0; left: 0; right: 0; height: 36px;
-            pointer-events: none; z-index: 0;
-            background: linear-gradient(180deg, rgba(232,93,4,0.05), transparent);
+          ::selection { background: var(--rp-orange-soft); }
+          /* Thin, refined scrollbars for a polished feel. */
+          * { scrollbar-width: thin; scrollbar-color: var(--rp-border) transparent; }
+          ::-webkit-scrollbar { width: 10px; height: 10px; }
+          ::-webkit-scrollbar-track { background: transparent; }
+          ::-webkit-scrollbar-thumb {
+            background: var(--rp-border); border-radius: 10px;
+            border: 2px solid transparent; background-clip: padding-box;
           }
+          ::-webkit-scrollbar-thumb:hover { background: var(--rp-muted); }
+
           .q-header {
-            background: #111111 !important;
-            border-bottom: 2px solid var(--rp-orange) !important;
-            box-shadow: none !important;
-            min-height: 40px;
+            background: var(--rp-panel) !important;
+            border-bottom: 1px solid var(--rp-border) !important;
+            box-shadow: var(--rp-shadow) !important;
+            min-height: 52px;
+            backdrop-filter: saturate(1.1);
+          }
+          .q-tabs {
+            background: transparent;
+            border-bottom: 1px solid var(--rp-border);
+            padding: 0 6px;
           }
           .q-tab {
             text-transform: none !important;
-            font-size: 12.5px !important;
-            color: #bdbdbd !important;
-            min-height: 36px;
+            font-size: 13px !important; font-weight: 600;
+            color: var(--rp-muted) !important;
+            min-height: 42px; border-radius: var(--rp-radius-sm) var(--rp-radius-sm) 0 0;
+            transition: color .15s ease, background .15s ease;
           }
-          .q-tab--active { color: #fff !important; }
-          .q-tab__indicator { background: var(--rp-orange) !important; height: 2px !important; }
-          .q-tabs { background: #1c1c1c; border-bottom: 1px solid var(--rp-border); }
+          .q-tab:hover { color: var(--rp-text) !important; background: var(--rp-orange-soft); }
+          .q-tab--active { color: var(--rp-text-strong) !important; }
+          .q-tab__indicator { background: var(--rp-orange) !important; height: 2.5px !important; border-radius: 3px; }
+
           .q-card, .rp-card {
             background: var(--rp-panel) !important;
             border: 1px solid var(--rp-border) !important;
-            border-radius: 0 !important;
-            box-shadow: none !important;
+            border-radius: var(--rp-radius) !important;
+            box-shadow: var(--rp-shadow) !important;
+            transition: border-color .15s ease;
           }
+          .rp-card { padding: 16px !important; }
           .q-field--outlined .q-field__control {
-            border-radius: 0 !important;
-            background: #1a1a1a !important;
+            border-radius: var(--rp-radius-sm) !important;
+            background: var(--rp-input-bg) !important;
           }
-          .q-btn { border-radius: 0 !important; font-weight: 600; letter-spacing: 0.02em; }
+          .q-field--outlined .q-field__control:before { border-color: var(--rp-border) !important; }
+          .q-field--outlined.q-field--focused .q-field__control:after {
+            border-color: var(--rp-orange) !important;
+          }
+          .q-btn {
+            border-radius: var(--rp-radius-sm) !important;
+            font-weight: 600; letter-spacing: 0.01em; text-transform: none;
+            transition: transform .08s ease, box-shadow .15s ease, background .15s ease;
+          }
+          .q-btn:active { transform: translateY(1px); }
+          .q-btn.q-btn--unelevated { box-shadow: 0 1px 2px rgba(0,0,0,0.2); }
+          .q-btn.q-btn--unelevated:hover { box-shadow: var(--rp-shadow); }
+
           .rp-console {
-            font-family: Consolas, "Lucida Console", ui-monospace, monospace;
-            font-size: 12.5px; line-height: 1.4;
-            background: #0c0c0c; color: #9ccc65;
-            border: 1px solid #2a2a2a;
-            padding: 10px 12px; height: 440px; overflow: auto; white-space: pre-wrap;
+            font-family: "Cascadia Code", Consolas, "Lucida Console", ui-monospace, monospace;
+            font-size: 12.5px; line-height: 1.5;
+            background: #0a0d12; color: #8fd67a;
+            border: 1px solid var(--rp-border);
+            border-radius: var(--rp-radius-sm);
+            padding: 12px 14px; height: 460px; overflow: auto; white-space: pre-wrap;
             contain: content;
           }
           .rp-title {
-            font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase;
-            color: #fff;
+            font-weight: 700; letter-spacing: 0.02em; font-size: 17px;
+            color: var(--rp-text-strong);
           }
           .rp-brand-mark {
-            width: 10px; height: 10px; background: var(--rp-orange);
-            display: inline-block; margin-right: 10px;
+            width: 22px; height: 22px; border-radius: 6px;
+            background: linear-gradient(135deg, var(--rp-orange), #b8410a);
+            display: inline-flex; align-items: center; justify-content: center;
+            margin-right: 12px; box-shadow: 0 0 0 1px rgba(240,120,31,0.25), 0 2px 6px rgba(0,0,0,0.4);
           }
+          .rp-brand-mark::after { content: "\\1F511"; font-size: 12px; line-height: 1; }
           .rp-section {
-            font-size: 11px; font-weight: 700; letter-spacing: 0.14em;
+            font-size: 11px; font-weight: 700; letter-spacing: 0.12em;
             text-transform: uppercase; color: var(--rp-orange);
-            border-bottom: 1px solid var(--rp-border); padding-bottom: 6px; margin-bottom: 8px;
+            border-bottom: 1px solid var(--rp-border); padding-bottom: 8px; margin-bottom: 12px;
           }
           .rp-badge-ok { color: var(--rp-green); font-weight: 700; }
-          .rp-badge-miss { color: #f9a825; font-weight: 700; }
-          .rp-secret { font-family: Consolas, monospace; }
-          .rp-status-dot {
-            width: 8px; height: 8px; border-radius: 50%; display: inline-block;
-            background: var(--rp-muted); margin-right: 8px;
+          .rp-badge-miss { color: var(--rp-amber); font-weight: 700; }
+          .rp-secret {
+            font-family: Consolas, ui-monospace, monospace;
+            background: var(--rp-panel-2); padding: 1px 6px; border-radius: 4px;
           }
-          .rp-status-dot.live { background: var(--rp-green); box-shadow: 0 0 6px var(--rp-green); }
-          .rp-status-dot.run { background: var(--rp-orange); box-shadow: 0 0 6px var(--rp-orange); }
+          .rp-status-dot {
+            width: 9px; height: 9px; border-radius: 50%; display: inline-block;
+            background: var(--rp-muted); margin-right: 9px;
+          }
+          .rp-status-dot.live { background: var(--rp-green); box-shadow: 0 0 8px var(--rp-green); }
+          .rp-status-dot.run {
+            background: var(--rp-orange); box-shadow: 0 0 8px var(--rp-orange);
+            animation: rp-pulse 1.3s ease-in-out infinite;
+          }
           .rp-status-dot.dead { background: var(--rp-red); }
+          @keyframes rp-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.35; } }
           .rp-stat-grid {
-            display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-top: 10px;
+            display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-top: 12px;
           }
           .rp-stat {
-            background: #1a1a1a; border: 1px solid var(--rp-border); padding: 8px 10px;
+            background: var(--rp-panel-2); border: 1px solid var(--rp-border-soft);
+            border-radius: var(--rp-radius-sm); padding: 10px 12px; text-align: center;
           }
-          .rp-stat .k { font-size: 10px; color: var(--rp-muted); letter-spacing: 0.1em; text-transform: uppercase; }
-          .rp-stat .v { font-size: 16px; font-weight: 700; color: #eee; font-family: Consolas, monospace; }
+          .rp-stat .k { font-size: 10px; color: var(--rp-muted); letter-spacing: 0.12em; text-transform: uppercase; }
+          .rp-stat .v { font-size: 20px; font-weight: 700; color: var(--rp-text-strong); font-family: Consolas, monospace; margin-top: 2px; }
           .rp-footer {
-            background: #111 !important; border-top: 1px solid var(--rp-border) !important;
-            color: #9a9a9a; font-size: 11.5px; min-height: 26px;
+            background: var(--rp-panel) !important; border-top: 1px solid var(--rp-border) !important;
+            color: var(--rp-muted); font-size: 11.5px; min-height: 30px;
           }
           .rp-verdict {
             font-family: Consolas, monospace; font-size: 18px; font-weight: 700;
-            letter-spacing: 0.16em; padding: 12px; border: 1px solid var(--rp-border);
-            background: #141414;
+            letter-spacing: 0.12em; padding: 14px 16px; border: 1px solid var(--rp-border);
+            border-radius: var(--rp-radius-sm); background: var(--rp-panel-2);
+            color: var(--rp-muted);
           }
-          .rp-verdict.live { color: var(--rp-green); border-color: #3d5c2f; }
-          .rp-verdict.dead { color: var(--rp-red); border-color: #5c1f1f; }
+          .rp-verdict.live { color: var(--rp-green); border-color: rgba(63,185,80,0.4); background: rgba(63,185,80,0.08); }
+          .rp-verdict.dead { color: var(--rp-red); border-color: rgba(248,81,73,0.4); background: rgba(248,81,73,0.07); }
+          .rp-verdict.skip { color: var(--rp-amber); border-color: rgba(210,153,34,0.4); background: rgba(210,153,34,0.07); }
           .rp-header-meta {
-            font-size: 10px; letter-spacing: 0.18em; text-transform: uppercase;
-            color: #8a8a8a; margin-left: 14px;
+            font-size: 10px; letter-spacing: 0.16em; text-transform: uppercase;
+            color: var(--rp-muted); margin-left: 14px;
           }
           .rp-chip {
             font-size: 10px; font-weight: 700; letter-spacing: 0.08em;
-            text-transform: uppercase; padding: 2px 8px;
-            border: 1px solid var(--rp-border); color: #cfcfcf;
+            text-transform: uppercase; padding: 3px 9px; border-radius: 999px;
+            border: 1px solid var(--rp-border); color: var(--rp-text);
           }
-          .rp-chip.on { color: var(--rp-green); border-color: #3d5c2f; }
-          .rp-chip.off { color: #666; }
+          .rp-chip.on { color: var(--rp-green); border-color: rgba(63,185,80,0.45); background: rgba(63,185,80,0.08); }
+          .rp-chip.off { color: var(--rp-muted); }
+          .rp-ver-chip {
+            font-family: Consolas, monospace; font-size: 10.5px; color: var(--rp-muted);
+            border: 1px solid var(--rp-border); border-radius: 999px; padding: 2px 9px;
+          }
+          .rp-subcard {
+            background: var(--rp-panel-2) !important;
+            border: 1px solid var(--rp-border-soft) !important;
+            border-radius: var(--rp-radius-sm) !important;
+            box-shadow: none !important;
+            transition: border-color .15s ease;
+          }
+          .rp-subcard:hover { border-color: var(--rp-orange) !important; }
         </style>
         """
     )
@@ -504,9 +589,9 @@ def build_ui() -> None:
     with ui.header().classes("items-center justify-between px-4"):
         with ui.row().classes("items-center no-wrap"):
             ui.element("span").classes("rp-brand-mark")
-            ui.label("ReconPipe").classes("rp-title text-base")
+            ui.label("ReconPipe").classes("rp-title")
             ui.label("Host intel · Key hunter").classes("rp-header-meta")
-        with ui.row().classes("items-center gap-2"):
+        with ui.row().classes("items-center gap-3"):
             def toggle_dark() -> None:
                 STATE.dark_on = not STATE.dark_on
                 if STATE.dark_on:
@@ -514,8 +599,10 @@ def build_ui() -> None:
                 else:
                     dark_mode.disable()
 
-            ui.button("Dark/Light", on_click=toggle_dark, color="secondary").props("flat dense")
-            ui.label("v1.2").classes("text-xs text-gray-500 font-mono")
+            ui.button(
+                "Dark/Light", on_click=toggle_dark, color="secondary", icon="dark_mode"
+            ).props("flat dense")
+            ui.label("v1.3").classes("rp-ver-chip")
 
     with ui.tabs().classes("w-full") as tabs:
         tab_scan = ui.tab("Scan")
@@ -525,7 +612,7 @@ def build_ui() -> None:
         tab_artifacts = ui.tab("Artifacts")
         tab_history = ui.tab("History")
 
-    with ui.tab_panels(tabs, value=tab_scan).classes("w-full px-3 pb-10"):
+    with ui.tab_panels(tabs, value=tab_scan).classes("w-full px-4 pt-4 pb-12"):
         # Scan 
         with ui.tab_panel(tab_scan):
             with ui.row().classes("w-full gap-3 items-stretch"):
@@ -713,6 +800,18 @@ def build_ui() -> None:
                             password_toggle_button=True,
                             placeholder="or ZOOMEYE_API_KEY",
                         ).classes("w-full").props("outlined dense")
+                        github_token_in = ui.input(
+                            "GitHub token (--github-token)",
+                            password=True,
+                            password_toggle_button=True,
+                            placeholder="or GITHUB_TOKEN (code search)",
+                        ).classes("w-full").props("outlined dense")
+                        gitlab_token_in = ui.input(
+                            "GitLab token (--gitlab-token)",
+                            password=True,
+                            password_toggle_button=True,
+                            placeholder="or GITLAB_TOKEN",
+                        ).classes("w-full").props("outlined dense")
                         with ui.row().classes("w-full flex-wrap gap-4"):
                             skip_intel = ui.checkbox("Skip all intel (--skip-intel)")
                             skip_crtsh = ui.checkbox("Skip crt.sh (--skip-crtsh)")
@@ -730,6 +829,10 @@ def build_ui() -> None:
                                 censys_secret_in.set_value(saved["censys_secret"])
                             if saved.get("zoomeye"):
                                 zoomeye_in.set_value(saved["zoomeye"])
+                            if saved.get("github"):
+                                github_token_in.set_value(saved["github"])
+                            if saved.get("gitlab"):
+                                gitlab_token_in.set_value(saved["gitlab"])
                             if saved.get("notify_webhook"):
                                 webhook_in.set_value(saved["notify_webhook"])
                             n = sum(1 for ok in rp.saved_keys_status().values() if ok)
@@ -747,6 +850,8 @@ def build_ui() -> None:
                                     "censys_id": (censys_id_in.value or "").strip(),
                                     "censys_secret": (censys_secret_in.value or "").strip(),
                                     "zoomeye": (zoomeye_in.value or "").strip(),
+                                    "github": (github_token_in.value or "").strip(),
+                                    "gitlab": (gitlab_token_in.value or "").strip(),
                                     "notify_webhook": (webhook_in.value or "").strip(),
                                 }
                             )
@@ -792,6 +897,10 @@ def build_ui() -> None:
                             skip_public_apis = ui.checkbox("Skip public-apis catalog (--skip-public-apis)")
                             skip_secrets_db = ui.checkbox("Skip secrets-patterns-db (--skip-secrets-db)")
                             skip_jsleak = ui.checkbox("Skip jsleak (--skip-jsleak)")
+                            skip_code_search = ui.checkbox("Skip GitHub/GitLab code search (--skip-code-search)")
+                            skip_buckets = ui.checkbox("Skip cloud bucket probe (--skip-buckets)")
+                            skip_openapi = ui.checkbox("Skip OpenAPI/Postman parse (--skip-openapi)")
+                            ci_on = ui.checkbox("CI / local-repo mode (--ci)")
                             repo_shallow = ui.checkbox("Shallow git clone (--repo-shallow)")
                         with ui.row().classes("w-full gap-4"):
                             conc_in = ui.number(
@@ -807,6 +916,8 @@ def build_ui() -> None:
                         proxy_auth_in = ui.input("Proxy auth (--proxy-auth)", password=True).classes("w-full").props("outlined dense")
                         burp_in = ui.input("Burp XML (--burp-import)").classes("w-full").props("outlined dense")
                         repo_in = ui.input("Git repo to clone (--repo)").classes("w-full").props("outlined dense")
+                        apk_in = ui.textarea("APK/IPA paths (--apk/--ipa), one per line").classes("w-full").props("outlined dense")
+                        github_org_in = ui.input("GitHub org for code search (--github-org)").classes("w-full").props("outlined dense")
                         creds_in = ui.input("Scan credentials YAML (--credentials)").classes("w-full").props("outlined dense")
                         with ui.row().classes("w-full gap-2"):
                             queue_in = ui.input("Queue domain").classes("flex-1").props("outlined dense")
@@ -921,11 +1032,28 @@ def build_ui() -> None:
                             "skip_public_apis": bool(skip_public_apis.value),
                             "skip_secrets_db": bool(skip_secrets_db.value),
                             "skip_jsleak": bool(skip_jsleak.value),
+                            "skip_code_search": bool(skip_code_search.value),
+                            "skip_buckets": bool(skip_buckets.value),
+                            "skip_openapi": bool(skip_openapi.value),
+                            "ci": bool(ci_on.value),
+                            "github_token": (github_token_in.value or "").strip() or None,
+                            "gitlab_token": (gitlab_token_in.value or "").strip() or None,
+                            "github_org": (github_org_in.value or "").strip() or None,
                             "repo_shallow": bool(repo_shallow.value),
                             "proxy": (proxy_in.value or "").strip() or None,
                             "proxy_auth": (proxy_auth_in.value or "").strip() or None,
                             "burp_import": (burp_in.value or "").strip() or None,
                             "repo": (repo_in.value or "").strip() or None,
+                            "apk": [
+                                ln.strip()
+                                for ln in (apk_in.value or "").splitlines()
+                                if ln.strip() and ln.strip().lower().endswith((".apk", ".xapk"))
+                            ],
+                            "ipa": [
+                                ln.strip()
+                                for ln in (apk_in.value or "").splitlines()
+                                if ln.strip().lower().endswith(".ipa")
+                            ],
                             "credentials": (creds_in.value or "").strip() or None,
                             "header": [
                                 ln.strip()
@@ -1332,7 +1460,7 @@ def build_ui() -> None:
                                     else "text-slate-300"
                                 )
                             )
-                            with ui.card().classes("w-full bg-slate-900/60 border border-slate-800"):
+                            with ui.card().classes("w-full rp-subcard"):
                                 with ui.row().classes(
                                     "w-full justify-between items-start gap-2"
                                 ):
@@ -1842,7 +1970,7 @@ def build_ui() -> None:
                             )
                             return
                         for item in reversed(STATE.history):
-                            with ui.card().classes("w-full bg-slate-900/50"):
+                            with ui.card().classes("w-full rp-subcard"):
                                 ui.label(
                                     f"{item.get('domain')} · exit {item.get('exit_code')} · "
                                     f"{item.get('started_at')} → {item.get('finished_at')}"

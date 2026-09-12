@@ -87,6 +87,10 @@ def test_pipeline_subprocess():
                     "no_trufflehog": True,
                     "skip_gitleaks": True,
                     "skip_jsleak": True,
+                    "skip_code_search": True,
+                    "skip_buckets": True,
+                    "skip_openapi": True,
+                    "skip_store": True,
                     "no_validate": True,
                     "no_fail_on_valid": True,
                 }
@@ -195,8 +199,11 @@ def test_gui_module_compiles_and_helpers():
     assert "--skip-gitleaks" in src and "--spray" in src
     assert "--skip-public-apis" in src
     assert "--skip-secrets-db" in src and "--skip-jsleak" in src
+    assert "--skip-code-search" in src and "--skip-buckets" in src
+    assert "--ci" in src and "--github-token" in src
     assert "gitleaks.json" in src and "spray_urls.txt" in src
     assert "jsleak.txt" in src
+    assert "buckets.json" in src
     print("[ok] reconpipegui import + form validation helpers")
 
 
