@@ -204,6 +204,27 @@ def test_gui_module_compiles_and_helpers():
     assert "Rescan" in src and "--resume" in src
     assert "FINDINGS_RENDER_CAP" in src
     assert "Showing first" in src
+    assert "rp-usage" in src and "ResourceMonitor" in src
+    assert mod.fmt_bytes(512) == "512 B"
+    assert mod.fmt_bytes(2048) == "2.0 KB"
+    assert mod.fmt_bytes(5 * 1024 * 1024) == "5.0 MB"
+    assert mod.fmt_bytes(12 * 1024 * 1024) == "12 MB"
+    fake_stat = "1234 (httpx) S 1 1 1 0 -1 0 0 0 0 0 10 20 0 0"
+    assert mod.parse_proc_stat_cpu_ticks(fake_stat) == 30
+    rss = mod.parse_status_vmrss_bytes("Name: python\nVmRSS:\t   4096 kB\n")
+    assert rss == 4096 * 1024
+    total, avail = mod.parse_meminfo_bytes(
+        "MemTotal:        16384000 kB\nMemAvailable:     8192000 kB\n"
+    )
+    assert total == 16384000 * 1024 and avail == 8192000 * 1024
+    html = mod.usage_html(
+        {"cpu_pct": 12.4, "rss_bytes": 8 * 1024 * 1024, "host_total": 16 * 1024 * 1024, "pids": 3}
+    )
+    assert "CPU" in html and "RAM" in html and "12%" in html
+    mon = mod.ResourceMonitor()
+    snap = mon.snapshot()
+    assert "cpu_pct" in snap and "rss_bytes" in snap and snap["rss_bytes"] >= 0
+    assert snap["pids"] >= 1
     assert "gitleaks.json" in src and "spray_urls.txt" in src
     assert "jsleak.txt" in src
     assert "buckets.json" in src

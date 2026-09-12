@@ -431,6 +431,7 @@ The window covers the same options as the CLI: domain, skips, concurrency, intel
 Also included:
 
 - Tool preflight (what is on `PATH`)
+- Live CPU / RAM meters (header + footer) for the GUI and the scan process tree
 - Live console and stage tracker (`reconpipe.py` as a cancellable subprocess)
 - Domain queue, saved targets, and **Rescan** (reuses URL list + output folder)
 - History of past scans (persisted in `~/.reconpipe/history.yaml`) with Open / Rescan

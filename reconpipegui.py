@@ -15,7 +15,7 @@ import threading
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 import asyncio
 
 HERE = Path(__file__).resolve().parent
@@ -172,6 +172,343 @@ def default_output_dir(domain: str) -> Path:
     env = (os.environ.get("RECONPIPE_WORKDIR") or "").strip()
     root = Path(env) if env else HERE
     return root / f"recon_{safe}"
+
+
+def fmt_bytes(n: int) -> str:
+    """Human size for the CPU/RAM meter (1024-based)."""
+    n = max(0, int(n or 0))
+    for unit, size in (("GB", 1024 ** 3), ("MB", 1024 ** 2), ("KB", 1024)):
+        if n >= size:
+            val = n / size
+            return f"{val:.1f} {unit}" if val < 10 else f"{val:.0f} {unit}"
+    return f"{n} B"
+
+
+def parse_proc_stat_cpu_ticks(line: str) -> int:
+    """utime+stime from a /proc/<pid>/stat line (field 14+15)."""
+    rpar = (line or "").rfind(")")
+    if rpar < 0:
+        return 0
+    fields = line[rpar + 1 :].split()
+    if len(fields) < 13:
+        return 0
+    try:
+        return int(fields[11]) + int(fields[12])
+    except (TypeError, ValueError):
+        return 0
+
+
+def parse_status_vmrss_bytes(text: str) -> int:
+    for raw in (text or "").splitlines():
+        if raw.startswith("VmRSS:"):
+            parts = raw.split()
+            if len(parts) >= 2:
+                try:
+                    return int(parts[1]) * 1024
+                except ValueError:
+                    return 0
+    return 0
+
+
+def parse_meminfo_bytes(text: str) -> tuple:
+    """Return (MemTotal, MemAvailable) in bytes from /proc/meminfo."""
+    total = 0
+    avail = 0
+    for raw in (text or "").splitlines():
+        if raw.startswith("MemTotal:"):
+            parts = raw.split()
+            if len(parts) >= 2:
+                total = int(parts[1]) * 1024
+        elif raw.startswith("MemAvailable:"):
+            parts = raw.split()
+            if len(parts) >= 2:
+                avail = int(parts[1]) * 1024
+    return total, avail
+
+
+def usage_html(snap: Dict[str, Any]) -> str:
+    cpu = float(snap.get("cpu_pct") or 0.0)
+    rss = int(snap.get("rss_bytes") or 0)
+    total = int(snap.get("host_total") or 0)
+    cpu_w = max(0, min(100, int(round(cpu))))
+    ram_w = 0
+    if total > 0:
+        ram_w = max(0, min(100, int(round(rss / total * 100.0))))
+    ram = fmt_bytes(rss)
+    if total:
+        ram = f"{ram} / {fmt_bytes(total)}"
+    cpu_cls = "hot" if cpu >= 85 else "ok"
+    ram_cls = "hot" if ram_w >= 85 else "ok"
+    pids = int(snap.get("pids") or 0)
+    return (
+        f'<div class="rp-usage" title="ReconPipe GUI + scan tools ({pids} processes)">'
+        f'<div class="rp-usage-item"><span class="k">CPU</span>'
+        f'<span class="bar"><span class="{cpu_cls}" style="width:{cpu_w}%"></span></span>'
+        f'<span class="v">{cpu:.0f}%</span></div>'
+        f'<div class="rp-usage-item"><span class="k">RAM</span>'
+        f'<span class="bar"><span class="{ram_cls}" style="width:{ram_w}%"></span></span>'
+        f'<span class="v">{ram}</span></div></div>'
+    )
+
+
+class ResourceMonitor:
+    """CPU % of the machine and RSS for this GUI + the scan process tree."""
+
+    _PID_CAP = 400
+
+    def __init__(self) -> None:
+        self._prev_t = 0.0
+        self._prev_cpu = 0.0
+        self._ncpu = max(1, os.cpu_count() or 1)
+        self._clk = 100.0
+        try:
+            self._clk = float(os.sysconf("SC_CLK_TCK")) or 100.0
+        except (AttributeError, ValueError, OSError):
+            pass
+        self._linux = Path("/proc/self/stat").is_file()
+        self._win = os.name == "nt"
+
+    def snapshot(self, extra_pid: Optional[int] = None) -> Dict[str, Any]:
+        pids = self._tree_pids(os.getpid())
+        if extra_pid:
+            try:
+                pids.update(self._tree_pids(int(extra_pid)))
+            except (TypeError, ValueError):
+                pass
+        cpu_sec = 0.0
+        rss = 0
+        for pid in pids:
+            cpu_sec += self._cpu_seconds(pid)
+            rss += self._rss_bytes(pid)
+        now = time.monotonic()
+        cpu_pct = 0.0
+        if self._prev_t and now > self._prev_t:
+            dcpu = max(0.0, cpu_sec - self._prev_cpu)
+            cpu_pct = (dcpu / (now - self._prev_t)) / self._ncpu * 100.0
+            cpu_pct = max(0.0, min(100.0, cpu_pct))
+        self._prev_t = now
+        self._prev_cpu = cpu_sec
+        host_total, host_avail = self._host_ram()
+        return {
+            "cpu_pct": cpu_pct,
+            "rss_bytes": rss,
+            "host_total": host_total,
+            "host_avail": host_avail,
+            "pids": len(pids),
+        }
+
+    def _tree_pids(self, root: int) -> Set[int]:
+        found: Set[int] = set()
+        if root <= 0:
+            return found
+        stack = [root]
+        while stack and len(found) < self._PID_CAP:
+            pid = stack.pop()
+            if pid in found:
+                continue
+            found.add(pid)
+            for child in self._children(pid):
+                if child not in found:
+                    stack.append(child)
+        return found
+
+    def _children(self, pid: int) -> List[int]:
+        if self._linux:
+            return self._linux_children(pid)
+        if self._win:
+            return self._win_children(pid)
+        return []
+
+    def _linux_children(self, pid: int) -> List[int]:
+        kids: List[int] = []
+        task = Path(f"/proc/{pid}/task")
+        try:
+            for tid_dir in task.iterdir():
+                try:
+                    text = (tid_dir / "children").read_text(encoding="ascii", errors="ignore")
+                except OSError:
+                    continue
+                for tok in text.split():
+                    try:
+                        kids.append(int(tok))
+                    except ValueError:
+                        pass
+        except OSError:
+            pass
+        return kids
+
+    def _win_children(self, pid: int) -> List[int]:
+        try:
+            import ctypes
+            from ctypes import wintypes
+        except Exception:
+            return []
+        TH32CS_SNAPPROCESS = 0x00000002
+
+        class PROCESSENTRY32W(ctypes.Structure):
+            _fields_ = [
+                ("dwSize", wintypes.DWORD),
+                ("cntUsage", wintypes.DWORD),
+                ("th32ProcessID", wintypes.DWORD),
+                ("th32DefaultHeapID", ctypes.POINTER(ctypes.c_ulong)),
+                ("th32ModuleID", wintypes.DWORD),
+                ("cntThreads", wintypes.DWORD),
+                ("th32ParentProcessID", wintypes.DWORD),
+                ("pcPriClassBase", ctypes.c_long),
+                ("dwFlags", wintypes.DWORD),
+                ("szExeFile", wintypes.WCHAR * 260),
+            ]
+
+        k32 = ctypes.windll.kernel32
+        snap = k32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+        if snap == -1 or snap == 0xFFFFFFFF:
+            return []
+        kids: List[int] = []
+        try:
+            entry = PROCESSENTRY32W()
+            entry.dwSize = ctypes.sizeof(PROCESSENTRY32W)
+            if not k32.Process32FirstW(snap, ctypes.byref(entry)):
+                return []
+            while True:
+                if int(entry.th32ParentProcessID) == int(pid):
+                    kids.append(int(entry.th32ProcessID))
+                if not k32.Process32NextW(snap, ctypes.byref(entry)):
+                    break
+        finally:
+            k32.CloseHandle(snap)
+        return kids
+
+    def _cpu_seconds(self, pid: int) -> float:
+        if self._linux:
+            try:
+                line = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                return 0.0
+            return parse_proc_stat_cpu_ticks(line) / self._clk
+        if self._win:
+            return self._win_cpu_seconds(pid)
+        return 0.0
+
+    def _rss_bytes(self, pid: int) -> int:
+        if self._linux:
+            try:
+                text = Path(f"/proc/{pid}/status").read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                return 0
+            return parse_status_vmrss_bytes(text)
+        if self._win:
+            return self._win_rss_bytes(pid)
+        return 0
+
+    def _host_ram(self) -> tuple:
+        if self._linux:
+            try:
+                text = Path("/proc/meminfo").read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                return 0, 0
+            return parse_meminfo_bytes(text)
+        if self._win:
+            return self._win_host_ram()
+        return 0, 0
+
+    def _win_cpu_seconds(self, pid: int) -> float:
+        try:
+            import ctypes
+            from ctypes import wintypes
+        except Exception:
+            return 0.0
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        k32 = ctypes.windll.kernel32
+        handle = k32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not handle:
+            return 0.0
+        create = wintypes.FILETIME()
+        exit_t = wintypes.FILETIME()
+        kernel = wintypes.FILETIME()
+        user = wintypes.FILETIME()
+        try:
+            if not k32.GetProcessTimes(
+                handle,
+                ctypes.byref(create),
+                ctypes.byref(exit_t),
+                ctypes.byref(kernel),
+                ctypes.byref(user),
+            ):
+                return 0.0
+            def _sec(ft: Any) -> float:
+                val = (int(ft.dwHighDateTime) << 32) | int(ft.dwLowDateTime)
+                return val / 10_000_000.0
+            return _sec(kernel) + _sec(user)
+        finally:
+            k32.CloseHandle(handle)
+
+    def _win_rss_bytes(self, pid: int) -> int:
+        try:
+            import ctypes
+            from ctypes import wintypes
+        except Exception:
+            return 0
+        PROCESS_QUERY_INFORMATION = 0x0400
+        PROCESS_VM_READ = 0x0010
+        k32 = ctypes.windll.kernel32
+
+        class PROCESS_MEMORY_COUNTERS_EX(ctypes.Structure):
+            _fields_ = [
+                ("cb", wintypes.DWORD),
+                ("PageFaultCount", wintypes.DWORD),
+                ("PeakWorkingSetSize", ctypes.c_size_t),
+                ("WorkingSetSize", ctypes.c_size_t),
+                ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+                ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+                ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                ("PagefileUsage", ctypes.c_size_t),
+                ("PeakPagefileUsage", ctypes.c_size_t),
+                ("PrivateUsage", ctypes.c_size_t),
+            ]
+
+        handle = k32.OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, False, pid)
+        if not handle:
+            handle = k32.OpenProcess(0x1000, False, pid)
+        if not handle:
+            return 0
+        counters = PROCESS_MEMORY_COUNTERS_EX()
+        counters.cb = ctypes.sizeof(PROCESS_MEMORY_COUNTERS_EX)
+        try:
+            psapi = ctypes.windll.psapi
+            if psapi.GetProcessMemoryInfo(handle, ctypes.byref(counters), counters.cb):
+                return int(counters.WorkingSetSize)
+        except Exception:
+            return 0
+        finally:
+            k32.CloseHandle(handle)
+        return 0
+
+    def _win_host_ram(self) -> tuple:
+        try:
+            import ctypes
+            from ctypes import wintypes
+        except Exception:
+            return 0, 0
+
+        class MEMORYSTATUSEX(ctypes.Structure):
+            _fields_ = [
+                ("dwLength", wintypes.DWORD),
+                ("dwMemoryLoad", wintypes.DWORD),
+                ("ullTotalPhys", ctypes.c_uint64),
+                ("ullAvailPhys", ctypes.c_uint64),
+                ("ullTotalPageFile", ctypes.c_uint64),
+                ("ullAvailPageFile", ctypes.c_uint64),
+                ("ullTotalVirtual", ctypes.c_uint64),
+                ("ullAvailVirtual", ctypes.c_uint64),
+                ("ullAvailExtendedVirtual", ctypes.c_uint64),
+            ]
+
+        info = MEMORYSTATUSEX()
+        info.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
+        if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(info)):
+            return 0, 0
+        return int(info.ullTotalPhys), int(info.ullAvailPhys)
 
 
 def guess_key_types(key: str) -> List[str]:
@@ -547,7 +884,7 @@ def build_ui() -> None:
           .rp-status-dot.dead { background: var(--rp-red); }
           @keyframes rp-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.35; } }
           .rp-stat-grid {
-            display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-top: 12px;
+            display: grid; grid-template-columns: repeat(auto-fit, minmax(88px, 1fr)); gap: 10px; margin-top: 12px;
           }
           .rp-stat {
             background: var(--rp-panel-2); border: 1px solid var(--rp-border-soft);
@@ -583,6 +920,24 @@ def build_ui() -> None:
             font-family: Consolas, monospace; font-size: 10.5px; color: var(--rp-muted);
             border: 1px solid var(--rp-border); border-radius: 999px; padding: 2px 9px;
           }
+          .rp-usage {
+            display: flex; align-items: center; gap: 14px;
+            font-family: Consolas, ui-monospace, monospace;
+          }
+          .rp-usage-item { display: flex; align-items: center; gap: 7px; }
+          .rp-usage .k {
+            font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase;
+            color: var(--rp-muted); font-weight: 700;
+          }
+          .rp-usage .v {
+            font-size: 11.5px; color: var(--rp-text-strong); white-space: nowrap;
+          }
+          .rp-usage .bar {
+            width: 52px; height: 6px; border-radius: 99px;
+            background: var(--rp-border); overflow: hidden; display: inline-block;
+          }
+          .rp-usage .bar > span { display: block; height: 100%; width: 0; background: var(--rp-orange); }
+          .rp-usage .bar > span.hot { background: var(--rp-red); }
           .rp-subcard {
             background: var(--rp-panel-2) !important;
             border: 1px solid var(--rp-border-soft) !important;
@@ -595,12 +950,15 @@ def build_ui() -> None:
         """
     )
 
-    with ui.header().classes("items-center justify-between px-4"):
+    with ui.header().classes("items-center justify-between px-4 no-wrap"):
         with ui.row().classes("items-center no-wrap"):
             ui.element("span").classes("rp-brand-mark")
             ui.label("ReconPipe").classes("rp-title")
-            ui.label("Host intel · Key hunter").classes("rp-header-meta")
         with ui.row().classes("items-center gap-3"):
+            usage_html_el = ui.html(
+                usage_html({"cpu_pct": 0, "rss_bytes": 0, "host_total": 0, "pids": 1}),
+                sanitize=False,
+            )
             def toggle_dark() -> None:
                 STATE.dark_on = not STATE.dark_on
                 if STATE.dark_on:
@@ -2069,20 +2427,55 @@ def build_ui() -> None:
                 render_history()
 
     footer_status = ui.label("IDLE").classes("font-mono")
+    footer_usage = ui.label("CPU —  ·  RAM —").classes("font-mono")
     with ui.footer().classes("rp-footer items-center justify-between px-4"):
         with ui.row().classes("items-center gap-4"):
             footer_status
             footer_target = ui.label("").classes("font-mono")
+            footer_usage
         footer_path = ui.label("").classes("font-mono truncate")
 
     ui_cache: Dict[str, Any] = {}
     last_stats_at = 0.0
+    usage_monitor = ResourceMonitor()
+    last_usage_html = ""
+    last_usage_snap: Dict[str, Any] = {}
 
     def _text(el: Any, key: str, value: str) -> None:
         if ui_cache.get(key) == value:
             return
         ui_cache[key] = value
         el.set_text(value)
+
+    def update_usage() -> None:
+        nonlocal last_usage_html
+        extra = None
+        proc = STATE.runner.proc
+        if proc is not None:
+            try:
+                if proc.poll() is None:
+                    extra = proc.pid
+            except Exception:
+                extra = None
+        try:
+            snap = usage_monitor.snapshot(extra_pid=extra)
+        except Exception:
+            return
+        last_usage_snap.clear()
+        last_usage_snap.update(snap)
+        html = usage_html(snap)
+        if html != last_usage_html:
+            last_usage_html = html
+            try:
+                usage_html_el.set_content(html)
+            except Exception:
+                pass
+        cpu = float(snap.get("cpu_pct") or 0.0)
+        ram = fmt_bytes(int(snap.get("rss_bytes") or 0))
+        total = int(snap.get("host_total") or 0)
+        if total:
+            ram = f"{ram} / {fmt_bytes(total)}"
+        _text(footer_usage, "usage", f"CPU {cpu:.0f}%  ·  RAM {ram}")
 
     def update_stats(*, force: bool = False) -> None:
         nonlocal last_stats_at
@@ -2159,6 +2552,10 @@ def build_ui() -> None:
             f"<div class='rp-stat'><div class='k'>Live</div><div class='v'>{live}</div></div>"
             f"<div class='rp-stat'><div class='k'>URLs</div><div class='v'>{urls}</div></div>"
             f"<div class='rp-stat'><div class='k'>Keys</div><div class='v'>{findings_n}</div></div>"
+            f"<div class='rp-stat'><div class='k'>CPU</div><div class='v'>"
+            f"{float(last_usage_snap.get('cpu_pct') or 0):.0f}%</div></div>"
+            f"<div class='rp-stat'><div class='k'>RAM</div><div class='v'>"
+            f"{fmt_bytes(int(last_usage_snap.get('rss_bytes') or 0))}</div></div>"
             "</div>"
         )
         if ui_cache.get("stats") != html:
@@ -2182,6 +2579,10 @@ def build_ui() -> None:
                 lbl.style("color: #8a8a8a")
 
     def on_tick() -> None:
+        try:
+            update_usage()
+        except Exception:
+            pass
         lines = STATE.runner.drain_logs()
         if lines:
             STATE.log_lines.extend(lines)
@@ -2249,6 +2650,10 @@ def build_ui() -> None:
                     pass
             update_stats(force=True)
 
+    try:
+        update_usage()
+    except Exception:
+        pass
     ui.timer(1.0, on_tick)
 
 
