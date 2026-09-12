@@ -7017,7 +7017,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         if not getattr(args, "skip_gitleaks", False) and not tools_status.get("gitleaks"):
             log(
                 "gitleaks not found — skipping "
-                "(install: go install github.com/gitleaks/gitleaks/v8@latest)",
+                "(install: go install github.com/zricethezav/gitleaks/v8@latest)",
                 "warn",
             )
 

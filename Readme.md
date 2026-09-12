@@ -39,10 +39,12 @@ Use this only on assets you own or have written permission to test. Validated ke
 
 ## Quick start
 
-**Docker (fastest if you already have Docker Desktop):** all core recon binaries are in the image, so you skip `install.sh`. First build takes a few minutes; every scan after that is just `docker compose run`.
+**Docker (fastest — no build, no `install.sh`):** grab `docker-compose.yml`, pull the pre-built image from GHCR, and scan.
 
 ```bash
-docker compose build
+mkdir reconpipe && cd reconpipe
+curl -O https://raw.githubusercontent.com/SystemWOWS/ReconPipe/main/docker-compose.yml
+docker compose pull
 docker compose run --rm reconpipe -d example.com
 docker compose run --rm reconpipe --rescan -d example.com
 docker compose --profile gui up gui    # http://127.0.0.1:8088
@@ -86,13 +88,27 @@ reconpipe-gui
 
 ## Docker
 
-Use this when you want a full tool PATH without running `install.sh` on the host. Docker Desktop on Windows works; run the commands from the `ReconPipe` folder.
+Full tool PATH without running `install.sh`. Docker Desktop on Windows works; run the commands from a folder that has `docker-compose.yml`.
+
+**Run the published image (recommended).** CI builds it on every push and publishes `ghcr.io/systemwows/reconpipe:latest`, so you only pull:
 
 ```bash
-docker compose build
+docker compose pull
 docker compose run --rm reconpipe -d example.com
 docker compose run --rm reconpipe --rescan -d example.com
 docker compose --profile gui up gui
+```
+
+Pin a version instead of `latest`:
+
+```bash
+RECONPIPE_IMAGE=ghcr.io/systemwows/reconpipe:v1.3 docker compose pull
+```
+
+**Build locally (for development).** When you are changing ReconPipe itself, build from the checkout instead of pulling:
+
+```bash
+docker compose build
 ```
 
 | Path on host     | Path in container        | What it is                                      |
@@ -101,6 +117,8 @@ docker compose --profile gui up gui
 | `docker-home/`   | `/root/.reconpipe`       | `keys.yaml`, `targets.yaml`, `history.yaml`     |
 
 Pass API keys as env vars (`CHAOS_KEY`, `GITHUB_TOKEN`, …) or save them from the GUI into `docker-home/keys.yaml`.
+
+The GHCR package must be **public** for anonymous `docker compose pull`. If it is private, run `docker login ghcr.io` first with a token that can read packages. Publishing the image redistributes the third-party recon binaries under their own licenses.
 
 `--rescan` reuses the saved URL list and output directory for that domain, then `--resume` (skip files already downloaded). In the GUI: **Saved targets → Rescan**, or **History → Rescan**.
 

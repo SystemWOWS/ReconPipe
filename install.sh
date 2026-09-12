@@ -588,11 +588,11 @@ install_gitleaks() {
     fi
     log "Installing Gitleaks..."
     if try_pkg_tool gitleaks gitleaks \
-        || install_go_tool "gitleaks" "github.com/gitleaks/gitleaks/v8@latest" \
-        || install_go_tool "gitleaks" "github.com/zricethezav/gitleaks/v8@latest"; then
+        || install_go_tool "gitleaks" "github.com/zricethezav/gitleaks/v8@latest" \
+        || install_go_tool "gitleaks" "github.com/gitleaks/gitleaks/v8@latest"; then
         success "Gitleaks installed"
     else
-        warn "Gitleaks is optional. Manual: go install github.com/gitleaks/gitleaks/v8@latest"
+        warn "Gitleaks is optional. Manual: go install github.com/zricethezav/gitleaks/v8@latest"
     fi
 }
 

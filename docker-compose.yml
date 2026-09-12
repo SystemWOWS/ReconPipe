@@ -1,19 +1,23 @@
 # ReconPipe in Docker — tools are baked into the image.
 #
-# First time:
-#   docker compose build
-#
-# Scan (results in ./scans, keys/history in ./docker-home):
+# Run (no build; pulls the published image from GHCR):
+#   docker compose pull
 #   docker compose run --rm reconpipe -d example.com
 #   docker compose run --rm reconpipe --rescan -d example.com
 #
 # GUI at http://127.0.0.1:8088 :
 #   docker compose --profile gui up gui
+#
+# Develop (build the image locally from this checkout instead of pulling):
+#   docker compose build
+#
+# Pin a version or use your own image:
+#   RECONPIPE_IMAGE=ghcr.io/systemwows/reconpipe:v1.3 docker compose pull
 
 services:
   reconpipe:
+    image: ${RECONPIPE_IMAGE:-ghcr.io/systemwows/reconpipe:latest}
     build: .
-    image: reconpipe:local
     working_dir: /work
     volumes:
       - ./scans:/work
@@ -35,7 +39,7 @@ services:
 
   gui:
     profiles: ["gui"]
-    image: reconpipe:local
+    image: ${RECONPIPE_IMAGE:-ghcr.io/systemwows/reconpipe:latest}
     build: .
     working_dir: /work
     ports:

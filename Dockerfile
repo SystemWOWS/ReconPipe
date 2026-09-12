@@ -5,23 +5,27 @@
 #   docker compose run --rm reconpipe -d example.com
 #   docker compose --profile gui up gui
 
-FROM golang:1.22-bookworm AS tools
+FROM golang:1.26-bookworm AS tools
 
 ENV CGO_ENABLED=0 \
     GOPROXY=https://proxy.golang.org,direct \
+    GOTOOLCHAIN=auto \
     GOBIN=/out/bin
 RUN mkdir -p /out/bin
 
-# Core Go tools (same set install.sh treats as required, minus waymore which is pip).
-RUN go install github.com/projectdiscovery/chaos-client/cmd/chaos@latest \
- && go install github.com/projectdiscovery/httpx/cmd/httpx@latest \
- && go install github.com/projectdiscovery/katana/cmd/katana@latest \
- && go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest \
- && go install github.com/projectdiscovery/dnsx/cmd/dnsx@latest \
- && go install github.com/lc/gau/v2/cmd/gau@latest \
- && go install github.com/jaeles-project/gospider@latest \
- && go install github.com/tomnomnom/waybackurls@latest \
- && go install github.com/gitleaks/gitleaks/v8@latest
+# One RUN per binary so a later failure does not rebuild tools that already compiled.
+# Current ProjectDiscovery httpx needs Go >= 1.26 (golang:1.22 fails at @latest).
+RUN go install github.com/projectdiscovery/chaos-client/cmd/chaos@latest
+RUN go install github.com/projectdiscovery/httpx/cmd/httpx@latest
+RUN go install github.com/projectdiscovery/katana/cmd/katana@latest
+RUN go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
+RUN go install github.com/projectdiscovery/dnsx/cmd/dnsx@latest
+RUN go install github.com/lc/gau/v2/cmd/gau@latest
+RUN go install github.com/jaeles-project/gospider@latest
+RUN go install github.com/tomnomnom/waybackurls@latest
+# go.mod still declares zricethezav/... even though the GitHub repo is gitleaks/gitleaks.
+RUN go install github.com/zricethezav/gitleaks/v8@latest \
+ || go install github.com/gitleaks/gitleaks/v8@latest
 
 # Optional extras — image still builds if one of these repos moves.
 RUN go install github.com/byt3hx/jsleak@latest || go install github.com/channyein1337/jsleak@latest || true
