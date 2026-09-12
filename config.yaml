@@ -37,7 +37,7 @@ patterns:
   discord_webhook: https://discord(?:app)?\.com/api/webhooks/[0-9]+/[a-zA-Z0-9_-]+
   telegram_bot: '[0-9]{8,10}:[a-zA-Z0-9_-]{35}'
   mapbox_token: pk\.[A-Za-z0-9_-]{20,}
-  generic_secret: (?i)(secret|token|password|passwd|api_key|apikey|access_key)['\"]?\s*[:=]\s*['\"]([a-zA-Z0-9!@#$%^&*\-_]{16,})['\"]
+  generic_secret: (?i)(secret|token|password|passwd|api_key|apikey|access_key|x-api-key|appid|app_id)['\"]?\s*[:=]\s*['\"]([a-zA-Z0-9!@#$%^&*\-_]{16,})['\"]
   cloudflare_api: (?i)(?:cfpat-[A-Za-z0-9_-]{20,}|(?:cloudflare|cf[_-]?api[_-]?(?:token|key))['\" \t:=]{1,12}([A-Za-z0-9_-]{37,50}))
   azure_sas: sv=\d{4}-\d{2}-\d{2}[^\s"']{0,500}sig=[A-Za-z0-9%+/=]{10,}
   huggingface_token: hf_[A-Za-z0-9]{34,}
@@ -208,6 +208,7 @@ confidence:
   telegram_bot: 88
   mapbox_token: 82
   generic_secret: 35
+  public_api_key: 58
   cloudflare_api: 88
   azure_sas: 90
   huggingface_token: 92
@@ -1765,6 +1766,7 @@ severity:
   private_key_pem: critical
   stripe_live: critical
   hashicorp_vault: critical
+  public_api_key: medium
 revocation:
   vercel_token: https://vercel.com/account/tokens
   netlify_pat: https://app.netlify.com/user/applications

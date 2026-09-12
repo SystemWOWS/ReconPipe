@@ -5,12 +5,14 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 import base64 as b64
+import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -228,22 +230,52 @@ class Wave2PipelineTests(unittest.TestCase):
                 "--burp-import", "burp.xml",
                 "--header", "Cookie: x=1",
                 "--resume-from", "httpx",
+                "--skip-wayback-bodies",
+                "--skip-sensitive-paths",
+                "--repo-shallow",
+                "--skip-gitleaks",
+                "--spray",
+                "--skip-public-apis",
+                "--skip-secrets-db",
+                "--skip-jsleak",
             ]
         )
         self.assertTrue(args.polite)
         self.assertEqual(args.proxy, "http://127.0.0.1:8080")
         self.assertTrue(args.nuclei)
+        self.assertTrue(args.skip_wayback_bodies)
+        self.assertTrue(args.skip_sensitive_paths)
+        self.assertTrue(args.repo_shallow)
+        self.assertTrue(args.skip_gitleaks)
+        self.assertTrue(args.spray)
+        self.assertTrue(args.skip_public_apis)
+        self.assertTrue(args.skip_secrets_db)
+        self.assertTrue(args.skip_jsleak)
         argv = rp.argv_from_options(
             {
                 "domain": "example.com",
                 "polite": True,
                 "proxy": "http://127.0.0.1:8080",
                 "skip_amass": True,
+                "skip_wayback_bodies": True,
+                "repo_shallow": True,
+                "skip_gitleaks": True,
+                "spray": True,
+                "skip_public_apis": True,
+                "skip_secrets_db": True,
+                "skip_jsleak": True,
             }
         )
         self.assertIn("--polite", argv)
         self.assertIn("--proxy", argv)
         self.assertIn("--skip-amass", argv)
+        self.assertIn("--skip-wayback-bodies", argv)
+        self.assertIn("--repo-shallow", argv)
+        self.assertIn("--skip-gitleaks", argv)
+        self.assertIn("--spray", argv)
+        self.assertIn("--skip-public-apis", argv)
+        self.assertIn("--skip-secrets-db", argv)
+        self.assertIn("--skip-jsleak", argv)
 
     def test_reports_jsonld_nuclei_exec(self):
         findings = [
@@ -332,6 +364,410 @@ class Wave2PipelineTests(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertEqual(calls["n"], 2)
 
+    def test_wayback_cdx_and_id_url(self):
+        rows = [
+            ["timestamp", "original", "statuscode", "mimetype"],
+            ["20200101120000", "https://ex.com/old.js", "200", "application/javascript"],
+            ["20240101120000", "https://ex.com/old.js", "200", "application/javascript"],
+        ]
+        snap = rp.pick_cdx_snapshot(rows)
+        self.assertEqual(snap["timestamp"], "20240101120000")
+        self.assertIn("id_/", rp.wayback_id_url(snap["timestamp"], snap["original"]))
+        self.assertIn("20240101120000", rp.wayback_id_url(snap["timestamp"], snap["original"]))
+        self.assertIsNone(rp.pick_cdx_snapshot([]))
+        self.assertIsNone(rp.cdx_lookup("https://web.archive.org/web/1/https://ex.com"))
+
+    def test_annotate_wayback_findings(self):
+        rp.WAYBACK_BY_FILE.clear()
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "abc_app.js"
+            p.write_text("x", encoding="utf-8")
+            rp.remember_wayback_file(
+                p,
+                {
+                    "original": "https://ex.com/app.js",
+                    "archive_url": "https://web.archive.org/web/20240101120000id_/https://ex.com/app.js",
+                },
+            )
+            findings = [{"type": "openai_key", "source_url": str(p), "key": "sk"}]
+            rp.annotate_wayback_findings(findings)
+            self.assertTrue(findings[0]["from_wayback"])
+            self.assertEqual(findings[0]["source_url"], "https://ex.com/app.js")
+        rp.WAYBACK_BY_FILE.clear()
+
+    def test_sensitive_paths_and_html_shell(self):
+        urls = rp.sensitive_urls_for_hosts(["example.com", "https://api.example.com/app"], limit_hosts=5)
+        self.assertTrue(any(u.endswith("/.env") for u in urls))
+        self.assertTrue(any(u.endswith("/.git/config") for u in urls))
+        self.assertIn("https://example.com/.env", urls)
+        self.assertTrue(rp.looks_like_html_shell(b"<!DOCTYPE html><html>login</html>"))
+        self.assertFalse(rp.looks_like_html_shell(b"AWS_SECRET_ACCESS_KEY=abc"))
+        self.assertEqual(rp.origin_from_host("127.0.0.1:8080"), "http://127.0.0.1:8080")
+
+        class _Resp:
+            status = 200
+            headers = {"Content-Type": "text/plain"}
+
+            def read(self, n=0):
+                return b"SECRET_KEY=abcdefghijklmnop"
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        with patch("urllib.request.urlopen", return_value=_Resp()):
+            self.assertTrue(rp.probe_sensitive_url("https://ex.com/.env"))
+
+        class _Html:
+            status = 200
+            headers = {"Content-Type": "text/html"}
+
+            def read(self, n=0):
+                return b"<!DOCTYPE html><html><body>Not found</body></html>"
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        with patch("urllib.request.urlopen", return_value=_Html()):
+            self.assertFalse(rp.probe_sensitive_url("https://ex.com/.env"))
+
+    def test_git_clone_and_trufflehog_git_cmd(self):
+        cmd = rp.build_clone_cmd("https://github.com/x/y", "/tmp/y", shallow=False)
+        self.assertEqual(cmd[:2], ["git", "clone"])
+        self.assertNotIn("--depth", cmd)
+        self.assertIn("--depth", rp.build_clone_cmd("https://github.com/x/y", "/tmp/y", shallow=True))
+        git_cmd = rp.trufflehog_git_cmd("https://github.com/x/y")
+        self.assertEqual(git_cmd[:4], ["trufflehog", "--no-update", "--json", "git"])
+        self.assertTrue(rp.trufflehog_git_cmd("/tmp/repo")[-1].startswith("file:"))
+
+    def test_gitleaks_spray_and_env_helpers(self):
+        cmd = rp.build_gitleaks_cmd("/tmp/src", "/tmp/gitleaks.json", git=False)
+        self.assertEqual(cmd[:2], ["gitleaks", "dir"])
+        self.assertIn("--exit-code", cmd)
+        self.assertIn("0", cmd)
+        self.assertEqual(
+            rp.build_gitleaks_cmd("/tmp/repo", "/tmp/g.json", git=True)[:2],
+            ["gitleaks", "git"],
+        )
+        detect = rp.build_gitleaks_detect_cmd("/tmp/src", "/tmp/g.json", git=False)
+        self.assertIn("detect", detect)
+        self.assertIn("--no-git", detect)
+        self.assertNotIn(
+            "--no-git",
+            rp.build_gitleaks_detect_cmd("/tmp/repo", "/tmp/g.json", git=True),
+        )
+        spray = rp.build_spray_cmd("urls.txt", "dict.txt")
+        self.assertEqual(spray[:3], ["spray", "-l", "urls.txt"])
+        self.assertIn("--bak", spray)
+        self.assertIn("--common", spray)
+        self.assertIn("gitleaks", rp.PIPELINE_TOOLS)
+        self.assertIn("spray", rp.PIPELINE_TOOLS)
+        self.assertTrue(any(p.endswith(".env.staging") for p in rp.SENSITIVE_PATHS))
+        self.assertTrue(rp.leak_wordlist_path().is_file())
+        self.assertTrue(rp.DISCOVERY_KEEP_URL_RE.search("https://ex.com/.env.local"))
+        self.assertTrue(rp.DISCOVERY_KEEP_URL_RE.search("https://ex.com/backup.env"))
+        self.assertTrue(rp.DISCOVERY_KEEP_URL_RE.search("https://ex.com/app.js"))
+        env_hits = rp.env_like_urls(
+            [
+                "https://ex.com/app.js",
+                "https://ex.com/.env.production",
+                "https://cdn.ex.com/.env.bak",
+                "https://ex.com/.env.production",
+            ]
+        )
+        self.assertEqual(
+            env_hits,
+            ["https://ex.com/.env.production", "https://cdn.ex.com/.env.bak"],
+        )
+        extracted = rp.collect_http_urls_from_text(
+            "noise\nhttps://ex.com/.env\n[200] https://ex.com/backup.sql extra"
+        )
+        self.assertIn("https://ex.com/.env", extracted)
+        self.assertTrue(any(u.startswith("https://ex.com/backup.sql") for u in extracted))
+        self.assertEqual(rp.gitleaks_type_for("github-pat", "ghp_abc"), "github_pat")
+        self.assertEqual(
+            rp.gitleaks_type_for("github-pat", "github_pat_abc"),
+            "github_fine_pat",
+        )
+        self.assertEqual(rp.gitleaks_type_for("unknown-rule", "x"), "generic_secret")
+
+        with tempfile.TemporaryDirectory() as td:
+            d = Path(td)
+            (d / "waymore_out").mkdir()
+            (d / "waymore_out" / "ex.com.txt").write_text(
+                "https://ex.com/.env.staging\nhttps://ex.com/app.js\n",
+                encoding="utf-8",
+            )
+            pool = rp.harvest_discovery_url_pool(d, ["https://ex.com/app.js"])
+            self.assertIn("https://ex.com/.env.staging", pool)
+
+            pat = "ghp_" + "A" * 36
+            stripe = "sk_test_" + "b" * 24
+            report = d / "gitleaks.json"
+            report.write_text(
+                json.dumps(
+                    [
+                        {
+                            "RuleID": "github-pat",
+                            "Secret": pat,
+                            "File": "app.js",
+                            "Commit": "deadbeef",
+                            "Description": "GitHub PAT",
+                        },
+                        {
+                            "RuleID": "generic-api-key",
+                            "Secret": "xxxxxxxx",
+                            "File": "fake.js",
+                        },
+                        {
+                            "RuleID": "stripe-access-token",
+                            "Secret": stripe,
+                            "File": "pay.js",
+                        },
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            rows = rp.parse_gitleaks_report(report)
+            self.assertEqual(len(rows), 3)
+            findings = rp.findings_from_gitleaks(rows)
+            types = {item["type"] for item in findings}
+            self.assertIn("github_pat", types)
+            self.assertIn("stripe_test", types)
+            self.assertNotIn("generic_secret", types)
+            gh = next(item for item in findings if item["type"] == "github_pat")
+            self.assertEqual(gh["git_commit"], "deadbeef")
+            self.assertEqual(gh["scanner"], "gitleaks")
+            self.assertEqual(gh["key"], pat)
+
+            aws_id = "AKIABCDEFGHIJKLMNOPQ"
+            wrapped = d / "wrapped.json"
+            wrapped.write_text(
+                json.dumps(
+                    {
+                        "findings": [
+                            {
+                                "RuleID": "aws-access-token",
+                                "Secret": aws_id,
+                                "File": "aws.env",
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            aws_rows = rp.parse_gitleaks_report(wrapped)
+            aws_hits = rp.findings_from_gitleaks(aws_rows)
+            self.assertEqual(aws_hits[0]["type"], "aws_access_key")
+
+            jsonl = d / "jsonl.json"
+            jsonl.write_text(
+                json.dumps({"RuleID": "openai", "Secret": "sk-proj-" + "c" * 20, "File": "a"})
+                + "\n"
+                + json.dumps({"RuleID": "jwt", "Secret": "aaaaaaaa", "File": "b"})
+                + "\n",
+                encoding="utf-8",
+            )
+            jsonl_rows = rp.parse_gitleaks_report(jsonl)
+            self.assertEqual(len(jsonl_rows), 2)
+            openai_hits = rp.findings_from_gitleaks(jsonl_rows)
+            self.assertTrue(any(item["type"] == "openai_key" for item in openai_hits))
+            self.assertFalse(any(item["key"] == "aaaaaaaa" for item in openai_hits))
+
+            src = d / "src"
+            src.mkdir()
+            out = d / "from_run.json"
+            sample = [
+                {"RuleID": "github-pat", "Secret": "ghp_" + "C" * 36, "File": "x.js"}
+            ]
+
+            def fake_gitleaks(cmd, **kwargs):
+                self.assertEqual(cmd[0], "gitleaks")
+                out.write_text(json.dumps(sample), encoding="utf-8")
+                return 0, b""
+
+            with patch.object(rp, "run_cmd", side_effect=fake_gitleaks):
+                hits = rp.run_gitleaks_source(src, out, git=False)
+            self.assertEqual(len(hits), 1)
+            self.assertEqual(hits[0]["type"], "github_pat")
+            self.assertEqual(hits[0]["scanner"], "gitleaks")
+
+            def fake_spray(cmd, **kwargs):
+                self.assertEqual(cmd[0], "spray")
+                return 0, b"https://ex.com/.env.bak\n"
+
+            with patch.object(rp, "run_cmd", side_effect=fake_spray):
+                spray_urls = rp.run_spray_leak_probe(["ex.com"], d)
+            self.assertIn("https://ex.com/.env.bak", spray_urls)
+            self.assertTrue((d / "spray_urls.txt").is_file())
+            self.assertTrue((d / "spray_targets.txt").is_file())
+
+    def test_gitleaks_binary_scans_fixture(self):
+        if not shutil.which("gitleaks"):
+            self.skipTest("gitleaks not on PATH")
+        self.assertTrue(rp.check_tool("gitleaks"))
+        with tempfile.TemporaryDirectory() as td:
+            src = Path(td) / "src"
+            src.mkdir()
+            (src / "app.js").write_text(
+                'const t = "ghp_abcdefghijklmnopqrstuvwxyzABCD123456";\n',
+                encoding="utf-8",
+            )
+            report = Path(td) / "gitleaks.json"
+            hits = rp.run_gitleaks_source(src, report, git=False)
+            self.assertTrue(report.is_file() and report.stat().st_size > 0)
+            self.assertTrue(hits, "gitleaks should report the fixture GitHub PAT")
+            self.assertTrue(any(item["type"] == "github_pat" for item in hits))
+            self.assertTrue(any(item["scanner"] == "gitleaks" for item in hits))
+
+    def test_public_apis_catalog_helpers(self):
+        sample = (ROOT / "tests" / "fixtures" / "public_apis_sample.md").read_text(
+            encoding="utf-8"
+        )
+        entries = rp.parse_public_apis_markdown(sample)
+        names = {e["name"] for e in entries}
+        self.assertIn("OpenWeatherMap", names)
+        self.assertIn("Cats", names)
+        self.assertNotIn("Cat Facts", names)
+        self.assertNotIn("AniList", names)
+        owm = next(e for e in entries if e["name"] == "OpenWeatherMap")
+        self.assertIn("openweathermap.org", owm["hosts"])
+        cats = next(e for e in entries if e["name"] == "Cats")
+        self.assertTrue(any("thecatapi.com" in h for h in cats["hosts"]))
+        adopt = next(e for e in entries if e["name"] == "AdoptAPet")
+        self.assertTrue(adopt["hosts"])
+
+        with tempfile.TemporaryDirectory() as td:
+            catalog = Path(td) / "public_apis.json"
+            dest, n = rp.refresh_public_apis_catalog(path=catalog, markdown=sample)
+            self.assertEqual(dest, catalog)
+            self.assertEqual(n, len(entries))
+            idx = rp.load_public_apis_index(catalog)
+            hit = rp.lookup_public_api_host("api.openweathermap.org", idx)
+            self.assertIsNotNone(hit)
+            self.assertEqual(hit["name"], "OpenWeatherMap")
+            self.assertIsNone(rp.lookup_public_api_host("github.com", idx))
+            js = (
+                'fetch("https://api.openweathermap.org/data/2.5/weather'
+                '?appid=abcdef1234567890abcdef12")'
+            )
+            qhits = rp.public_api_query_secrets(js, idx)
+            self.assertTrue(qhits)
+            self.assertEqual(qhits[0]["type"], "public_api_key")
+            self.assertEqual(qhits[0]["likely_service"], "OpenWeatherMap")
+            self.assertEqual(qhits[0]["key"], "abcdef1234567890abcdef12")
+            nearby = 'const api_key = "AbCdEfGhIjKlMnOp1234"; // openweathermap.org'
+            hint = rp.match_public_api_hint(nearby, 16, 36, index=idx)
+            self.assertIsNotNone(hint)
+            self.assertEqual(hint["name"], "OpenWeatherMap")
+            generic = rp.public_api_query_secrets(
+                "https://api.internal.example/v1?api_key=ZzYyXxWwVvUuTtSs1234",
+                idx,
+            )
+            self.assertTrue(generic)
+            self.assertEqual(generic[0]["type"], "generic_secret")
+            skip_key = rp.public_api_query_secrets(
+                "https://cdn.example.com/app.js?key=not-a-real-vendor-token1",
+                idx,
+            )
+            self.assertFalse(skip_key)
+
+        bundled = rp.load_public_apis_index(force=True)
+        self.assertGreaterEqual(len(bundled.get("entries") or []), 20)
+        self.assertIsNotNone(rp.lookup_public_api_host("openweathermap.org", bundled))
+        old = rp.SCAN_PUBLIC_APIS
+        try:
+            rp.SCAN_PUBLIC_APIS = True
+            findings = rp.collect_public_api_query_findings(
+                'u="https://api.openweathermap.org/data/2.5/weather?appid=abcdef1234567890abcdef12"',
+                "https://ex.com/app.js",
+            )
+            self.assertTrue(any(f["type"] == "public_api_key" for f in findings))
+            rp.SCAN_PUBLIC_APIS = False
+            self.assertEqual(
+                rp.collect_public_api_query_findings(
+                    'u="https://api.openweathermap.org/data/2.5/weather?appid=abcdef1234567890abcdef12"',
+                    "https://ex.com/app.js",
+                ),
+                [],
+            )
+        finally:
+            rp.SCAN_PUBLIC_APIS = old
+            rp.reset_public_apis_index()
+
+    def test_secrets_db_and_jsleak_helpers(self):
+        sample = yaml.safe_load(
+            (ROOT / "tests" / "fixtures" / "secrets_patterns_sample.yml").read_text(
+                encoding="utf-8"
+            )
+        )
+        rows = rp.iter_secrets_pattern_entries(sample)
+        names = {row["name"] for row in rows}
+        self.assertIn("AWS AppSync GraphQL Key", names)
+        filtered = rp.filter_secrets_db_entries(rows, dict(rp.PATTERNS))
+        kept = {row["name"] for row in filtered}
+        self.assertIn("AWS AppSync GraphQL Key", kept)
+        self.assertIn("Adafruit IO Key", kept)
+        self.assertNotIn("AWS API Key", kept)
+        self.assertNotIn("AWS API Gateway", kept)
+        self.assertNotIn("Generic Password", kept)
+        self.assertNotIn("Medium Token", kept)
+        with_medium = rp.filter_secrets_db_entries(
+            rows, dict(rp.PATTERNS), include_medium=True
+        )
+        self.assertTrue(any(row["name"] == "Medium Token" for row in with_medium))
+
+        old_patterns = dict(rp.PATTERNS)
+        old_conf = dict(rp.CONFIDENCE)
+        try:
+            added = rp.apply_secrets_pattern_entries(filtered)
+            self.assertGreaterEqual(added, 1)
+            self.assertIn("spd_aws_appsync_graphql_key", rp.PATTERNS)
+            self.assertTrue(re.search(rp.PATTERNS["spd_aws_appsync_graphql_key"], "da2-" + "a" * 26))
+        finally:
+            rp.PATTERNS = old_patterns
+            rp.CONFIDENCE = old_conf
+
+        parsed = rp.parse_jsleak_output(
+            "[+] Found [Adafruit IO Key] [aio_abcdefghijklmnopqrstuvwx1234] "
+            "[https://ex.com/app.js]\n"
+            "[+] Found link: [https://cdn.ex.com/api.js] in [https://ex.com/app.js]\n"
+        )
+        self.assertEqual(parsed["secrets"][0]["name"], "Adafruit IO Key")
+        self.assertTrue(parsed["secrets"][0]["secret"].startswith("aio_"))
+        self.assertEqual(parsed["links"][0]["url"], "https://cdn.ex.com/api.js")
+        cmd = rp.build_jsleak_cmd("/tmp/p.yml", concurrency=8)
+        self.assertEqual(cmd[0], "jsleak")
+        self.assertIn("-s", cmd)
+        self.assertIn("-l", cmd)
+        self.assertIn("-e", cmd)
+        self.assertIn("jsleak", rp.PIPELINE_TOOLS)
+        links = rp.extract_jsleak_links(
+            'const u = "/api/v1/users"; fetch("https://cdn.example.com/x.js");'
+        )
+        self.assertTrue(any("api/v1/users" in item or item.startswith("https://") or item.startswith("/") for item in links))
+        self.assertTrue(rp.bundled_secrets_db_path().is_file())
+
+        with tempfile.TemporaryDirectory() as td:
+            dest = Path(td) / "filtered.yml"
+            sample_text = (ROOT / "tests" / "fixtures" / "secrets_patterns_sample.yml").read_text(
+                encoding="utf-8"
+            )
+            out, n = rp.refresh_secrets_pattern_db(
+                dest,
+                existing_patterns=dict(rp.PATTERNS),
+                yaml_text=sample_text,
+            )
+            self.assertEqual(out, dest)
+            self.assertGreaterEqual(n, 1)
+            self.assertTrue(dest.is_file())
+
 
 if __name__ == "__main__":
     unittest.main()
+

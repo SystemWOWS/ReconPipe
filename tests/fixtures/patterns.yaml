@@ -224,6 +224,7 @@ patterns:
     good:
     - api_key = "AbCdEfGhIjKlMnOp1234"
     - 'secret: "Qx9!mK2pL8vN4wR7"'
+    - 'x-api-key: "AbCdEfGhIjKlMnOp1234"'
     junk:
     - api_key = "short"
     - hello world

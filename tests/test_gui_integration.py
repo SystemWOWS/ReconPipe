@@ -85,6 +85,8 @@ def test_pipeline_subprocess():
                     "output": str(fx["out"]),
                     "skip_httpx": True,
                     "no_trufflehog": True,
+                    "skip_gitleaks": True,
+                    "skip_jsleak": True,
                     "no_validate": True,
                     "no_fail_on_valid": True,
                 }
@@ -188,6 +190,13 @@ def test_gui_module_compiles_and_helpers():
     assert "Dark/Light" in src
     assert "Export HackerOne" in src and "Export Jira" in src
     assert "--proxy" in src and "Add to queue" in src
+    assert "--skip-wayback-bodies" in src and "--skip-sensitive-paths" in src
+    assert "--repo-shallow" in src
+    assert "--skip-gitleaks" in src and "--spray" in src
+    assert "--skip-public-apis" in src
+    assert "--skip-secrets-db" in src and "--skip-jsleak" in src
+    assert "gitleaks.json" in src and "spray_urls.txt" in src
+    assert "jsleak.txt" in src
     print("[ok] reconpipegui import + form validation helpers")
 
 

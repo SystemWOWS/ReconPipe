@@ -68,6 +68,13 @@ ARTIFACT_FILES = [
     "export_hackerone.md",
     "export_jira.md",
     "findings_stream.jsonl",
+    "wayback_sources.json",
+    "sensitive_paths.txt",
+    "gitleaks.json",
+    "gitleaks_git.json",
+    "spray_urls.txt",
+    "jsleak.txt",
+    "jsleak_secrets.json",
 ]
 
 def strip_ansi(text: str) -> str:
@@ -778,6 +785,14 @@ def build_ui() -> None:
                             polite = ui.checkbox("Polite mode (--polite)")
                             nuclei_on = ui.checkbox("Run nuclei (--nuclei)")
                             docker_fb = ui.checkbox("Docker fallback (--docker-fallback)")
+                            skip_wayback = ui.checkbox("Skip Wayback bodies (--skip-wayback-bodies)")
+                            skip_sens = ui.checkbox("Skip leak-path probe (--skip-sensitive-paths)")
+                            skip_gitleaks = ui.checkbox("Skip Gitleaks (--skip-gitleaks)")
+                            spray_on = ui.checkbox("Run spray leak paths (--spray)")
+                            skip_public_apis = ui.checkbox("Skip public-apis catalog (--skip-public-apis)")
+                            skip_secrets_db = ui.checkbox("Skip secrets-patterns-db (--skip-secrets-db)")
+                            skip_jsleak = ui.checkbox("Skip jsleak (--skip-jsleak)")
+                            repo_shallow = ui.checkbox("Shallow git clone (--repo-shallow)")
                         with ui.row().classes("w-full gap-4"):
                             conc_in = ui.number(
                                 "Validation concurrency", value=10, min=1, max=200
@@ -899,6 +914,14 @@ def build_ui() -> None:
                             "polite": bool(polite.value),
                             "nuclei": bool(nuclei_on.value),
                             "docker_fallback": bool(docker_fb.value),
+                            "skip_wayback_bodies": bool(skip_wayback.value),
+                            "skip_sensitive_paths": bool(skip_sens.value),
+                            "skip_gitleaks": bool(skip_gitleaks.value),
+                            "spray": bool(spray_on.value),
+                            "skip_public_apis": bool(skip_public_apis.value),
+                            "skip_secrets_db": bool(skip_secrets_db.value),
+                            "skip_jsleak": bool(skip_jsleak.value),
+                            "repo_shallow": bool(repo_shallow.value),
                             "proxy": (proxy_in.value or "").strip() or None,
                             "proxy_auth": (proxy_auth_in.value or "").strip() or None,
                             "burp_import": (burp_in.value or "").strip() or None,

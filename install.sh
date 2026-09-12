@@ -21,7 +21,7 @@ MIN_GO_MINOR=21
 GO_FALLBACK_VERSION="1.22.10"
 SHARED_BIN="/usr/local/bin"
 
-TOOLS=(chaos httpx katana subfinder dnsx gau gospider waybackurls jsluice trufflehog anew waymore)
+TOOLS=(chaos httpx katana subfinder dnsx gau gospider waybackurls jsluice trufflehog gitleaks anew waymore)
 
 # Banner
 echo -e "${CYAN}${BOLD}"
@@ -524,6 +524,36 @@ install_trufflehog() {
     fi
 }
 
+install_gitleaks() {
+    header "STEP 6b: Gitleaks"
+    if [[ -x "$SHARED_BIN/gitleaks" ]]; then
+        success "gitleaks already installed"
+        return 0
+    fi
+    log "Installing Gitleaks..."
+    if install_go_tool "gitleaks" "github.com/zricethezav/gitleaks/v8@latest" \
+        || install_go_tool "gitleaks" "github.com/gitleaks/gitleaks/v8@latest"; then
+        success "Gitleaks installed"
+    else
+        warn "Gitleaks is optional. Manual: go install github.com/zricethezav/gitleaks/v8@latest"
+    fi
+}
+
+install_jsleak() {
+    header "STEP 6c: jsleak (optional)"
+    if [[ -x "$SHARED_BIN/jsleak" ]]; then
+        success "jsleak already installed"
+        return 0
+    fi
+    log "Installing jsleak..."
+    if install_go_tool "jsleak" "github.com/byt3hx/jsleak@latest" \
+        || install_go_tool "jsleak" "github.com/channyein1337/jsleak@latest"; then
+        success "jsleak installed"
+    else
+        warn "jsleak is optional. Manual: go install github.com/byt3hx/jsleak@latest"
+    fi
+}
+
 # Locate a tool in the places this installer writes to
 find_tool() {
     local name=$1 p
@@ -626,6 +656,8 @@ setup_go_env
 install_python_deps
 install_go_tools
 install_trufflehog
+install_gitleaks
+install_jsleak
 link_tools_system_wide
 install_gui_launcher
 verify_installs

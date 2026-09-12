@@ -138,6 +138,9 @@ FINDINGS_STREAM: Optional["FindingsStream"] = None
 PIPELINE_METRICS: Optional["PipelineMetrics"] = None
 _POLITE_LOCK = threading.Lock()
 _POLITE_LAST = 0.0
+SCAN_WAYBACK_BODIES = True
+SCAN_PUBLIC_APIS = True
+WAYBACK_BY_FILE: Dict[str, Dict[str, str]] = {}
 
 _VALIDATOR_FIELD_NAMES = {f.name for f in fields(ValidatorSpec)}
 
@@ -457,6 +460,45 @@ export_jira_markdown = addons.export_jira_markdown
 load_scan_profiles = addons.load_scan_profiles
 save_scan_profile = addons.save_scan_profile
 collect_tool_stdout_lines = addons.collect_tool_stdout_lines
+cdx_lookup = addons.cdx_lookup
+fetch_wayback_body = addons.fetch_wayback_body
+pick_cdx_snapshot = addons.pick_cdx_snapshot
+wayback_id_url = addons.wayback_id_url
+sensitive_urls_for_hosts = addons.sensitive_urls_for_hosts
+probe_sensitive_url = addons.probe_sensitive_url
+origin_from_host = addons.origin_from_host
+looks_like_html_shell = addons.looks_like_html_shell
+trufflehog_git_cmd = addons.trufflehog_git_cmd
+build_clone_cmd = addons.build_clone_cmd
+leak_wordlist_path = addons.leak_wordlist_path
+env_like_urls = addons.env_like_urls
+build_gitleaks_cmd = addons.build_gitleaks_cmd
+build_gitleaks_detect_cmd = addons.build_gitleaks_detect_cmd
+build_spray_cmd = addons.build_spray_cmd
+parse_gitleaks_report = addons.parse_gitleaks_report
+collect_http_urls_from_text = addons.collect_http_urls_from_text
+harvest_discovery_url_pool = addons.harvest_discovery_url_pool
+DISCOVERY_KEEP_URL_RE = addons.DISCOVERY_KEEP_URL_RE
+parse_public_apis_markdown = addons.parse_public_apis_markdown
+build_public_apis_index = addons.build_public_apis_index
+load_public_apis_index = addons.load_public_apis_index
+reset_public_apis_index = addons.reset_public_apis_index
+lookup_public_api_host = addons.lookup_public_api_host
+match_public_api_hint = addons.match_public_api_hint
+public_api_query_secrets = addons.public_api_query_secrets
+refresh_public_apis_catalog = addons.refresh_public_apis_catalog
+public_apis_catalog_path = addons.public_apis_catalog_path
+iter_secrets_pattern_entries = addons.iter_secrets_pattern_entries
+filter_secrets_db_entries = addons.filter_secrets_db_entries
+secrets_db_slug = addons.secrets_db_slug
+bundled_secrets_db_path = addons.bundled_secrets_db_path
+write_jsleak_patterns_yaml = addons.write_jsleak_patterns_yaml
+refresh_secrets_pattern_db = addons.refresh_secrets_pattern_db
+build_jsleak_cmd = addons.build_jsleak_cmd
+parse_jsleak_output = addons.parse_jsleak_output
+extract_jsleak_links = addons.extract_jsleak_links
+WAYBACK_MAX = addons.WAYBACK_MAX
+SENSITIVE_PATHS = addons.SENSITIVE_PATHS
 
 # Logging
 _FIND_LOGGED = 0
@@ -1602,13 +1644,43 @@ def notify_stage_progress(webhook: str, stage: str, progress: float, metrics: Op
     return notify_webhook(webhook, payload)
 
 
+def remember_wayback_file(path: Path, meta: Dict[str, str]) -> None:
+    info = {k: str(v) for k, v in (meta or {}).items() if v}
+    WAYBACK_BY_FILE[str(path)] = info
+    try:
+        WAYBACK_BY_FILE[str(path.resolve())] = info
+    except Exception:
+        pass
+    WAYBACK_BY_FILE[path.name] = info
+
+
+def annotate_wayback_findings(findings: List[Dict]) -> None:
+    if not WAYBACK_BY_FILE:
+        return
+    for item in findings or []:
+        src = str(item.get("source_url") or "")
+        meta = WAYBACK_BY_FILE.get(src)
+        if not meta and src:
+            meta = WAYBACK_BY_FILE.get(Path(src).name)
+        if not meta:
+            continue
+        item["from_wayback"] = True
+        if meta.get("archive_url"):
+            item["wayback_url"] = meta["archive_url"]
+        original = meta.get("original") or ""
+        if original:
+            item["source_file"] = src
+            item["source_url"] = original
+
+
 def download_url_file(
     url: str,
     dl_dir: Path,
     ua: str,
     timeout: int = 8,
+    wayback: bool = False,
 ) -> str:
-    """Download one URL. Returns downloaded|cached|skipped|error."""
+    """Download one URL. Returns downloaded|cached|skipped|error|wayback."""
     fname = download_filename(url)
     out_path = Path(dl_dir) / fname
     if out_path.is_file() and out_path.stat().st_size > 0:
@@ -1631,7 +1703,19 @@ def download_url_file(
             out_path.write_bytes(resp.read() or b"")
         return "downloaded"
     except Exception:
-        return "error"
+        if not wayback or not SCAN_WAYBACK_BODIES:
+            return "error"
+        apply_polite_delay()
+        got = fetch_wayback_body(url, timeout=max(timeout, 15), ua=ua)
+        if not got:
+            return "error"
+        body, meta = got
+        ct = meta.get("content_type") or ""
+        if ct and not content_type_allowed(ct):
+            return "skipped"
+        out_path.write_bytes(body)
+        remember_wayback_file(out_path, {**meta, "original": meta.get("original") or url})
+        return "wayback"
 
 
 def download_files_parallel(
@@ -1640,26 +1724,30 @@ def download_files_parallel(
     *,
     workers: int = 16,
     timeout: int = 8,
+    wayback: bool = True,
 ) -> Dict[str, int]:
     dl_dir = Path(dl_dir)
     dl_dir.mkdir(parents=True, exist_ok=True)
     ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-    counts = {"downloaded": 0, "cached": 0, "skipped": 0, "error": 0}
+    counts = {"downloaded": 0, "cached": 0, "skipped": 0, "error": 0, "wayback": 0}
     workers = max(1, min(int(workers or 16), 32))
     if SCAN_POLITE_DELAY > 0:
         workers = 1
+    url_status: Dict[str, str] = {}
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        futs = [
-            pool.submit(download_url_file, url, dl_dir, ua, timeout)
+        futs = {
+            pool.submit(download_url_file, url, dl_dir, ua, timeout, False): url
             for url in urls
-        ]
+        }
         done = 0
         for fut in as_completed(futs):
+            url = futs[fut]
             status = "error"
             try:
                 status = fut.result()
             except Exception:
                 status = "error"
+            url_status[url] = status
             counts[status] = counts.get(status, 0) + 1
             done += 1
             if done % 100 == 0:
@@ -1670,6 +1758,34 @@ def download_files_parallel(
                 )
                 if _ETA is not None:
                     _ETA.set_work(progress=min(0.55, done / max(len(urls), 1) * 0.55))
+    if wayback and SCAN_WAYBACK_BODIES:
+        failed = [u for u, st in url_status.items() if st == "error"][:WAYBACK_MAX]
+        if failed:
+            log(f"Wayback: retrying {len(failed)} dead URL(s) via CDX snapshots...", "info")
+            wb_workers = 1 if SCAN_POLITE_DELAY > 0 else 2
+            with ThreadPoolExecutor(max_workers=wb_workers) as pool:
+                futs = {
+                    pool.submit(download_url_file, url, dl_dir, ua, timeout, True): url
+                    for url in failed
+                }
+                for fut in as_completed(futs):
+                    status = "error"
+                    try:
+                        status = fut.result()
+                    except Exception:
+                        status = "error"
+                    if status == "wayback":
+                        counts["error"] = max(0, counts.get("error", 0) - 1)
+                        counts["wayback"] = counts.get("wayback", 0) + 1
+                    elif status != "error":
+                        counts["error"] = max(0, counts.get("error", 0) - 1)
+                        counts[status] = counts.get(status, 0) + 1
+    if WAYBACK_BY_FILE:
+        side = Path(dl_dir).parent / "wayback_sources.json"
+        try:
+            side.write_text(json.dumps(WAYBACK_BY_FILE, indent=2), encoding="utf-8")
+        except Exception:
+            pass
     return counts
 
 
@@ -1756,7 +1872,7 @@ PIPELINE_TOOLS = [
     "chaos", "subfinder", "amass", "assetfinder", "findomain", "dnsx",
     "httpx", "katana", "waymore", "gospider", "gau", "waybackurls",
     "hakrawler", "paramspider", "linkfinder", "naabu", "whatweb",
-    "wappalyzer", "gowitness", "nuclei", "trufflehog",
+    "wappalyzer", "gowitness", "nuclei", "trufflehog", "gitleaks", "spray", "jsleak",
 ]
 
 
@@ -1899,6 +2015,8 @@ def check_tool(name: str) -> bool:
         argv = (
             [name, "--no-update", "--version"]
             if name == "trufflehog"
+            else [name, "version"]
+            if name == "gitleaks"
             else [name, "--help"]
         )
         subprocess.run(argv, capture_output=True, timeout=5)
@@ -2774,6 +2892,144 @@ def score_confidence(key_type: str, key: str, content: str,
     return base
 
 
+def attach_public_api_meta(item: Dict, hint: Optional[Dict]) -> Dict:
+    if not hint:
+        return item
+    name = str(hint.get("name") or "").strip()
+    if name:
+        item["likely_service"] = name
+    item["public_api"] = True
+    if hint.get("auth"):
+        item["public_api_auth"] = hint.get("auth")
+    item["confidence"] = max(int(item.get("confidence") or 0), 55)
+    return item
+
+
+def collect_public_api_query_findings(
+    content: str,
+    source_url: str,
+    *,
+    seen_pairs: Optional[set] = None,
+    baseline: Optional[Dict] = None,
+    extra: Optional[Dict] = None,
+) -> List[Dict]:
+    if not SCAN_PUBLIC_APIS:
+        return []
+    extra = extra or {}
+    seen_pairs = seen_pairs if seen_pairs is not None else set()
+    baseline = baseline if baseline is not None else {}
+    out: List[Dict] = []
+    for hit in public_api_query_secrets(content):
+        key = str(hit.get("key") or "")
+        if looks_fake(key) or entropy(key) < GENERIC_SECRET_MIN_ENTROPY:
+            continue
+        key_type = str(hit.get("type") or "public_api_key")
+        h = finding_hash(key_type, key)
+        if baseline_should_suppress(baseline, h, source_url) or (h, source_url) in seen_pairs:
+            continue
+        seen_pairs.add((h, source_url))
+        start = int(hit.get("start") or 0)
+        end = int(hit.get("end") or start)
+        confidence = max(score_confidence(key_type, key, content, start, end), 58)
+        item: Dict = {
+            "type": key_type,
+            "key": key,
+            "hash": h,
+            "source_url": source_url,
+            "scanner": "public_api_catalog",
+            "verified": False,
+            "confidence": confidence,
+            "detector": hit.get("detector") or "public_api_query",
+        }
+        if hit.get("likely_service"):
+            item["likely_service"] = hit["likely_service"]
+            item["public_api"] = True
+        if extra.get("from_wayback"):
+            item["from_wayback"] = True
+            if extra.get("wayback_url"):
+                item["wayback_url"] = extra["wayback_url"]
+        out.append(item)
+    return out
+
+
+def apply_secrets_pattern_entries(entries: List[Dict[str, str]]) -> int:
+    """Merge filtered secrets-patterns-db rows into PATTERNS/CONFIDENCE."""
+    global PATTERNS, CONFIDENCE
+    added = 0
+    for row in entries or []:
+        regex = (row.get("regex") or "").strip()
+        if not regex:
+            continue
+        name = row.get("name") or "pattern"
+        slug = secrets_db_slug(name)
+        base = slug
+        n = 2
+        while slug in PATTERNS:
+            slug = f"{base}_{n}"
+            n += 1
+        PATTERNS[slug] = regex
+        conf = 72 if (row.get("confidence") or "").lower() == "high" else 48
+        CONFIDENCE[slug] = conf
+        added += 1
+    return added
+
+
+def load_secrets_pattern_db_files(
+    paths: List[Path],
+    *,
+    include_medium: bool = False,
+) -> int:
+    if not YAML_AVAILABLE:
+        return 0
+    added = 0
+    existing = dict(PATTERNS)
+    for path in paths:
+        if not path or not Path(path).is_file():
+            continue
+        try:
+            data = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
+        except Exception:
+            log(f"secrets-patterns-db: could not read {path}", "warn")
+            continue
+        filtered = filter_secrets_db_entries(
+            iter_secrets_pattern_entries(data),
+            existing,
+            include_medium=include_medium,
+        )
+        n = apply_secrets_pattern_entries(filtered)
+        for row in filtered:
+            existing[secrets_db_slug(row.get("name") or "pattern")] = row.get("regex") or ""
+        added += n
+        if n:
+            log(f"secrets-patterns-db: +{n} regex(es) from {Path(path).name}", "info")
+    return added
+
+
+def findings_from_jsleak(rows: List[Dict[str, str]]) -> List[Dict]:
+    out: List[Dict] = []
+    for row in rows or []:
+        secret = str(row.get("secret") or "").strip()
+        if not secret or looks_fake(secret):
+            continue
+        if entropy(secret) < GENERIC_SECRET_MIN_ENTROPY:
+            continue
+        name = str(row.get("name") or "jsleak")
+        key_type = secrets_db_slug(name)
+        if key_type not in PATTERNS:
+            key_type = "generic_secret"
+        item = {
+            "type": key_type,
+            "key": secret,
+            "source_url": str(row.get("source_url") or ""),
+            "scanner": "jsleak",
+            "detector": name,
+            "verified": False,
+            "confidence": CONFIDENCE.get(key_type, 60),
+        }
+        out.append(item)
+    return out
+
+
 def save_informational(output_dir: Path, items: List[Dict]) -> int:
     """Merge informational hits into informational.json; return newly added count."""
     if not items:
@@ -2850,6 +3106,37 @@ def split_exposures(findings: List[Dict]) -> Tuple[List[Dict], List[Dict]]:
     return actionable, exposures
 
 
+def _load_scan_text(url: str, ua: str) -> Tuple[Optional[str], Dict[str, Any]]:
+    """Load page text from a local path, live HTTP, or a Wayback snapshot."""
+    extra: Dict[str, Any] = {}
+    if not (url.startswith("http://") or url.startswith("https://")):
+        path = Path(url)
+        if path.is_file():
+            try:
+                return path.read_text(encoding="utf-8", errors="ignore"), extra
+            except Exception:
+                return None, extra
+        return None, extra
+    apply_polite_delay()
+    try:
+        req_headers = {"User-Agent": ua, **SCAN_EXTRA_HEADERS}
+        req = urllib.request.Request(url, headers=req_headers)
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            return resp.read().decode("utf-8", errors="ignore"), extra
+    except Exception:
+        if not SCAN_WAYBACK_BODIES:
+            return None, extra
+        apply_polite_delay()
+        got = fetch_wayback_body(url, timeout=15, ua=ua)
+        if not got:
+            return None, extra
+        body, meta = got
+        extra["from_wayback"] = True
+        extra["wayback_url"] = meta.get("archive_url") or ""
+        extra["wayback_original"] = meta.get("original") or url
+        return body.decode("utf-8", errors="ignore"), extra
+
+
 def custom_scan(urls_file: str, output_dir: Optional[Path] = None) -> List[Dict]:
     """HTTP regex scanner with confidence scoring, baseline suppression, and quarantine."""
     findings: List[Dict] = []
@@ -2879,12 +3166,10 @@ def custom_scan(urls_file: str, output_dir: Optional[Path] = None) -> List[Dict]
                 _ETA.set_work(progress=i / max(len(urls), 1), log_now=True)
 
         try:
-            req_headers = {"User-Agent": ua}
-            req_headers.update(SCAN_EXTRA_HEADERS)
-            apply_polite_delay()
-            req = urllib.request.Request(url, headers=req_headers)
-            with urllib.request.urlopen(req, timeout=8) as resp:
-                page = resp.read().decode("utf-8", errors="ignore")
+            page, extra = _load_scan_text(url, ua)
+            if page is None:
+                continue
+            from_wayback = bool(extra.get("from_wayback"))
 
             # Source maps: report exposure, then scan unminified sourcesContent
             from_source_map = is_source_map_path(url) or looks_like_source_map_json(page)
@@ -2935,7 +3220,12 @@ def custom_scan(urls_file: str, output_dir: Optional[Path] = None) -> List[Dict]
                         "vercel_token", "netlify_pat", "algolia_api", "algolia_admin",
                         "pagerduty_api", "trello_api", "okta_api", "clerk_secret",
                     }
-                    if needs_context and not has_context(page, m.start(), m.end()):
+                    hint = (
+                        match_public_api_hint(page, m.start(), m.end())
+                        if SCAN_PUBLIC_APIS
+                        else None
+                    )
+                    if needs_context and not has_context(page, m.start(), m.end()) and not hint:
                         baseline_record(baseline, h, key_type, url)
                         quarantine.append({
                             "type": key_type,
@@ -3055,9 +3345,23 @@ def custom_scan(urls_file: str, output_dir: Optional[Path] = None) -> List[Dict]
                         finding["jwt"] = jwt_meta
                     if from_source_map:
                         finding["from_source_map"] = True
+                    if from_wayback:
+                        finding["from_wayback"] = True
+                        if extra.get("wayback_url"):
+                            finding["wayback_url"] = extra["wayback_url"]
+                    if hint:
+                        attach_public_api_meta(finding, hint)
                     findings.append(finding)
                     if FINDINGS_STREAM is not None:
                         FINDINGS_STREAM.emit(finding)
+
+            if SCAN_PUBLIC_APIS:
+                for item in collect_public_api_query_findings(
+                    page, url, seen_pairs=seen_pairs, baseline=baseline, extra=extra
+                ):
+                    findings.append(item)
+                    if FINDINGS_STREAM is not None:
+                        FINDINGS_STREAM.emit(item)
 
         except Exception:
             pass
@@ -3588,15 +3892,18 @@ def parse_trufflehog(output: bytes) -> List[Dict]:
             detector = re.sub(r"[^a-z0-9]", "", str(detector_raw).lower())
 
             source_url = ""
+            git_commit = ""
             meta = data.get("SourceMetadata", {})
             if isinstance(meta, dict):
                 d = meta.get("Data", {})
                 if isinstance(d, dict):
                     source_url = (
-                        d.get("Filesystem", {}).get("file", "") or
-                        d.get("Git", {}).get("repository", "") or
-                        d.get("Web", {}).get("url", "")
+                        (d.get("Filesystem") or {}).get("file", "") or
+                        (d.get("Git") or {}).get("file", "") or
+                        (d.get("Git") or {}).get("repository", "") or
+                        (d.get("Web") or {}).get("url", "")
                     )
+                    git_commit = str((d.get("Git") or {}).get("commit") or "")
 
             raw = _th_raw_str(data.get("Raw"))
             raw_v2 = _th_raw_str(data.get("RawV2"))
@@ -3616,7 +3923,7 @@ def parse_trufflehog(output: bytes) -> List[Dict]:
                 verified = data.get("Verified", data.get("verified", False))
                 detector_name = data.get("DetectorName", "")
                 if access:
-                    findings.append({
+                    rec = {
                         "type": "aws_access_key",
                         "detector": detector_name,
                         "key": access,
@@ -3624,9 +3931,12 @@ def parse_trufflehog(output: bytes) -> List[Dict]:
                         "source_url": source_url,
                         "verified": verified,
                         "scanner": "trufflehog",
-                    })
+                    }
+                    if git_commit:
+                        rec["git_commit"] = git_commit
+                    findings.append(rec)
                 if secret:
-                    findings.append({
+                    rec = {
                         "type": "aws_secret",
                         "detector": detector_name,
                         "key": secret,
@@ -3634,7 +3944,10 @@ def parse_trufflehog(output: bytes) -> List[Dict]:
                         "source_url": source_url,
                         "verified": verified,
                         "scanner": "trufflehog",
-                    })
+                    }
+                    if git_commit:
+                        rec["git_commit"] = git_commit
+                    findings.append(rec)
                 continue
 
             key_type = exact_map.get(detector, "unknown")
@@ -3662,18 +3975,161 @@ def parse_trufflehog(output: bytes) -> List[Dict]:
                     and "hooks.slack.com/services/" in value
                 ):
                     key_type = "slack_webhook"
-                findings.append({
+                rec = {
                     "type": key_type,
                     "detector": data.get("DetectorName", ""),
                     "key": value,
                     "source_url": source_url,
                     "verified": data.get("Verified", data.get("verified", False)),
                     "scanner": "trufflehog",
-                })
+                }
+                if git_commit:
+                    rec["git_commit"] = git_commit
+                findings.append(rec)
         except Exception:
             pass
 
     return findings
+
+
+GITLEAKS_RULE_MAP = {
+    "aws-access-key": "aws_access_key",
+    "aws-access-token": "aws_access_key",
+    "awsaccesstoken": "aws_access_key",
+    "aws-secret-key": "aws_secret",
+    "github-pat": "github_pat",
+    "githubpat": "github_pat",
+    "github-fine-grained-pat": "github_fine_pat",
+    "github-oauth": "github_oauth",
+    "gitlab-pat": "gitlab_pat",
+    "slack-access-token": "slack_token",
+    "slack-bot-token": "slack_token",
+    "slack-user-token": "slack_token",
+    "slack-webhook-url": "slack_webhook",
+    "stripe-access-token": "stripe_live",
+    "generic-api-key": "generic_secret",
+    "generic-secret": "generic_secret",
+    "private-key": "private_key_pem",
+    "jwt": "jwt",
+    "discord-api-token": "discord_token",
+    "telegram-bot-api-token": "telegram_bot",
+    "heroku-api-key": "heroku_api",
+    "npm": "npm_token",
+    "npm-access-token": "npm_token",
+    "pypi-upload-token": "pypi_token",
+    "sendgrid-api-token": "sendgrid",
+    "twilio-api-key": "twilio_token",
+    "openai": "openai_key",
+    "anthropic": "anthropic_key",
+}
+
+
+def gitleaks_type_for(rule_id: str, secret: str) -> str:
+    rid = re.sub(r"[^a-z0-9-]", "", (rule_id or "").lower())
+    compact = rid.replace("-", "")
+    mapped = GITLEAKS_RULE_MAP.get(rid) or GITLEAKS_RULE_MAP.get(compact)
+    if not mapped:
+        mapped = "generic_secret"
+        if rid:
+            for key, val in GITLEAKS_RULE_MAP.items():
+                k = key.replace("-", "")
+                if key in rid or (len(rid) >= 4 and rid in key) or (len(k) >= 4 and k in compact):
+                    mapped = val
+                    break
+    if mapped == "github_pat" and (secret or "").startswith("github_pat_"):
+        return "github_fine_pat"
+    if mapped == "stripe_live" and (secret or "").startswith("sk_test_"):
+        return "stripe_test"
+    return mapped
+
+
+def findings_from_gitleaks(rows: List[Dict], scanner: str = "gitleaks") -> List[Dict]:
+    out: List[Dict] = []
+    for row in rows or []:
+        secret = str(row.get("Secret") or row.get("secret") or "").strip()
+        if not secret or looks_fake(secret):
+            continue
+        rule = str(row.get("RuleID") or row.get("Rule") or row.get("rule_id") or "")
+        key_type = gitleaks_type_for(rule, secret)
+        src = str(
+            row.get("File")
+            or row.get("file")
+            or row.get("Path")
+            or row.get("Fingerprint")
+            or ""
+        )
+        item = {
+            "type": key_type,
+            "key": secret,
+            "source_url": src,
+            "scanner": scanner,
+            "detector": rule or row.get("Description") or "gitleaks",
+            "verified": False,
+        }
+        commit = row.get("Commit") or row.get("commit")
+        if commit:
+            item["git_commit"] = str(commit)
+        out.append(item)
+    return out
+
+
+def run_gitleaks_source(source: Path, report: Path, git: bool = False) -> List[Dict]:
+    report.parent.mkdir(parents=True, exist_ok=True)
+    if report.exists():
+        try:
+            report.unlink()
+        except OSError:
+            pass
+    cmds = [
+        build_gitleaks_cmd(str(source), str(report), git=git),
+        build_gitleaks_detect_cmd(str(source), str(report), git=git),
+    ]
+    for i, cmd in enumerate(cmds):
+        rc, _ = run_cmd(cmd, timeout=300, discard_stdout=True)
+        if rc == CMD_NOTFOUND_RC:
+            if i == 0:
+                log("gitleaks not found — skipping", "warn")
+            return []
+        if report.is_file() and report.stat().st_size > 0:
+            rows = parse_gitleaks_report(report)
+            return findings_from_gitleaks(
+                rows, scanner="gitleaks_git" if git else "gitleaks"
+            )
+    return []
+
+
+def run_spray_leak_probe(live_hosts: List[str], output_dir: Path) -> List[str]:
+    wordlist = leak_wordlist_path()
+    if not wordlist.is_file():
+        log("spray: leak wordlist missing — skipping", "warn")
+        return []
+    origins: List[str] = []
+    seen = set()
+    for host in (live_hosts or [])[:25]:
+        origin = origin_from_host(host)
+        if origin and origin not in seen:
+            seen.add(origin)
+            origins.append(origin)
+    if not origins:
+        return []
+    targets = Path(output_dir) / "spray_targets.txt"
+    targets.write_text("\n".join(origins) + "\n", encoding="utf-8")
+    log(f"spray: fuzzing leak/backup paths on {len(origins)} host(s)...", "info")
+    rc, output = run_cmd(build_spray_cmd(str(targets), str(wordlist)), timeout=240)
+    blob = (output or b"").decode("utf-8", errors="ignore")
+    urls = collect_http_urls_from_text(blob)
+    extra = Path(output_dir) / "spray_urls.txt"
+    if extra.is_file():
+        urls.extend(
+            collect_http_urls_from_text(extra.read_text(encoding="utf-8", errors="ignore"))
+        )
+    urls = dedupe_urls(urls)[:500]
+    if urls:
+        extra.write_text("\n".join(urls) + "\n", encoding="utf-8")
+        log(f"spray: {C.BOLD}{len(urls)}{C.RESET} URL(s)", "success")
+    else:
+        log("spray: no extra leak URLs", "info")
+    return urls
 
 
 def _body_has_restricted_reason(body_text: str, reasons: List[str]) -> bool:
@@ -4940,12 +5396,16 @@ def _metrics_finish(name: str, items_out: int = 0, errors: int = 0) -> None:
 def configure_scan_runtime(args: Any, output_dir: Path) -> None:
     global SCAN_PROXY, SCAN_PROXY_AUTH, SCAN_EXTRA_HEADERS, SCAN_POLITE_DELAY
     global SCAN_RPS, SCAN_CREDENTIALS, DOCKER_FALLBACK, FINDINGS_STREAM, PIPELINE_METRICS
+    global SCAN_WAYBACK_BODIES, SCAN_PUBLIC_APIS
     SCAN_PROXY = (getattr(args, "proxy", None) or "").strip()
     SCAN_PROXY_AUTH = (getattr(args, "proxy_auth", None) or "").strip()
     SCAN_EXTRA_HEADERS = parse_header_list(getattr(args, "header", None) or [])
     SCAN_RPS = float(getattr(args, "requests_per_second", 0) or 0)
     SCAN_POLITE_DELAY = polite_delay_seconds(bool(getattr(args, "polite", False)), SCAN_RPS)
     DOCKER_FALLBACK = bool(getattr(args, "docker_fallback", False))
+    SCAN_WAYBACK_BODIES = not bool(getattr(args, "skip_wayback_bodies", False))
+    SCAN_PUBLIC_APIS = not bool(getattr(args, "skip_public_apis", False))
+    WAYBACK_BY_FILE.clear()
     creds_file = (getattr(args, "credentials", None) or "").strip()
     SCAN_CREDENTIALS = None
     if creds_file:
@@ -4955,6 +5415,38 @@ def configure_scan_runtime(args: Any, output_dir: Path) -> None:
     FINDINGS_STREAM = FindingsStream(output_dir)
     PIPELINE_METRICS = PipelineMetrics()
     addons.bind_config_lookups(REVOCATION_URLS, COMPLIANCE_TAGS)
+
+
+def probe_sensitive_paths(live_hosts: List[str], output_dir: Path) -> List[str]:
+    """GET a small leak-path list on live hosts; skip HTML catch-all pages."""
+    candidates = sensitive_urls_for_hosts(live_hosts, limit_hosts=40)
+    if not candidates:
+        return []
+    log(f"Sensitive paths: probing {len(candidates)} URL(s) on {min(len(live_hosts), 40)} host(s)...", "info")
+    ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+    hits: List[str] = []
+    workers = 1 if SCAN_POLITE_DELAY > 0 else 8
+
+    def _one(url: str) -> Optional[str]:
+        apply_polite_delay()
+        return url if probe_sensitive_url(url, ua=ua, timeout=6) else None
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futs = [pool.submit(_one, u) for u in candidates]
+        for fut in as_completed(futs):
+            try:
+                hit = fut.result()
+            except Exception:
+                hit = None
+            if hit:
+                hits.append(hit)
+    hits = dedupe_urls(hits)
+    if hits:
+        (output_dir / "sensitive_paths.txt").write_text("\n".join(hits) + "\n", encoding="utf-8")
+        log(f"Sensitive paths: {C.BOLD}{len(hits)}{C.RESET} exposed file(s)", "success")
+    else:
+        log("Sensitive paths: none exposed", "info")
+    return hits
 
 
 def merge_tool_hosts(sub_list: List[str], extra: List[str], label: str, output_dir: Path) -> List[str]:
@@ -5148,9 +5640,33 @@ Examples:
     parser.add_argument("--burp-import", metavar="FILE", help="Import URLs from Burp Suite XML export")
     parser.add_argument("--docker-fallback", action="store_true",
                         help="Run missing tools via docker run --rm when an image is known")
-    parser.add_argument("--repo", metavar="URL", help="Clone a git repo and scan its files")
+    parser.add_argument("--repo", metavar="URL", help="Clone a git repo and scan working tree + history")
+    parser.add_argument("--repo-shallow", action="store_true",
+                        help="Shallow clone (--depth 1); skips git history (default is full clone)")
     parser.add_argument("--iac-scan", action="store_true",
                         help="Also walk Docker/K8s/Terraform files under --repo or output dir")
+    parser.add_argument("--skip-wayback-bodies", action="store_true",
+                        help="Do not fetch Wayback snapshots when a discovered URL is dead")
+    parser.add_argument("--skip-sensitive-paths", action="store_true",
+                        help="Skip probing /.env, /.git/config, swagger.json, and similar leak paths")
+    parser.add_argument("--skip-gitleaks", action="store_true",
+                        help="Do not run Gitleaks (default: run when the binary is on PATH)")
+    parser.add_argument("--spray", action="store_true",
+                        help="Opt-in: brute extra leak/backup paths on live hosts with spray")
+    parser.add_argument("--skip-public-apis", action="store_true",
+                        help="Do not use the public-apis catalog to catch vendor query-string keys")
+    parser.add_argument("--refresh-public-apis", action="store_true",
+                        help="Rebuild wordlists/public_apis.json from GitHub before scanning")
+    parser.add_argument("--secrets-db", metavar="FILE", action="append", default=[],
+                        help="Load extra regexes from secrets-patterns-db / jsleak YAML (repeatable)")
+    parser.add_argument("--refresh-secrets-db", action="store_true",
+                        help="Download secrets-patterns-db (high confidence) into ~/.reconpipe")
+    parser.add_argument("--skip-secrets-db", action="store_true",
+                        help="Do not load bundled/user secrets-patterns-db extra regexes")
+    parser.add_argument("--secrets-db-medium", action="store_true",
+                        help="Also keep medium-confidence secrets-patterns-db rules")
+    parser.add_argument("--skip-jsleak", action="store_true",
+                        help="Do not run jsleak on discovered JavaScript URLs")
     parser.add_argument("--telegram-bot", metavar="TOKEN", help="Telegram bot token for alerts")
     parser.add_argument("--telegram-chat", metavar="ID", help="Telegram chat id for alerts")
     parser.add_argument("--smtp-host", metavar="HOST", help="SMTP host for email alerts")
@@ -5204,6 +5720,17 @@ def argv_from_options(opts: Dict[str, Any]) -> List[str]:
         "polite": "--polite",
         "docker_fallback": "--docker-fallback",
         "iac_scan": "--iac-scan",
+        "repo_shallow": "--repo-shallow",
+        "skip_wayback_bodies": "--skip-wayback-bodies",
+        "skip_sensitive_paths": "--skip-sensitive-paths",
+        "skip_gitleaks": "--skip-gitleaks",
+        "spray": "--spray",
+        "skip_public_apis": "--skip-public-apis",
+        "refresh_public_apis": "--refresh-public-apis",
+        "refresh_secrets_db": "--refresh-secrets-db",
+        "skip_secrets_db": "--skip-secrets-db",
+        "secrets_db_medium": "--secrets-db-medium",
+        "skip_jsleak": "--skip-jsleak",
     }
     for key, flag in mapping_flags.items():
         if opts.get(key):
@@ -5267,6 +5794,9 @@ def argv_from_options(opts: Dict[str, Any]) -> List[str]:
     for cfg in opts.get("config") or []:
         if str(cfg).strip():
             argv += ["--config", str(cfg).strip()]
+    for db in opts.get("secrets_db") or []:
+        if str(db).strip():
+            argv += ["--secrets-db", str(db).strip()]
     for h in opts.get("ignore_hash") or []:
         if str(h).strip():
             argv += ["--ignore-hash", str(h).strip()]
@@ -5371,6 +5901,27 @@ def main(argv: Optional[List[str]] = None) -> int:
             f"min_confidence={MIN_CONFIDENCE}",
             "info",
         )
+    if getattr(args, "refresh_secrets_db", False):
+        dest = user_data_dir() / "secrets_patterns.yml"
+        try:
+            dest, n = refresh_secrets_pattern_db(
+                dest,
+                existing_patterns=PATTERNS,
+                include_medium=bool(getattr(args, "secrets_db_medium", False)),
+            )
+            log(f"secrets-patterns-db: refreshed {n} high-confidence rule(s) → {dest}", "success")
+        except Exception as exc:
+            log(f"secrets-patterns-db refresh failed: {exc}", "warn")
+    db_paths: List[Path] = []
+    if not getattr(args, "skip_secrets_db", False):
+        db_paths.extend([bundled_secrets_db_path(), user_data_dir() / "secrets_patterns.yml"])
+    for extra in getattr(args, "secrets_db", None) or []:
+        db_paths.append(Path(str(extra)))
+    if db_paths:
+        load_secrets_pattern_db_files(
+            db_paths,
+            include_medium=bool(getattr(args, "secrets_db_medium", False)),
+        )
     apply_scope_files(args.include_pattern, args.exclude_pattern)
     if SCOPE_INCLUDE or SCOPE_EXCLUDE:
         log(
@@ -5378,6 +5929,12 @@ def main(argv: Optional[List[str]] = None) -> int:
             "info",
         )
     configure_scan_runtime(args, output_dir)
+    if getattr(args, "refresh_public_apis", False):
+        try:
+            dest, n = refresh_public_apis_catalog()
+            log(f"public-apis catalog: {n} apiKey service(s) → {dest.name}", "success")
+        except Exception as exc:
+            log(f"public-apis catalog refresh failed: {exc}", "warn")
     checkpoint = load_checkpoint(output_dir) if (args.resume or args.resume_from) else None
     resume_from = (args.resume_from or "").strip()
     if resume_from and checkpoint:
@@ -5743,7 +6300,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     step_header(3, "URL Discovery (Katana + waymore + gospider)")
     _metrics_start("discovery", live_count)
     files_to_scan = output_dir / "files_to_scan.txt"
-    file_exts = re.compile(r'\.(js|json|jsx|ts|tsx|map|html|htm|css|env|config|conf|yml|yaml|xml|ini|php|asp|aspx)(\?|$|#)', re.I)
+    file_exts = DISCOVERY_KEEP_URL_RE
 
     if args.files:
         files_to_scan = Path(args.files)
@@ -5948,11 +6505,28 @@ def main(argv: Optional[List[str]] = None) -> int:
         if not args.files:
             files_to_scan.write_text("\n".join(url_list))
     extra_urls: List[str] = []
+    repo_dir_scanned: Optional[Path] = None
+    env_hits = env_like_urls(harvest_discovery_url_pool(output_dir, url_list))
+    if env_hits:
+        extra_urls.extend(env_hits)
+        log(f".env-like URLs: {len(env_hits)}", "info")
+    if getattr(args, "spray", False):
+        if tools_status.get("spray"):
+            extra_urls.extend(run_spray_leak_probe(live_list, output_dir))
+        else:
+            log(
+                "spray not found — skipping (--spray is opt-in). "
+                "https://github.com/chainreactors/spray",
+                "warn",
+            )
+    if not getattr(args, "skip_sensitive_paths", False) and live_list:
+        extra_urls.extend(probe_sensitive_paths(live_list, output_dir))
     if getattr(args, "burp_import", None):
         burp_path = Path(args.burp_import)
         if burp_path.is_file():
-            extra_urls.extend(parse_burp_xml(burp_path))
-            log(f"Burp import: {len(extra_urls)} URL(s)", "info")
+            burp_urls = parse_burp_xml(burp_path)
+            extra_urls.extend(burp_urls)
+            log(f"Burp import: {len(burp_urls)} URL(s)", "info")
     if getattr(args, "nuclei_import", None):
         ni = Path(args.nuclei_import)
         if ni.is_file():
@@ -5961,15 +6535,22 @@ def main(argv: Optional[List[str]] = None) -> int:
             log(f"Nuclei import: {len(imported)} row(s)", "info")
     if getattr(args, "repo", None):
         repo_dir = output_dir / "repo_scan"
-        ok, repo_dir = clone_repo(args.repo, repo_dir)
+        ok, repo_dir = clone_repo(
+            args.repo,
+            repo_dir,
+            timeout=300,
+            shallow=bool(getattr(args, "repo_shallow", False)),
+        )
         if ok:
+            repo_dir_scanned = repo_dir
             repo_files = list_repo_files(repo_dir)
             if args.iac_scan:
                 iac = collect_iac_files(repo_dir)
                 log(f"IaC files: {len(iac)}", "info")
             for p in repo_files:
                 extra_urls.append(str(p))
-            log(f"Repo clone: {len(repo_files)} file(s)", "info")
+            mode = "shallow" if getattr(args, "repo_shallow", False) else "full history"
+            log(f"Repo clone ({mode}): {len(repo_files)} file(s)", "info")
         else:
             log("git clone failed — skipping --repo", "warn")
     js_extra = analyze_js_bundle(url_list, output_dir)
@@ -5985,6 +6566,41 @@ def main(argv: Optional[List[str]] = None) -> int:
             lf_out.write_text("\n".join(lines) + "\n", encoding="utf-8")
             extra_urls.extend(ln for ln in lines if ln.startswith("http"))
             log(f"LinkFinder: {len(lines)} line(s)", "info")
+    if not getattr(args, "skip_jsleak", False) and tools_status.get("jsleak"):
+        js_files = extract_js_urls(url_list)[:80]
+        if js_files:
+            yaml_path = bundled_secrets_db_path()
+            user_yaml = user_data_dir() / "secrets_patterns.yml"
+            if user_yaml.is_file():
+                yaml_path = user_yaml
+            extra_dbs = [Path(p) for p in (getattr(args, "secrets_db", None) or []) if Path(p).is_file()]
+            if extra_dbs:
+                yaml_path = extra_dbs[-1]
+            use_secrets = yaml_path.is_file()
+            log(f"jsleak: scanning {len(js_files)} JS URL(s)...", "info")
+            stdin = ("\n".join(js_files) + "\n").encode("utf-8")
+            rc, output = run_cmd(
+                build_jsleak_cmd(str(yaml_path) if use_secrets else None, concurrency=12, secrets=use_secrets),
+                stdin_data=stdin,
+                timeout=180,
+            )
+            blob = (output or b"").decode("utf-8", errors="ignore")
+            parsed = parse_jsleak_output(blob)
+            (output_dir / "jsleak.txt").write_text(blob, encoding="utf-8")
+            leak_urls = [row["url"] for row in parsed.get("links") or [] if (row.get("url") or "").startswith("http")]
+            extra_urls.extend(leak_urls)
+            js_hits = findings_from_jsleak(parsed.get("secrets") or [])
+            if js_hits:
+                (output_dir / "jsleak_secrets.json").write_text(
+                    json.dumps(js_hits, indent=2), encoding="utf-8"
+                )
+                extra_urls.extend(str(h.get("source_url") or "") for h in js_hits if str(h.get("source_url") or "").startswith("http"))
+            log(
+                f"jsleak: {len(leak_urls)} link(s), {len(js_hits)} secret hit(s)",
+                "success" if (leak_urls or js_hits) else "info",
+            )
+            # Stash hits on args for merge after secret scan starts with empty raw_findings
+            args._jsleak_findings = js_hits  # type: ignore[attr-defined]
     if extra_urls:
         url_list = dedupe_urls(url_list + extra_urls)
         if not args.files:
@@ -6005,7 +6621,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         notify_stage_progress(args.notify_webhook, "discovery", 0.48, {"urls": url_count})
 
     # Secret scanning
-    step_header(4, "Secret Scanning (TruffleHog / Custom)")
+    step_header(4, "Secret Scanning (TruffleHog / Gitleaks / Custom)")
     _metrics_start("trufflehog", url_count)
     unique_path = output_dir / "unique_findings.json"
     unique_findings: List[Dict] = []
@@ -6028,13 +6644,24 @@ def main(argv: Optional[List[str]] = None) -> int:
     if resumed_scan:
         raw_findings = list(unique_findings)
         use_trufflehog = False
+        use_gitleaks = False
     else:
         raw_findings = []
         use_trufflehog = not args.no_trufflehog and tools_status["trufflehog"]
+        use_gitleaks = (
+            not getattr(args, "skip_gitleaks", False)
+            and bool(tools_status.get("gitleaks"))
+        )
+        if not getattr(args, "skip_gitleaks", False) and not tools_status.get("gitleaks"):
+            log(
+                "gitleaks not found — skipping "
+                "(install: go install github.com/gitleaks/gitleaks/v8@latest)",
+                "warn",
+            )
 
-    if not resumed_scan and use_trufflehog:
-        # TruffleHog filesystem mode needs local files
-        log("Downloading remote files for TruffleHog scan...", "info")
+    if not resumed_scan and (use_trufflehog or use_gitleaks):
+        # Filesystem scanners need local files
+        log("Downloading remote files for secret scan...", "info")
         dl_dir = output_dir / "downloaded_files"
         dl_dir.mkdir(exist_ok=True)
 
@@ -6047,23 +6674,30 @@ def main(argv: Optional[List[str]] = None) -> int:
         downloaded = counts.get("downloaded", 0)
         cached = counts.get("cached", 0)
         skipped = counts.get("skipped", 0)
-        ready = downloaded + cached
+        wayback_n = counts.get("wayback", 0)
+        ready = downloaded + cached + wayback_n
         extra = f", skipped {skipped} binary" if skipped else ""
+        if wayback_n:
+            extra += f", wayback {wayback_n}"
         log(
             f"Downloaded {downloaded} files ({cached} cached{extra}) → {dl_dir}",
             "success",
         )
 
         if ready > 0:
-            log("Running TruffleHog on downloaded files...", "info")
-            rc, output = run_cmd(
-                trufflehog_filesystem_cmd(str(dl_dir)),
-                timeout=600,
-            )
-            if output and output.strip():
+            output = b""
+            rc = 0
+            if use_trufflehog:
+                log("Running TruffleHog on downloaded files...", "info")
+                rc, output = run_cmd(
+                    trufflehog_filesystem_cmd(str(dl_dir)),
+                    timeout=600,
+                )
+            if use_trufflehog and output and output.strip():
                 raw_findings = parse_trufflehog(output)
+                annotate_wayback_findings(raw_findings)
                 log(f"TruffleHog: {len(raw_findings)} raw findings", "success")
-            else:
+            elif use_trufflehog:
                 if rc not in (0, None):
                     log(
                         "TruffleHog exited before writing findings "
@@ -6113,9 +6747,14 @@ def main(argv: Optional[List[str]] = None) -> int:
                                     "vercel_token", "netlify_pat", "algolia_api", "algolia_admin",
                                     "pagerduty_api", "trello_api", "okta_api", "clerk_secret",
                                 }
+                                hint = (
+                                    match_public_api_hint(content_text, m.start(), m.end())
+                                    if SCAN_PUBLIC_APIS
+                                    else None
+                                )
                                 if needs_context and not has_context(
                                     content_text, m.start(), m.end()
-                                ):
+                                ) and not hint:
                                     continue
                                 if key_type == "uuid_candidate":
                                     if not has_heroku_context(
@@ -6171,9 +6810,36 @@ def main(argv: Optional[List[str]] = None) -> int:
                                     item["jwt"] = jwt_meta
                                 if from_source_map:
                                     item["from_source_map"] = True
+                                if hint:
+                                    attach_public_api_meta(item, hint)
                                 raw_findings.append(item)
                     except Exception:
                         pass
+            if SCAN_PUBLIC_APIS:
+                for f_path in dl_dir.iterdir():
+                    try:
+                        raw_findings.extend(
+                            collect_public_api_query_findings(
+                                f_path.read_text(errors="ignore"),
+                                str(f_path),
+                            )
+                        )
+                    except Exception:
+                        pass
+            if use_gitleaks:
+                log("Running Gitleaks on downloaded files...", "info")
+                gl_hits = run_gitleaks_source(
+                    dl_dir, output_dir / "gitleaks.json", git=False
+                )
+                if gl_hits:
+                    raw_findings.extend(gl_hits)
+                    log(f"Gitleaks: {len(gl_hits)} finding(s)", "success")
+                else:
+                    log("Gitleaks: no findings", "info")
+            if not use_trufflehog:
+                log("Running built-in regex scanner...", "info")
+                with eta_heartbeat(90):
+                    raw_findings.extend(custom_scan(str(files_to_scan), output_dir))
         else:
             log("No files downloaded — falling back to custom HTTP scanner", "warn")
             with eta_heartbeat(90):
@@ -6186,7 +6852,36 @@ def main(argv: Optional[List[str]] = None) -> int:
         with eta_heartbeat(90):
             raw_findings = custom_scan(str(files_to_scan), output_dir)
 
+    if not resumed_scan and repo_dir_scanned and use_trufflehog:
+        log("Running TruffleHog on git history...", "info")
+        rc, output = run_cmd(trufflehog_git_cmd(str(repo_dir_scanned)), timeout=600)
+        if output and output.strip():
+            git_hits = parse_trufflehog(output)
+            for item in git_hits:
+                item["scanner"] = "trufflehog_git"
+            raw_findings.extend(git_hits)
+            log(f"TruffleHog git: {len(git_hits)} finding(s)", "success")
+        else:
+            log("TruffleHog git: no findings", "info")
+
+    if not resumed_scan and repo_dir_scanned and use_gitleaks:
+        log("Running Gitleaks on git history...", "info")
+        gl_git = run_gitleaks_source(
+            repo_dir_scanned, output_dir / "gitleaks_git.json", git=True
+        )
+        if gl_git:
+            raw_findings.extend(gl_git)
+            log(f"Gitleaks git: {len(gl_git)} finding(s)", "success")
+        else:
+            log("Gitleaks git: no findings", "info")
+
+    jsleak_hits = getattr(args, "_jsleak_findings", None) or []
+    if not resumed_scan and jsleak_hits:
+        raw_findings.extend(jsleak_hits)
+        log(f"jsleak secrets merged: {len(jsleak_hits)}", "info")
+
     if not resumed_scan:
+        annotate_wayback_findings(raw_findings)
         raw_findings, informational = split_informational(raw_findings)
         raw_findings, exposures = split_exposures(raw_findings)
         baseline = load_baseline(output_dir)
