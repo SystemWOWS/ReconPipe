@@ -50,6 +50,8 @@ class DockerPackagingTests(unittest.TestCase):
         self.assertIn("docker/build-push-action", wf)
         self.assertIn("ghcr.io/${{ github.repository }}", wf)
         self.assertIn("packages: write", wf)
+        self.assertIn("free-disk-space", wf)
+        self.assertIn("mode=min", wf)
 
     def test_rescan_flag_on_parser(self):
         args = rp.build_parser().parse_args(["-d", "example.com", "--rescan"])

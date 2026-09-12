@@ -435,6 +435,7 @@ build_findomain_cmd = addons.build_findomain_cmd
 build_dnsx_cmd = addons.build_dnsx_cmd
 build_waybackurls_cmd = addons.build_waybackurls_cmd
 build_hakrawler_cmd = addons.build_hakrawler_cmd
+hakrawler_stdin = addons.hakrawler_stdin
 build_paramspider_cmd = addons.build_paramspider_cmd
 build_linkfinder_cmd = addons.build_linkfinder_cmd
 build_naabu_cmd = addons.build_naabu_cmd
@@ -6818,29 +6819,63 @@ def main(argv: Optional[List[str]] = None) -> int:
         if not args.skip_hakrawler and tools_status.get("hakrawler") and not url_set_full(all_urls):
             before = len(all_urls)
             log("hakrawler: form-aware crawl...", "info")
+            hakrawler_misses = 0
             for host in live_list[:40]:
                 if url_set_full(all_urls):
                     break
                 target = host if host.startswith("http") else f"https://{host}"
-                rc, output = run_cmd(build_hakrawler_cmd(target), timeout=60)
-                extend_url_set(all_urls, collect_tool_stdout_lines(output))
+                hak_cmd = build_hakrawler_cmd(target)
+                rc, output = run_cmd(
+                    hak_cmd,
+                    timeout=60,
+                    stdin_data=hakrawler_stdin(target, hak_cmd),
+                )
+                lines = collect_tool_stdout_lines(output)
+                extend_url_set(all_urls, lines)
+                if rc not in (0, None) and not lines:
+                    hakrawler_misses += 1
+                    if hakrawler_misses >= 2:
+                        log("hakrawler failing — skipping remaining hosts", "warn")
+                        break
             log(f"hakrawler: +{len(all_urls) - before} URLs", "info")
 
         if not args.skip_paramspider and tools_status.get("paramspider") and not url_set_full(all_urls):
             ps_dir = output_dir / "paramspider"
             ps_dir.mkdir(exist_ok=True)
             log("paramspider: parameterized URLs...", "info")
-            run_cmd(build_paramspider_cmd(args.domain, str(ps_dir)), timeout=120, discard_stdout=True)
-            extra = []
-            for gf in ps_dir.rglob("*.txt"):
-                try:
-                    extra.extend(
-                        line.strip()
-                        for line in gf.read_text(encoding="utf-8", errors="ignore").splitlines()
-                        if line.strip()
-                    )
-                except Exception:
-                    pass
+            rc, output = run_cmd(
+                build_paramspider_cmd(args.domain, str(ps_dir)),
+                timeout=120,
+            )
+            extra = [
+                ln
+                for ln in collect_tool_stdout_lines(output)
+                if ln.startswith("http://") or ln.startswith("https://")
+            ]
+            result_roots = [ps_dir, Path("results"), Path.cwd() / "results"]
+            seen_files = set()
+            for root in result_roots:
+                if not root.exists():
+                    continue
+                paths = [root] if root.is_file() else list(root.rglob("*.txt"))
+                for gf in paths:
+                    try:
+                        key = str(gf.resolve())
+                    except OSError:
+                        key = str(gf)
+                    if key in seen_files:
+                        continue
+                    seen_files.add(key)
+                    try:
+                        extra.extend(
+                            line.strip()
+                            for line in Path(gf).read_text(
+                                encoding="utf-8", errors="ignore"
+                            ).splitlines()
+                            if line.strip().startswith("http")
+                        )
+                    except Exception:
+                        pass
             extend_url_set(all_urls, extra)
 
         sorted_urls = dedupe_urls(sorted(all_urls))

@@ -45,6 +45,8 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/* \
  && CGO_ENABLED=1 go install github.com/projectdiscovery/naabu/v2/cmd/naabu@latest \
  || true
+# Drop Go module/build caches so the builder stage does not fill the CI disk.
+RUN go clean -cache -modcache -testcache || true
 
 FROM python:3.12-slim-bookworm
 
@@ -64,10 +66,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates curl git unzip wget libpcap0.8 \
     && rm -rf /var/lib/apt/lists/*
 
-# Keep ProjectDiscovery binaries out of /usr/local/bin so pip/NiceGUI cannot
-# overwrite httpx with the Python HTTP client CLI.
+# One copy only. PATH puts /opt/pd-bin first so pip's Python httpx CLI cannot
+# shadow ProjectDiscovery httpx (duplicating into /usr/local/bin filled GH runners).
 COPY --from=tools /out/bin/ /opt/pd-bin/
-COPY --from=tools /out/bin/ /usr/local/bin/
 
 # TruffleHog ships a static release; faster and more reliable than go install here.
 RUN curl -sSfL https://raw.githubusercontent.com/trufflesecurity/trufflehog/main/scripts/install.sh \
@@ -109,11 +110,12 @@ RUN git clone --depth 1 https://github.com/GerbenJavado/LinkFinder.git /opt/Link
  && chmod +x /usr/local/bin/linkfinder \
  || true
 
-# pip/NiceGUI install a Python CLI named httpx — put PD binaries back on top.
-RUN cp -a /opt/pd-bin/. /usr/local/bin/ \
- && if [ -x /opt/pd-bin/httpx ]; then \
-      cp /opt/pd-bin/httpx /usr/local/bin/httpx-toolkit; \
-      chmod +x /opt/pd-bin/httpx /usr/local/bin/httpx /usr/local/bin/httpx-toolkit; \
+# pip/NiceGUI may drop a Python CLI at /usr/local/bin/httpx — point those names
+# at the PD binary without copying the whole tool dir again.
+RUN if [ -x /opt/pd-bin/httpx ]; then \
+      rm -f /usr/local/bin/httpx /usr/local/bin/httpx-toolkit; \
+      ln -s /opt/pd-bin/httpx /usr/local/bin/httpx; \
+      ln -s /opt/pd-bin/httpx /usr/local/bin/httpx-toolkit; \
     fi
 
 COPY reconpipe.py reconpipe_addons.py reconpipe_wave3.py reconpipegui.py /opt/reconpipe/

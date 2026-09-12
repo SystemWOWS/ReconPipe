@@ -519,12 +519,62 @@ def build_waybackurls_cmd(domain: str) -> List[str]:
     return ["waybackurls", domain]
 
 
-def build_hakrawler_cmd(url: str, depth: int = 3) -> List[str]:
-    return ["hakrawler", "-url", url, "-depth", str(depth), "-plain"]
+def build_hakrawler_cmd(
+    url: str,
+    depth: int = 3,
+    help_blob: Optional[str] = None,
+) -> List[str]:
+    """
+    Current hakluke/hakrawler takes URLs on stdin (-d depth, -u unique).
+    Older builds used -url / -depth / -plain.
+    """
+    blob = (help_blob or "").lower()
+    cmd = ["hakrawler"]
+    if "-url" in blob:
+        cmd.extend(["-url", url])
+        if "-depth" in blob:
+            cmd.extend(["-depth", str(depth)])
+        elif re.search(r"(?m)^\s*-d\b", blob) or "depth to crawl" in blob:
+            cmd.extend(["-d", str(depth)])
+        if "-plain" in blob:
+            cmd.append("-plain")
+        return cmd
+    cmd.extend(["-d", str(depth), "-u"])
+    if "timeout" in blob or help_blob is None:
+        cmd.extend(["-timeout", "25"])
+    return cmd
 
 
-def build_paramspider_cmd(domain: str, output_dir: str) -> List[str]:
-    return ["paramspider", "-d", domain, "--output", output_dir, "--level", "high"]
+def hakrawler_stdin(url: str, cmd: Optional[List[str]] = None) -> Optional[bytes]:
+    """Stdin payload for current hakrawler; None when -url is on the argv."""
+    if cmd and "-url" in cmd:
+        return None
+    text = (url or "").strip()
+    if not text:
+        return None
+    return (text + "\n").encode("utf-8")
+
+
+def build_paramspider_cmd(
+    domain: str,
+    output_dir: str,
+    help_blob: Optional[str] = None,
+) -> List[str]:
+    """
+    Current ParamSpider: paramspider -d DOMAIN [-s] [--proxy] [-p PLACEHOLDER]
+    (writes results/<domain>.txt; -s streams URLs to stdout).
+    Older builds accepted --output and --level.
+    """
+    blob = (help_blob or "").lower()
+    cmd = ["paramspider", "-d", domain]
+    if "--output" in blob or re.search(r"(?m)^\s*-o\s", blob):
+        flag = "--output" if "--output" in blob else "-o"
+        cmd.extend([flag, output_dir])
+        if "--level" in blob:
+            cmd.extend(["--level", "high"])
+        return cmd
+    cmd.append("-s")
+    return cmd
 
 
 def build_linkfinder_cmd(js_file: str, output_file: str = "cli") -> List[str]:

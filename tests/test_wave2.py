@@ -175,6 +175,24 @@ class Wave2PipelineTests(unittest.TestCase):
         self.assertIn("-silent", rp.build_dnsx_cmd("in", "o"))
         self.assertEqual(rp.build_waybackurls_cmd("ex.com")[-1], "ex.com")
         self.assertEqual(rp.build_hakrawler_cmd("https://ex.com")[0], "hakrawler")
+        modern = rp.build_hakrawler_cmd("https://ex.com")
+        self.assertNotIn("-url", modern)
+        self.assertIn("-d", modern)
+        self.assertEqual(rp.hakrawler_stdin("https://ex.com", modern), b"https://ex.com\n")
+        old_hak = rp.build_hakrawler_cmd(
+            "https://ex.com", help_blob="-url string\n-depth int\n-plain"
+        )
+        self.assertEqual(old_hak[1:3], ["-url", "https://ex.com"])
+        self.assertIsNone(rp.hakrawler_stdin("https://ex.com", old_hak))
+        ps = rp.build_paramspider_cmd("ex.com", "/tmp/ps")
+        self.assertEqual(ps[:3], ["paramspider", "-d", "ex.com"])
+        self.assertIn("-s", ps)
+        self.assertNotIn("--output", ps)
+        old_ps = rp.build_paramspider_cmd(
+            "ex.com", "/tmp/ps", help_blob="--output DIR\n--level high"
+        )
+        self.assertIn("--output", old_ps)
+        self.assertIn("--level", old_ps)
         self.assertEqual(rp.build_naabu_cmd("in", "o")[0], "naabu")
         self.assertEqual(rp.build_nuclei_cmd("u", "o")[0], "nuclei")
         self.assertEqual(rp.build_gowitness_cmd("u", "d")[0], "gowitness")
