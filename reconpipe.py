@@ -4124,6 +4124,7 @@ def parse_trufflehog(output: bytes) -> List[Dict]:
     # Substring fallback for human-readable names ("Google API Key" → googleapikey)
     type_map = {
         "googleapikey": "google_api", "googlesecrets": "google_api",
+        "googlegemini": "google_api", "geminikey": "google_api",
         "github":       "github_pat",
         "gitlab":       "gitlab_pat",
         "stripe":       "stripe_live",
@@ -4237,6 +4238,8 @@ def parse_trufflehog(output: bytes) -> List[Dict]:
                     and "hooks.slack.com/services/" in value
                 ):
                     key_type = "slack_webhook"
+                elif key_type == "unknown" and value.startswith("AIza") and len(value) >= 35:
+                    key_type = "google_api"
                 rec = {
                     "type": key_type,
                     "detector": data.get("DetectorName", ""),
