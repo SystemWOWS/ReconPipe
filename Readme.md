@@ -8,11 +8,13 @@ It enumerates hosts, crawls and archives URLs, downloads likely leak surfaces (J
 subdomains → live hosts → URL discovery → download → secret scan → validate → reports
 ```
 
-Patterns, confidence scores, and validators load from [`config.yaml`](config.yaml). Overlay extra rules with `--config`. Missing tools are skipped; the pipeline keeps going.
+Patterns, confidence scores, and validators load from `[config.yaml](config.yaml)`. Overlay extra rules with `--config`. Missing tools are skipped; the pipeline keeps going.
 
 Use this only on assets you own or have written permission to test. Validated keys are live credentials — treat output as sensitive.
 
 ---
+
+
 
 ## Contents
 
@@ -31,6 +33,8 @@ Use this only on assets you own or have written permission to test. Validated ke
 - [License](#license)
 
 ---
+
+
 
 ## Quick start
 
@@ -66,27 +70,35 @@ reconpipe-gui
 
 ---
 
+
+
 ## How a scan works
 
 Every stage is optional. If a binary is missing, ReconPipe logs it and continues.
 
-| Stage | What runs | Purpose |
-|-------|-----------|---------|
-| Subdomains | Chaos, subfinder, amass, assetfinder, findomain, crt.sh, optional Shodan / Censys / ZoomEye | Build a host list |
-| Resolve / live | dnsx, httpx | Keep hosts that actually respond |
-| URL discovery | Katana, gospider, hakrawler, paramspider, LinkFinder | Active crawl and JS endpoints |
-| Archives | waymore → gau → waybackurls | Historical URLs |
-| Extra surface | Sensitive paths (`.env`, `.git/config`, swagger), Wayback bodies for dead URLs, optional Nuclei / naabu / screenshots | Leak files that crawlers miss |
-| Download | Parallel fetch of JS, maps, JSON, HTML, env-like URLs | Local copies for scanners |
-| Secret scan | TruffleHog, Gitleaks, jsleak, `config.yaml` regex, [secrets-patterns-db](https://github.com/mazen160/secrets-patterns-db) extras | Extract candidates |
-| Validate | Async HTTP checks (aiohttp) against provider APIs | Confirm the key still works |
-| Report | JSON, SARIF, HTML/Markdown, HackerOne/Jira drafts | Review and CI |
+
+| Stage          | What runs                                                                                                                        | Purpose                          |
+| -------------- | -------------------------------------------------------------------------------------------------------------------------------- | -------------------------------- |
+| Subdomains     | Chaos, subfinder, amass, assetfinder, findomain, crt.sh, optional Shodan / Censys / ZoomEye                                      | Build a host list                |
+| Resolve / live | dnsx, httpx                                                                                                                      | Keep hosts that actually respond |
+| URL discovery  | Katana, gospider, hakrawler, paramspider, LinkFinder                                                                             | Active crawl and JS endpoints    |
+| Archives       | waymore → gau → waybackurls                                                                                                      | Historical URLs                  |
+| Extra surface  | Sensitive paths (`.env`, `.git/config`, swagger), Wayback bodies for dead URLs, optional Nuclei / naabu / screenshots            | Leak files that crawlers miss    |
+| Download       | Parallel fetch of JS, maps, JSON, HTML, env-like URLs                                                                            | Local copies for scanners        |
+| Secret scan    | TruffleHog, Gitleaks, jsleak, `config.yaml` regex, [secrets-patterns-db](https://github.com/mazen160/secrets-patterns-db) extras | Extract candidates               |
+| Validate       | Async HTTP checks (aiohttp) against provider APIs                                                                                | Confirm the key still works      |
+| Report         | JSON, SARIF, HTML/Markdown, HackerOne/Jira drafts                                                                                | Review and CI                    |
+
 
 `--files urls.txt` skips URL discovery. `--subdomains hosts.txt` skips Chaos. `--no-trufflehog` uses only the built-in regex engine. `--no-validate` stops after detection.
 
 ---
 
+
+
 ## Installation
+
+
 
 ### Linux installer
 
@@ -94,9 +106,9 @@ Every stage is optional. If a binary is missing, ReconPipe logs it and continues
 sudo bash install.sh
 ```
 
-Installs system packages, Go (if needed), ProjectDiscovery tools, gospider, gau, waybackurls, jsluice, TruffleHog, Gitleaks, optional jsleak, Python deps (including the GUI), and a `reconpipe-gui` launcher.
+Installs system packages (Python, Go, Chromium, libpcap, nmap, Node, Ruby), Python deps (including the GUI and waymore), ProjectDiscovery tools (Chaos, subfinder, dnsx, httpx, Katana, nuclei, naabu), crawl/archive tools (gospider, gau, waybackurls, hakrawler, jsluice), secret scanners (TruffleHog, Gitleaks, jsleak), extra enumerators (amass, assetfinder, findomain), LinkFinder, ParamSpider, WhatWeb, Wappalyzer, gowitness, spray, `reconpipe` / `reconpipe-gui` launchers.
 
-`sudo` is used for system packages. Go and pip installs still land in **your** home directory, not root’s.
+`sudo` is used for system packages. Go and pip installs still land in **your** home directory, not root’s. Extra tools that fail to install are skipped at scan time; they do not abort the installer.
 
 ### Manual (Linux / macOS)
 
@@ -165,17 +177,21 @@ sudo apt install python3-gi python3-gi-cairo gir1.2-gtk-3.0 gir1.2-webkit2-4.1
 
 ---
 
+
+
 ## API keys
 
 None of these are required. Missing keys skip that source; a source error never aborts the scan.
 
-| Key | Environment | Used for |
-|-----|-------------|----------|
-| ProjectDiscovery Chaos | `CHAOS_KEY` or `PDCP_API_KEY` | Subdomain dataset ([cloud.projectdiscovery.io](https://cloud.projectdiscovery.io)) |
-| Shodan | `SHODAN_API_KEY` | Extra hostnames |
-| Censys | `CENSYS_API_ID`, `CENSYS_API_SECRET` | Extra hostnames |
-| ZoomEye | `ZOOMEYE_API_KEY` | Extra hostnames |
-| crt.sh | — | Certificate Transparency (no key) |
+
+| Key                    | Environment                          | Used for                                                                           |
+| ---------------------- | ------------------------------------ | ---------------------------------------------------------------------------------- |
+| ProjectDiscovery Chaos | `CHAOS_KEY` or `PDCP_API_KEY`        | Subdomain dataset ([cloud.projectdiscovery.io](https://cloud.projectdiscovery.io)) |
+| Shodan                 | `SHODAN_API_KEY`                     | Extra hostnames                                                                    |
+| Censys                 | `CENSYS_API_ID`, `CENSYS_API_SECRET` | Extra hostnames                                                                    |
+| ZoomEye                | `ZOOMEYE_API_KEY`                    | Extra hostnames                                                                    |
+| crt.sh                 | —                                    | Certificate Transparency (no key)                                                  |
+
 
 CLI flags (`--chaos-key`, `--shodan-key`, …) override the environment. The GUI **Save keys** panel writes `~/.reconpipe/keys.yaml` (mode `0600`). Resolution order is **CLI → environment → saved file**.
 
@@ -189,6 +205,8 @@ python3 reconpipe.py -d example.com --skip-crtsh
 ```
 
 ---
+
+
 
 ## Usage
 
@@ -222,6 +240,8 @@ python3 reconpipe.py -d example.com --no-validate
 python3 reconpipe.py -d example.com -o /tmp/results --concurrency 20
 ```
 
+
+
 ### Skip stages
 
 ```bash
@@ -230,6 +250,8 @@ python3 reconpipe.py -d example.com --skip-httpx
 python3 reconpipe.py -d example.com --skip-gau          # archives only; Katana/gospider still run
 python3 reconpipe.py -d example.com --skip-discovery    # no crawl or archives; live hosts only
 ```
+
+
 
 ### Git repository
 
@@ -241,6 +263,8 @@ python3 reconpipe.py -d example.com --repo https://github.com/org/app.git --repo
 python3 reconpipe.py -d example.com --repo ./local-clone --iac-scan
 ```
 
+
+
 ### CI
 
 By default ReconPipe writes SARIF and **exits 1** if any key validates as live.
@@ -250,6 +274,8 @@ python3 reconpipe.py -d example.com --sarif out.sarif
 python3 reconpipe.py -d example.com --no-fail-on-valid   # always exit 0
 python3 reconpipe.py -d example.com --ignore-hash <sha256>  # suppress a known finding
 ```
+
+
 
 ### Resume
 
@@ -304,6 +330,8 @@ PagerDuty and Opsgenie flags are also available. `--no-notify` skips the desktop
 
 ---
 
+
+
 ## Desktop GUI
 
 ```bash
@@ -331,18 +359,22 @@ Do not bind `--browser` beyond localhost on an untrusted network. Result files c
 
 ---
 
+
+
 ## Configuration
 
 Default rules live in `config.yaml` next to `reconpipe.py`:
 
-| Key | Role |
-|-----|------|
-| `patterns` | Regex detectors (~168 types) |
-| `confidence` / `min_confidence` | Score threshold (default minimum: 30) |
-| `validators` | Live checks (URL, auth, AWS STS, Twilio pair, JWT inspect, URI inspect, …) |
-| `informational_types` | Public-by-design hits (Stripe publishable, Firebase URL, …) |
-| `exposure_types` | Non-secret leak surface (source maps) |
-| `severity` / compliance tags | Report metadata |
+
+| Key                             | Role                                                                       |
+| ------------------------------- | -------------------------------------------------------------------------- |
+| `patterns`                      | Regex detectors (~168 types)                                               |
+| `confidence` / `min_confidence` | Score threshold (default minimum: 30)                                      |
+| `validators`                    | Live checks (URL, auth, AWS STS, Twilio pair, JWT inspect, URI inspect, …) |
+| `informational_types`           | Public-by-design hits (Stripe publishable, Firebase URL, …)                |
+| `exposure_types`                | Non-secret leak surface (source maps)                                      |
+| `severity` / compliance tags    | Report metadata                                                            |
+
 
 Overlays merge on top (repeatable `--config`). Set a pattern or validator to `null` to remove it:
 
@@ -350,7 +382,7 @@ Overlays merge on top (repeatable `--config`). Set a pattern or validator to `nu
 python3 reconpipe.py -d example.com --config engagement.example.yaml
 ```
 
-See [`engagement.example.yaml`](engagement.example.yaml) for the overlay shape.
+See `[engagement.example.yaml](engagement.example.yaml)` for the overlay shape.
 
 Shopify Admin tokens need a store host:
 
@@ -362,20 +394,24 @@ Vault (`hvs`/`hvb`) and Grafana (`glsa_`) checks take `--vault-addr` and `--graf
 
 ---
 
+
+
 ## Secret detection
 
 ReconPipe stacks several engines. Hits are de-duplicated (SHA-256 of the secret) and scored before validation.
 
-| Engine | When it runs |
-|--------|----------------|
-| `config.yaml` regex | Always |
-| Bundled secrets pack | Unless `--skip-secrets-db` |
-| User / refreshed secrets-patterns-db YAML | If `~/.reconpipe/secrets_patterns.yml` exists, or `--secrets-db` |
-| Public-API query keys (`?api_key=`, `?appid=`) | Fingerprints from [public-apis](https://github.com/public-apis/public-apis); `--skip-public-apis` / `--refresh-public-apis` |
-| TruffleHog filesystem (and `trufflehog git` for `--repo`) | If installed; `--no-trufflehog` disables |
-| Gitleaks | If installed; `--skip-gitleaks` disables |
-| jsleak | If installed; `--skip-jsleak` disables |
-| Built-in JS parser | Endpoints + assignments in downloaded JS |
+
+| Engine                                                    | When it runs                                                                                                                |
+| --------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| `config.yaml` regex                                       | Always                                                                                                                      |
+| Bundled secrets pack                                      | Unless `--skip-secrets-db`                                                                                                  |
+| User / refreshed secrets-patterns-db YAML                 | If `~/.reconpipe/secrets_patterns.yml` exists, or `--secrets-db`                                                            |
+| Public-API query keys (`?api_key=`, `?appid=`)            | Fingerprints from [public-apis](https://github.com/public-apis/public-apis); `--skip-public-apis` / `--refresh-public-apis` |
+| TruffleHog filesystem (and `trufflehog git` for `--repo`) | If installed; `--no-trufflehog` disables                                                                                    |
+| Gitleaks                                                  | If installed; `--skip-gitleaks` disables                                                                                    |
+| jsleak                                                    | If installed; `--skip-jsleak` disables                                                                                      |
+| Built-in JS parser                                        | Endpoints + assignments in downloaded JS                                                                                    |
+
 
 Covered families include cloud (AWS, GCP, Azure, OCI), git forges, payments, email/SMS, Slack/Discord/Telegram, AI vendors, PaaS (Vercel, Railway, Render, Fly, Heroku), data stores (Mongo, Postgres, Redis URIs), CI, observability, and generic `api_key=` assignments. Informational hits (publishable keys, client SDK IDs) are stored separately and are not treated as secrets.
 
@@ -385,23 +421,27 @@ Low-confidence or noisy matches can land in `quarantine.json` instead of the mai
 
 ---
 
+
+
 ## Output
 
 Default directory: `recon_<domain>/` (override with `-o`).
 
 Start here:
 
-| File | Contents |
-|------|----------|
-| `summary.txt` | Human-readable wrap-up |
-| `report.html` / `report.md` | Reviewable reports |
-| `findings.json` | Actionable findings and validation results |
-| `valid_keys.json` | Confirmed live keys only |
-| `informational.json` | Public-by-design hits |
-| `source_map_exposures.json` | Public `.map` files |
-| `results.sarif` | SARIF 2.1.0 for CI |
-| `export_hackerone.md` / `export_jira.md` | Draft write-ups |
-| `.reconpipe_ignore.json` | Baseline (type + source, or `--ignore-hash`) |
+
+| File                                     | Contents                                     |
+| ---------------------------------------- | -------------------------------------------- |
+| `summary.txt`                            | Human-readable wrap-up                       |
+| `report.html` / `report.md`              | Reviewable reports                           |
+| `findings.json`                          | Actionable findings and validation results   |
+| `valid_keys.json`                        | Confirmed live keys only                     |
+| `informational.json`                     | Public-by-design hits                        |
+| `source_map_exposures.json`              | Public `.map` files                          |
+| `results.sarif`                          | SARIF 2.1.0 for CI                           |
+| `export_hackerone.md` / `export_jira.md` | Draft write-ups                              |
+| `.reconpipe_ignore.json`                 | Baseline (type + source, or `--ignore-hash`) |
+
 
 Useful intermediates: `subdomains.txt`, `live_hosts.txt`, `files_to_scan.txt`, `downloaded_files/`, `js_endpoints.json`, `js_secrets.json`, `gitleaks.json`, `jsleak.txt`, `sensitive_paths.txt`, `wayback_sources.json`, `pipeline_metrics.json`, `checkpoint.json`.
 
@@ -409,78 +449,90 @@ Keep the output directory private. `valid_keys.json` is the highest-risk file.
 
 ---
 
+
+
 ## CLI reference
 
 Run `python3 reconpipe.py -h` for the full list. Grouped below.
 
 **Target**
 
-| Flag | Meaning |
-|------|---------|
-| `-d`, `--domain` | Target domain |
-| `--domain-list FILE` | One domain per line |
-| `--subdomains FILE` | Existing hosts (skips Chaos) |
-| `--files FILE` | Existing URLs (skips discovery) |
-| `-o`, `--output DIR` | Output directory |
-| `--include-pattern FILE` / `--exclude-pattern FILE` | Host globs |
-| `--repo URL` | Clone and scan a git repo |
-| `--repo-shallow` | `--depth 1` clone (no history scan) |
-| `--iac-scan` | Also walk Docker / K8s / Terraform files |
+
+| Flag                                                | Meaning                                  |
+| --------------------------------------------------- | ---------------------------------------- |
+| `-d`, `--domain`                                    | Target domain                            |
+| `--domain-list FILE`                                | One domain per line                      |
+| `--subdomains FILE`                                 | Existing hosts (skips Chaos)             |
+| `--files FILE`                                      | Existing URLs (skips discovery)          |
+| `-o`, `--output DIR`                                | Output directory                         |
+| `--include-pattern FILE` / `--exclude-pattern FILE` | Host globs                               |
+| `--repo URL`                                        | Clone and scan a git repo                |
+| `--repo-shallow`                                    | `--depth 1` clone (no history scan)      |
+| `--iac-scan`                                        | Also walk Docker / K8s / Terraform files |
+
 
 **Skip / extra stages**
 
-| Flag | Meaning |
-|------|---------|
-| `--skip-chaos` `--skip-subfinder` `--skip-amass` `--skip-assetfinder` `--skip-findomain` | Subdomain sources |
-| `--skip-intel` `--skip-crtsh` | Passive hostname intel |
-| `--skip-dnsx` `--skip-httpx` | Resolve / live filter |
-| `--skip-gau` | Passive archives only |
-| `--skip-discovery` | All URL discovery |
-| `--skip-hakrawler` `--skip-paramspider` `--skip-naabu` `--skip-whatweb` `--skip-gowitness` | Optional recon |
-| `--nuclei` `--nuclei-templates PATH` `--nuclei-import FILE` | Nuclei |
-| `--skip-wayback-bodies` | Do not fetch Wayback snapshots for dead URLs |
-| `--skip-sensitive-paths` | Skip `.env` / `.git` / swagger probes |
-| `--spray` | Opt-in extra leak-path brute |
-| `--no-trufflehog` `--skip-gitleaks` `--skip-jsleak` | Secret engines |
-| `--no-validate` | Detection only |
-| `--headless` | Katana Chrome for SPAs |
-| `--amass-active` | Amass without `-passive` |
+
+| Flag                                                                                       | Meaning                                      |
+| ------------------------------------------------------------------------------------------ | -------------------------------------------- |
+| `--skip-chaos` `--skip-subfinder` `--skip-amass` `--skip-assetfinder` `--skip-findomain`   | Subdomain sources                            |
+| `--skip-intel` `--skip-crtsh`                                                              | Passive hostname intel                       |
+| `--skip-dnsx` `--skip-httpx`                                                               | Resolve / live filter                        |
+| `--skip-gau`                                                                               | Passive archives only                        |
+| `--skip-discovery`                                                                         | All URL discovery                            |
+| `--skip-hakrawler` `--skip-paramspider` `--skip-naabu` `--skip-whatweb` `--skip-gowitness` | Optional recon                               |
+| `--nuclei` `--nuclei-templates PATH` `--nuclei-import FILE`                                | Nuclei                                       |
+| `--skip-wayback-bodies`                                                                    | Do not fetch Wayback snapshots for dead URLs |
+| `--skip-sensitive-paths`                                                                   | Skip `.env` / `.git` / swagger probes        |
+| `--spray`                                                                                  | Opt-in extra leak-path brute                 |
+| `--no-trufflehog` `--skip-gitleaks` `--skip-jsleak`                                        | Secret engines                               |
+| `--no-validate`                                                                            | Detection only                               |
+| `--headless`                                                                               | Katana Chrome for SPAs                       |
+| `--amass-active`                                                                           | Amass without `-passive`                     |
+
 
 **Secrets packs**
 
-| Flag | Meaning |
-|------|---------|
-| `--secrets-db FILE` | Extra YAML (repeatable) |
-| `--refresh-secrets-db` | Download filtered secrets-patterns-db |
-| `--skip-secrets-db` | Ignore bundled/user extra regexes |
-| `--secrets-db-medium` | Also keep medium-confidence rules |
-| `--skip-public-apis` / `--refresh-public-apis` | Query-string vendor key catalog |
+
+| Flag                                           | Meaning                               |
+| ---------------------------------------------- | ------------------------------------- |
+| `--secrets-db FILE`                            | Extra YAML (repeatable)               |
+| `--refresh-secrets-db`                         | Download filtered secrets-patterns-db |
+| `--skip-secrets-db`                            | Ignore bundled/user extra regexes     |
+| `--secrets-db-medium`                          | Also keep medium-confidence rules     |
+| `--skip-public-apis` / `--refresh-public-apis` | Query-string vendor key catalog       |
+
 
 **Runtime**
 
-| Flag | Meaning |
-|------|---------|
-| `--concurrency N` | Validation concurrency (default 10) |
-| `--download-workers N` | Download parallelism (default 16) |
-| `--gau-threads N` | gau threads (default 5) |
-| `--polite` | ~500 ms delay between requests |
-| `--requests-per-second N` | Global rate limit |
-| `--proxy URL` `--proxy-auth USER:PASS` | HTTP proxy |
-| `-H NAME:VALUE` | Extra request header (repeatable) |
-| `--credentials FILE` | Cookies + headers YAML/JSON |
-| `--burp-import FILE` | Burp XML URLs |
-| `--docker-fallback` | Run missing tools in Docker when possible |
-| `--resume` / `--resume-from STAGE` | Continue a previous run |
-| `--config FILE` | Overlay YAML (repeatable) |
-| `--sarif FILE` | SARIF path |
-| `--no-fail-on-valid` | Do not exit 1 on live keys |
-| `--ignore-hash SHA256` | Permanent baseline suppress (repeatable) |
+
+| Flag                                   | Meaning                                   |
+| -------------------------------------- | ----------------------------------------- |
+| `--concurrency N`                      | Validation concurrency (default 10)       |
+| `--download-workers N`                 | Download parallelism (default 16)         |
+| `--gau-threads N`                      | gau threads (default 5)                   |
+| `--polite`                             | ~500 ms delay between requests            |
+| `--requests-per-second N`              | Global rate limit                         |
+| `--proxy URL` `--proxy-auth USER:PASS` | HTTP proxy                                |
+| `-H NAME:VALUE`                        | Extra request header (repeatable)         |
+| `--credentials FILE`                   | Cookies + headers YAML/JSON               |
+| `--burp-import FILE`                   | Burp XML URLs                             |
+| `--docker-fallback`                    | Run missing tools in Docker when possible |
+| `--resume` / `--resume-from STAGE`     | Continue a previous run                   |
+| `--config FILE`                        | Overlay YAML (repeatable)                 |
+| `--sarif FILE`                         | SARIF path                                |
+| `--no-fail-on-valid`                   | Do not exit 1 on live keys                |
+| `--ignore-hash SHA256`                 | Permanent baseline suppress (repeatable)  |
+
 
 ---
 
+
+
 ## Troubleshooting
 
-**`httpx` shows as missing after `go install`**
+`httpx` **shows as missing after** `go install`
 
 The Python `httpx` library installs a different CLI with the same name. ReconPipe only accepts ProjectDiscovery httpx.
 
@@ -506,7 +558,7 @@ Raise `min_confidence` in an overlay, disable `generic_secret`, or `--skip-secre
 
 Install pywebview and WebKit (see [Installation](#installation)), or pass `--native`. `--browser` forces a localhost tab.
 
-**Need a global `reconpipe` command**
+**Need a global** `reconpipe` **command**
 
 ```bash
 chmod +x reconpipe.py
@@ -515,6 +567,8 @@ reconpipe -d example.com
 ```
 
 ---
+
+
 
 ## Tests
 
@@ -527,6 +581,8 @@ python3 tests/test_gui_integration.py
 ```
 
 ---
+
+
 
 ## License
 
