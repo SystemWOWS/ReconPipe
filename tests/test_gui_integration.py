@@ -202,6 +202,8 @@ def test_gui_module_compiles_and_helpers():
     assert "--skip-code-search" in src and "--skip-buckets" in src
     assert "--ci" in src and "--github-token" in src
     assert "Rescan" in src and "--resume" in src
+    assert "FINDINGS_RENDER_CAP" in src
+    assert "Showing first" in src
     assert "gitleaks.json" in src and "spray_urls.txt" in src
     assert "jsleak.txt" in src
     assert "buckets.json" in src

@@ -1,5 +1,5 @@
 #!/bin/sh
-# ReconPipe container entry: scan by default, or `gui` for the web UI.
+# ReconPipe container entry: `gui` (compose default) or reconpipe.py args.
 set -e
 WORKDIR="${RECONPIPE_WORKDIR:-/work}"
 mkdir -p "$WORKDIR" "${RECONPIPE_HOME:-/root/.reconpipe}"

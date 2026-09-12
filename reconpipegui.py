@@ -36,6 +36,8 @@ except ImportError:
 import reconpipe as rp
 
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+FINDINGS_RENDER_CAP = 80
+CONSOLE_PUSH_CHARS = 800
 DOMAIN_RE = re.compile(
     r"^(?=.{1,253}$)(?!-)[A-Za-z0-9-]{1,63}(?<!-)(\.(?!-)[A-Za-z0-9-]{1,63}(?<!-))+$"
 )
@@ -103,12 +105,16 @@ def load_json_list(path: Path) -> List[Dict]:
     return data if isinstance(data, list) else []
 
 
-def load_jsonl_list(path: Path) -> List[Dict]:
+def load_jsonl_list(path: Path, limit: int = 2500) -> List[Dict]:
     if not path.is_file():
         return []
     rows: List[Dict] = []
     try:
-        for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        lines = text.splitlines()
+        if limit and len(lines) > limit:
+            lines = lines[-limit:]
+        for line in lines:
             line = line.strip()
             if not line:
                 continue
@@ -339,7 +345,7 @@ class PipelineRunner:
 
     def drain_logs(self) -> List[str]:
         lines: List[str] = []
-        while len(lines) < 40:
+        while len(lines) < 20:
             try:
                 lines.append(self.log_q.get_nowait())
             except queue.Empty:
@@ -1451,8 +1457,10 @@ def build_ui() -> None:
 
                 def render_findings() -> None:
                     rows = filtered_rows()
+                    shown = rows[:FINDINGS_RENDER_CAP]
                     findings_meta.set_text(
-                        f"{len(rows)} shown · {len(STATE.findings)} actionable · "
+                        f"{min(len(rows), FINDINGS_RENDER_CAP)} shown · "
+                        f"{len(STATE.findings)} actionable · "
                         f"{len(STATE.informational)} informational · "
                         f"{len(STATE.exposures)} exposures"
                     )
@@ -1474,7 +1482,11 @@ def build_ui() -> None:
                                 "text-slate-500 text-sm"
                             )
                             return
-                        for idx, f in enumerate(rows):
+                        if len(rows) > FINDINGS_RENDER_CAP:
+                            ui.label(
+                                f"Showing first {FINDINGS_RENDER_CAP} of {len(rows)} findings."
+                            ).classes("text-xs text-slate-500")
+                        for idx, f in enumerate(shown):
                             key = str(f.get("key") or "")
                             fid = f.get("hash") or f"{f.get('type')}:{key[:24]}:{idx}"
                             revealed = fid in STATE.revealed
@@ -2179,9 +2191,12 @@ def build_ui() -> None:
             # "Message too long" if a console dump exceeds the WS limit.
             if lines:
                 text = "\n".join(lines)
-                if len(text) > 1500:
-                    text = text[-1500:]
-                console.push(text)
+                if len(text) > CONSOLE_PUSH_CHARS:
+                    text = text[-CONSOLE_PUSH_CHARS:]
+                try:
+                    console.push(text)
+                except Exception:
+                    pass
             for ln in lines:
                 if "[/" in ln or "/6]" in ln:
                     detect_stage(ln)
@@ -2199,16 +2214,14 @@ def build_ui() -> None:
                         (f.get("hash"), f.get("type"), f.get("key"))
                         for f in STATE.findings
                     }
-                    added = 0
                     for f in streamed:
                         ident = (f.get("hash"), f.get("type"), f.get("key"))
                         if ident in known:
                             continue
                         STATE.findings.append(f)
                         known.add(ident)
-                        added += 1
-                    if added and hasattr(build_ui, "render_findings"):
-                        build_ui.render_findings()  # type: ignore[attr-defined]
+                    # Do not rebuild the findings table mid-scan — that crashes
+                    # the browser websocket at the live-host / discovery stages.
         elif STATE.runner.finished_at and STATE.runner.exit_code is not None:
             # Finalize once
             if getattr(STATE, "_finalized_at", None) != STATE.runner.finished_at:
@@ -2398,7 +2411,7 @@ def main() -> None:
         binding_refresh_interval=2.0,
         # Do not replay a huge backlog after a hitch (default 1000 can crash WS).
         message_history_length=0,
-        reconnect_timeout=8.0,
+        reconnect_timeout=30.0,
     )
     if native:
         run_kwargs["window_size"] = (1440, 900)

@@ -39,15 +39,21 @@ Use this only on assets you own or have written permission to test. Validated ke
 
 ## Quick start
 
-**Docker (fastest — no build, no `install.sh`):** grab `docker-compose.yml`, pull the pre-built image from GHCR, and scan.
+**Docker (GUI like an app):** from the `ReconPipe` folder:
 
 ```bash
-mkdir reconpipe && cd reconpipe
-curl -O https://raw.githubusercontent.com/SystemWOWS/ReconPipe/main/docker-compose.yml
-docker compose pull
+docker compose up -d --build    # first time
+# later:
+docker compose up -d
+```
+
+Open http://127.0.0.1:8088 and run the scan from the GUI. Stop with `docker compose down`.
+
+Optional CLI in the same image:
+
+```bash
 docker compose run --rm reconpipe -d example.com
 docker compose run --rm reconpipe --rescan -d example.com
-docker compose --profile gui up gui    # http://127.0.0.1:8088
 ```
 
 Results land in `scans/`. Saved keys, targets, and history land in `docker-home/` (same role as `~/.reconpipe` on the host).
@@ -90,25 +96,33 @@ reconpipe-gui
 
 Full tool PATH without running `install.sh`. Docker Desktop on Windows works; run the commands from a folder that has `docker-compose.yml`.
 
-**Run the published image (recommended).** CI builds it on every push and publishes `ghcr.io/systemwows/reconpipe:latest`, so you only pull:
+**Start the GUI (this is the usual way):**
+
+```bash
+docker compose up -d --build    # first time, or after you change the Dockerfile
+docker compose up -d            # later starts
+```
+
+Then open http://127.0.0.1:8088 — same idea as launching an app. Leave it running; `docker compose down` stops it.
+
+**CLI** (same image, one-shot container):
+
+```bash
+docker compose run --rm reconpipe -d example.com
+docker compose run --rm reconpipe --rescan -d example.com
+```
+
+Or pull a published image instead of building:
 
 ```bash
 docker compose pull
-docker compose run --rm reconpipe -d example.com
-docker compose run --rm reconpipe --rescan -d example.com
-docker compose --profile gui up gui
+docker compose up -d
 ```
 
-Pin a version instead of `latest`:
+Pin a version:
 
 ```bash
 RECONPIPE_IMAGE=ghcr.io/systemwows/reconpipe:v1.3 docker compose pull
-```
-
-**Build locally (for development).** When you are changing ReconPipe itself, build from the checkout instead of pulling:
-
-```bash
-docker compose build
 ```
 
 | Path on host     | Path in container        | What it is                                      |
@@ -118,13 +132,15 @@ docker compose build
 
 Pass API keys as env vars (`CHAOS_KEY`, `GITHUB_TOKEN`, …) or save them from the GUI into `docker-home/keys.yaml`.
 
+ProjectDiscovery `httpx` is kept at `/opt/pd-bin/httpx` (`HTTPX_BIN`) so pip/NiceGUI cannot replace it with the Python `httpx` CLI.
+
 The GHCR package must be **public** for anonymous `docker compose pull`. If it is private, run `docker login ghcr.io` first with a token that can read packages. Publishing the image redistributes the third-party recon binaries under their own licenses.
 
 `--rescan` reuses the saved URL list and output directory for that domain, then `--resume` (skip files already downloaded). In the GUI: **Saved targets → Rescan**, or **History → Rescan**.
 
 `--docker-fallback` is a different feature: it runs *missing* host binaries via `docker run --rm`. You do not need it inside this image.
 
-Katana `--headless` needs Chrome, which this image does not ship. Leave headless off in Docker.
+Katana `--headless` needs Chrome, which this image does not ship. Leave headless off in Docker. whatweb, gowitness, and wappalyzer are also not in the image (Ruby / Chrome / Node).
 
 ---
 
@@ -397,6 +413,8 @@ PagerDuty and Opsgenie flags are also available. `--no-notify` skips the desktop
 
 
 ## Desktop GUI
+
+Docker (recommended): `docker compose up -d` then http://127.0.0.1:8088.
 
 ```bash
 python3 reconpipegui.py              # native window when a display + pywebview exist

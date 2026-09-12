@@ -1,55 +1,50 @@
-# ReconPipe in Docker — tools are baked into the image.
+# ReconPipe — start the GUI like an app:
 #
-# Run (no build; pulls the published image from GHCR):
-#   docker compose pull
+#   docker compose up -d
+#   open http://127.0.0.1:8088
+#
+# First time (or after a Dockerfile change):
+#   docker compose up -d --build
+#
+# Optional CLI scan (same image):
 #   docker compose run --rm reconpipe -d example.com
 #   docker compose run --rm reconpipe --rescan -d example.com
 #
-# GUI at http://127.0.0.1:8088 :
-#   docker compose --profile gui up gui
-#
-# Develop (build the image locally from this checkout instead of pulling):
-#   docker compose build
-#
-# Pin a version or use your own image:
-#   RECONPIPE_IMAGE=ghcr.io/systemwows/reconpipe:v1.3 docker compose pull
+# Pin a published image:
+#   RECONPIPE_IMAGE=ghcr.io/systemwows/reconpipe:latest docker compose up -d
+
+x-reconpipe-common: &reconpipe-common
+  image: ${RECONPIPE_IMAGE:-ghcr.io/systemwows/reconpipe:latest}
+  build: .
+  working_dir: /work
+  volumes:
+    - ./scans:/work
+    - ./docker-home:/root/.reconpipe
+  environment:
+    RECONPIPE_HOME: /root/.reconpipe
+    RECONPIPE_WORKDIR: /work
+    HTTPX_BIN: /opt/pd-bin/httpx
+    PYTHONUNBUFFERED: "1"
+    CHAOS_KEY: ${CHAOS_KEY:-}
+    PDCP_API_KEY: ${PDCP_API_KEY:-}
+    SHODAN_API_KEY: ${SHODAN_API_KEY:-}
+    CENSYS_API_ID: ${CENSYS_API_ID:-}
+    CENSYS_API_SECRET: ${CENSYS_API_SECRET:-}
+    ZOOMEYE_API_KEY: ${ZOOMEYE_API_KEY:-}
+    GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+    GITLAB_TOKEN: ${GITLAB_TOKEN:-}
 
 services:
-  reconpipe:
-    image: ${RECONPIPE_IMAGE:-ghcr.io/systemwows/reconpipe:latest}
-    build: .
-    working_dir: /work
-    volumes:
-      - ./scans:/work
-      - ./docker-home:/root/.reconpipe
-    environment:
-      RECONPIPE_HOME: /root/.reconpipe
-      RECONPIPE_WORKDIR: /work
-      PYTHONUNBUFFERED: "1"
-      CHAOS_KEY: ${CHAOS_KEY:-}
-      PDCP_API_KEY: ${PDCP_API_KEY:-}
-      SHODAN_API_KEY: ${SHODAN_API_KEY:-}
-      CENSYS_API_ID: ${CENSYS_API_ID:-}
-      CENSYS_API_SECRET: ${CENSYS_API_SECRET:-}
-      ZOOMEYE_API_KEY: ${ZOOMEYE_API_KEY:-}
-      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
-      GITLAB_TOKEN: ${GITLAB_TOKEN:-}
-    stdin_open: true
-    tty: true
-
+  # Default service — `docker compose up -d` starts only this.
   gui:
-    profiles: ["gui"]
-    image: ${RECONPIPE_IMAGE:-ghcr.io/systemwows/reconpipe:latest}
-    build: .
-    working_dir: /work
+    <<: *reconpipe-common
     ports:
       - "8088:8088"
-    volumes:
-      - ./scans:/work
-      - ./docker-home:/root/.reconpipe
+    restart: unless-stopped
     environment:
       RECONPIPE_HOME: /root/.reconpipe
       RECONPIPE_WORKDIR: /work
+      HTTPX_BIN: /opt/pd-bin/httpx
       RECONPIPE_GUI_HOST: "0.0.0.0"
       RECONPIPE_GUI_PORT: "8088"
       RECONPIPE_GUI_NATIVE: "0"
@@ -64,3 +59,10 @@ services:
       GITHUB_TOKEN: ${GITHUB_TOKEN:-}
       GITLAB_TOKEN: ${GITLAB_TOKEN:-}
     command: ["gui"]
+
+  # One-shot CLI. Not started by `up -d`.
+  reconpipe:
+    <<: *reconpipe-common
+    profiles: ["cli"]
+    stdin_open: true
+    tty: true

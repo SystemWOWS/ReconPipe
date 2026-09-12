@@ -26,7 +26,7 @@ from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass, field, fields
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
 from urllib.parse import parse_qs, urlparse, quote, urlencode, unquote
 
 try:
@@ -2033,6 +2033,33 @@ PIPELINE_TOOLS = [
     "hakrawler", "paramspider", "linkfinder", "naabu", "whatweb",
     "wappalyzer", "gowitness", "nuclei", "trufflehog", "gitleaks", "spray", "jsleak",
 ]
+DISCOVERY_URL_CAP = 20000
+DISCOVERY_PASSIVE_HOST_CAP = 80
+
+
+def extend_url_set(
+    dest: Set[str],
+    items: Iterable[str],
+    *,
+    cap: int = DISCOVERY_URL_CAP,
+) -> int:
+    """Add URLs until dest hits cap. Returns how many new items were inserted."""
+    added = 0
+    for raw in items:
+        if len(dest) >= cap:
+            break
+        line = (raw or "").strip()
+        if not line:
+            continue
+        before = len(dest)
+        dest.add(line)
+        if len(dest) > before:
+            added += 1
+    return added
+
+
+def url_set_full(dest: Set[str], cap: int = DISCOVERY_URL_CAP) -> bool:
+    return len(dest) >= cap
 
 
 def _cmd_blob(path: str, *args: str) -> str:
@@ -6502,12 +6529,14 @@ def main(argv: Optional[List[str]] = None) -> int:
             threads=50,
             timeout=10,
         )
-        rc, output = run_cmd(httpx_cmd, timeout=httpx_timeout)
+        # Results go to -o (live_hosts.txt). Capturing stdout here used to
+        # buffer every host in RAM and crash the GUI websocket.
+        rc, _output = run_cmd(httpx_cmd, timeout=httpx_timeout, discard_stdout=True)
 
         def _httpx_hosts() -> bytes:
             if live_hosts_file.is_file() and live_hosts_file.stat().st_size > 0:
                 return live_hosts_file.read_bytes()
-            return output or b""
+            return b""
 
         hosts_raw = _httpx_hosts()
         if rc == 0:
@@ -6528,13 +6557,14 @@ def main(argv: Optional[List[str]] = None) -> int:
             )
             live_hosts_file.write_text("")
         else:
-            # Instant crash (bad flags, wrong binary, etc.) — keep recon moving
+            # Wrong binary / bad flags. Treating every subdomain as live used
+            # to explode Katana/waymore and crash the GUI.
             log(
                 "httpx failed immediately with no results — "
-                "continuing with unverified subdomains (same as --skip-httpx)",
+                "not treating all subdomains as live (use --skip-httpx to force)",
                 "error",
             )
-            live_hosts_file.write_text("\n".join(sub_list) + "\n")
+            live_hosts_file.write_text("")
 
     live_list = [h for h in live_hosts_file.read_text().splitlines() if h.strip()]
     live_count = len(live_list)
@@ -6598,7 +6628,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         log("URL discovery skipped (--skip-discovery) — scanning live hosts directly", "warn")
         files_to_scan.write_text("\n".join(live_list))
     else:
-        all_urls: set = set()
+        all_urls: Set[str] = set()
+        passive_hosts = live_list[:DISCOVERY_PASSIVE_HOST_CAP]
+        if live_count > DISCOVERY_PASSIVE_HOST_CAP:
+            log(
+                f"Passive discovery: first {DISCOVERY_PASSIVE_HOST_CAP} of "
+                f"{live_count} live hosts (keeps the GUI from hanging)",
+                "info",
+            )
 
         # Katana — active crawl + JS endpoint parsing
         if tools_status["katana"]:
@@ -6621,22 +6658,20 @@ def main(argv: Optional[List[str]] = None) -> int:
             # Scale with live host count; default 600s is too short for large scopes
             katana_timeout = max(600, min(7200, live_count * 2 + 300))
             rc, _ = run_cmd(katana_cmd, timeout=katana_timeout, discard_stdout=True)
-            if rc == 0 and katana_out_file.exists():
-                raw_katana = [l.strip() for l in katana_out_file.read_text().splitlines() if l.strip()]
-                log(f"Katana raw crawl: {len(raw_katana)} total URLs", "info")
-                # Keep all URLs — scanners find secrets in any content type
-                for line in raw_katana:
-                    all_urls.add(line)
-                log(f"Katana: {len(all_urls)} URLs added", "success")
-            elif katana_out_file.exists() and katana_out_file.stat().st_size > 0:
-                raw_katana = [l.strip() for l in katana_out_file.read_text().splitlines() if l.strip()]
-                for line in raw_katana:
-                    all_urls.add(line)
-                log(
-                    f"Katana timed out/failed — using partial output "
-                    f"({len(raw_katana)} URLs)",
-                    "warn",
-                )
+            if katana_out_file.exists() and katana_out_file.stat().st_size > 0:
+                raw_katana = [
+                    l.strip() for l in katana_out_file.read_text().splitlines() if l.strip()
+                ]
+                extend_url_set(all_urls, raw_katana)
+                if rc == 0:
+                    log(f"Katana raw crawl: {len(raw_katana)} total URLs", "info")
+                    log(f"Katana: {len(all_urls)} URLs added", "success")
+                else:
+                    log(
+                        f"Katana timed out/failed — using partial output "
+                        f"({len(raw_katana)} URLs)",
+                        "warn",
+                    )
             else:
                 log("Katana failed or produced no output — skipping its URLs", "warn")
         else:
@@ -6644,16 +6679,20 @@ def main(argv: Optional[List[str]] = None) -> int:
             log("Install: go install github.com/projectdiscovery/katana/cmd/katana@latest", "warn")
 
         # Passive archives — skipped by --skip-gau
-        if args.skip_gau:
+        if url_set_full(all_urls):
+            log(f"URL discovery capped at {DISCOVERY_URL_CAP} — skipping extra sources", "warn")
+        elif args.skip_gau:
             log("Passive archives skipped (--skip-gau)", "info")
         elif tools_status["waymore"]:
             before = len(all_urls)
-            log(f"waymore: passive archive crawl ({live_count} hosts)...", "info")
+            log(f"waymore: passive archive crawl ({len(passive_hosts)} hosts)...", "info")
             waymore_dir = output_dir / "waymore_out"
             waymore_dir.mkdir(exist_ok=True)
 
             waymore_failures = 0
-            for host in live_list:
+            for host in passive_hosts:
+                if url_set_full(all_urls):
+                    break
                 clean = re.sub(r'https?://', '', host).rstrip('/')
                 # -oU expects a file path (not a dir);
                 waymore_out = waymore_dir / f"{clean.replace('/', '_')}.txt"
@@ -6666,14 +6705,16 @@ def main(argv: Optional[List[str]] = None) -> int:
                     waymore_failures += 1
                     continue
                 if waymore_out.is_file():
-                    for line in waymore_out.read_text().splitlines():
-                        line = line.strip()
-                        if line and file_exts.search(line):
-                            all_urls.add(line)
+                    kept = [
+                        line.strip()
+                        for line in waymore_out.read_text().splitlines()
+                        if line.strip() and file_exts.search(line)
+                    ]
+                    extend_url_set(all_urls, kept)
             added = len(all_urls) - before
             if waymore_failures:
                 log(
-                    f"waymore: {waymore_failures}/{live_count} hosts failed "
+                    f"waymore: {waymore_failures}/{len(passive_hosts)} hosts failed "
                     f"(+{added} URLs, total {len(all_urls)})",
                     "warn",
                 )
@@ -6683,30 +6724,39 @@ def main(argv: Optional[List[str]] = None) -> int:
         elif tools_status["gau"]:
             before = len(all_urls)
             log("waymore not found — using gau as passive fallback (Wayback + CommonCrawl + OTX + VT)", "warn")
-            for i, host in enumerate(live_list, 1):
+            for i, host in enumerate(passive_hosts, 1):
+                if url_set_full(all_urls):
+                    break
                 if i % 10 == 0:
-                    log(f"  gau: {i}/{live_count} hosts...", "info")
+                    log(f"  gau: {i}/{len(passive_hosts)} hosts...", "info")
                 rc, output = run_cmd(
                     build_gau_cmd(host, int(args.gau_threads)),
                     timeout=60,
+                    discard_stdout=False,
                 )
                 if output:
-                    for line in output.decode("utf-8", errors="ignore").splitlines():
-                        line = line.strip()
-                        if line and file_exts.search(line):
-                            all_urls.add(line)
+                    kept = [
+                        line.strip()
+                        for line in output.decode("utf-8", errors="ignore").splitlines()
+                        if line.strip() and file_exts.search(line)
+                    ]
+                    extend_url_set(all_urls, kept)
             log(f"gau: +{len(all_urls) - before} new URLs", "success")
 
         elif tools_status["waybackurls"]:
             before = len(all_urls)
             log("Using waybackurls as last-resort passive fallback", "warn")
-            for host in live_list:
+            for host in passive_hosts:
+                if url_set_full(all_urls):
+                    break
                 rc, output = run_cmd(build_waybackurls_cmd(host), timeout=60)
                 if output:
-                    for line in output.decode("utf-8", errors="ignore").splitlines():
-                        line = line.strip()
-                        if line and file_exts.search(line):
-                            all_urls.add(line)
+                    kept = [
+                        line.strip()
+                        for line in output.decode("utf-8", errors="ignore").splitlines()
+                        if line.strip() and file_exts.search(line)
+                    ]
+                    extend_url_set(all_urls, kept)
             log(f"waybackurls: +{len(all_urls) - before} new URLs", "success")
 
         else:
@@ -6716,7 +6766,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             log("Install waybackurls: go install github.com/tomnomnom/waybackurls@latest", "warn")
 
         # gospider active JS spider
-        if tools_status["gospider"]:
+        if tools_status["gospider"] and not url_set_full(all_urls):
             before = len(all_urls)
             log(f"gospider: active JS spidering ({live_count} hosts)...", "info")
             gs_input = output_dir / "gospider_input.txt"
@@ -6732,56 +6782,74 @@ def main(argv: Optional[List[str]] = None) -> int:
 
             url_re = re.compile(r'\[url\]\s+\[\d+\]\s+-\s+(https?://\S+)')
             js_re  = re.compile(r'https?://\S+\.(js|json|jsx|map)\b')
+            extra: List[str] = []
             for gf in gs_out_dir.glob("*"):
+                if url_set_full(all_urls):
+                    break
                 try:
                     for line in gf.read_text(errors="ignore").splitlines():
                         m = url_re.search(line)
                         if m and file_exts.search(m.group(1)):
-                            all_urls.add(m.group(1).strip())
+                            extra.append(m.group(1).strip())
                         m2 = js_re.search(line)
                         if m2:
-                            all_urls.add(m2.group(0).strip())
+                            extra.append(m2.group(0).strip())
                 except Exception:
                     pass
+            extend_url_set(all_urls, extra)
             log(f"gospider: +{len(all_urls) - before} new URLs (total {len(all_urls)})", "success")
-        else:
+        elif not tools_status["gospider"]:
             log("gospider not found — skipping active spider layer", "warn")
             log("Install: go install github.com/jaeles-project/gospider@latest", "warn")
 
-        if not args.skip_gau and tools_status.get("waybackurls"):
+        if not args.skip_gau and tools_status.get("waybackurls") and not url_set_full(all_urls):
             before = len(all_urls)
             log("waybackurls: extra Wayback pass...", "info")
-            for host in live_list[:80]:
+            for host in live_list[:DISCOVERY_PASSIVE_HOST_CAP]:
+                if url_set_full(all_urls):
+                    break
                 rc, output = run_cmd(build_waybackurls_cmd(host), timeout=45)
-                for line in collect_tool_stdout_lines(output):
-                    if file_exts.search(line):
-                        all_urls.add(line)
+                extend_url_set(
+                    all_urls,
+                    [line for line in collect_tool_stdout_lines(output) if file_exts.search(line)],
+                )
             log(f"waybackurls extra: +{len(all_urls) - before} URLs", "info")
 
-        if not args.skip_hakrawler and tools_status.get("hakrawler"):
+        if not args.skip_hakrawler and tools_status.get("hakrawler") and not url_set_full(all_urls):
             before = len(all_urls)
             log("hakrawler: form-aware crawl...", "info")
             for host in live_list[:40]:
+                if url_set_full(all_urls):
+                    break
                 target = host if host.startswith("http") else f"https://{host}"
                 rc, output = run_cmd(build_hakrawler_cmd(target), timeout=60)
-                for line in collect_tool_stdout_lines(output):
-                    all_urls.add(line)
+                extend_url_set(all_urls, collect_tool_stdout_lines(output))
             log(f"hakrawler: +{len(all_urls) - before} URLs", "info")
 
-        if not args.skip_paramspider and tools_status.get("paramspider"):
+        if not args.skip_paramspider and tools_status.get("paramspider") and not url_set_full(all_urls):
             ps_dir = output_dir / "paramspider"
             ps_dir.mkdir(exist_ok=True)
             log("paramspider: parameterized URLs...", "info")
             run_cmd(build_paramspider_cmd(args.domain, str(ps_dir)), timeout=120, discard_stdout=True)
+            extra = []
             for gf in ps_dir.rglob("*.txt"):
                 try:
-                    for line in gf.read_text(encoding="utf-8", errors="ignore").splitlines():
-                        if line.strip():
-                            all_urls.add(line.strip())
+                    extra.extend(
+                        line.strip()
+                        for line in gf.read_text(encoding="utf-8", errors="ignore").splitlines()
+                        if line.strip()
+                    )
                 except Exception:
                     pass
+            extend_url_set(all_urls, extra)
 
         sorted_urls = dedupe_urls(sorted(all_urls))
+        if len(sorted_urls) > DISCOVERY_URL_CAP:
+            log(
+                f"URL cap: keeping {DISCOVERY_URL_CAP} of {len(sorted_urls)} discovered URLs",
+                "warn",
+            )
+            sorted_urls = sorted_urls[:DISCOVERY_URL_CAP]
         files_to_scan.write_text("\n".join(sorted_urls))
 
     url_list = [u for u in files_to_scan.read_text().splitlines() if u.strip()]

@@ -22,14 +22,28 @@ class DockerPackagingTests(unittest.TestCase):
         self.assertIn("projectdiscovery/httpx", dockerfile)
         self.assertIn("zricethezav/gitleaks/v8", dockerfile)
         self.assertIn("trufflehog", dockerfile)
-        # Compose pulls the published image by default but can still build locally.
+        self.assertIn("/opt/pd-bin", dockerfile)
+        self.assertIn("HTTPX_BIN=/opt/pd-bin/httpx", dockerfile)
+        self.assertIn("CMD [\"gui\"]", dockerfile)
+        # Compose: GUI is the default `up -d` service; CLI is profile-only.
         self.assertIn("ghcr.io/systemwows/reconpipe", compose)
         self.assertIn("build: .", compose)
         self.assertIn("./scans:/work", compose)
         self.assertIn("./docker-home:/root/.reconpipe", compose)
         self.assertIn('command: ["gui"]', compose)
+        self.assertIn("restart: unless-stopped", compose)
+        self.assertIn('profiles: ["cli"]', compose)
+        self.assertIn("8088:8088", compose)
         self.assertIn("reconpipe.py", entry)
         self.assertIn('= "gui"', entry)
+
+    def test_discovery_url_cap(self):
+        dest: set = set()
+        added = rp.extend_url_set(dest, [f"http://x/{i}" for i in range(50)], cap=10)
+        self.assertEqual(len(dest), 10)
+        self.assertEqual(added, 10)
+        self.assertTrue(rp.url_set_full(dest, cap=10))
+        self.assertEqual(rp.extend_url_set(dest, ["http://y/1"], cap=10), 0)
 
     def test_ghcr_publish_workflow_present(self):
         wf = (ROOT / ".github" / "workflows" / "docker-image.yml").read_text(encoding="utf-8")
