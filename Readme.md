@@ -437,7 +437,7 @@ Also included:
 - History of past scans (persisted in `~/.reconpipe/history.yaml`) with Open / Rescan
 - Findings browser (actionable / informational / exposures) with redacted secrets and Reveal
 - Re-test a finding with the configured validator
-- Artifact preview (`findings.json`, `valid_keys.json`, `summary.txt`, SARIF, …)
+- Artifact preview and download (`findings.json`, `valid_keys.json`, `summary.txt`, SARIF, …) plus a zip of all reports when the scan finishes
 
 Do not bind `--browser` beyond localhost on an untrusted network. Result files can contain live secrets.
 

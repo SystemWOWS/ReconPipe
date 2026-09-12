@@ -2,6 +2,7 @@
 """Integration checks for ReconPipe GUI ↔ CLI wiring (no long network scan)."""
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import shutil
@@ -189,6 +190,11 @@ def test_gui_module_compiles_and_helpers():
     assert "--shodan-key" in src and "--zoomeye-key" in src and "--censys-id" in src
     assert "Save API keys" in src and "Save target" in src
     assert "Copy" in src and "Test key(s)" in src
+    assert "ui.run_io_bound" not in src
+    async def _io_probe():
+        return await mod.run_io_bound(lambda n: n + 1, 40)
+
+    assert asyncio.run(_io_probe()) == 41
     assert "--exclude-pattern" in src and "--notify-webhook" in src
     assert "one per line for batch" in src
     assert "Dark/Light" in src
@@ -200,6 +206,7 @@ def test_gui_module_compiles_and_helpers():
     assert "--skip-public-apis" in src
     assert "--skip-secrets-db" in src and "--skip-jsleak" in src
     assert "--skip-code-search" in src and "--skip-buckets" in src
+    assert "--no-default-scope" in src
     assert "--ci" in src and "--github-token" in src
     assert "Rescan" in src and "--resume" in src
     assert "FINDINGS_RENDER_CAP" in src
@@ -228,6 +235,28 @@ def test_gui_module_compiles_and_helpers():
     assert "gitleaks.json" in src and "spray_urls.txt" in src
     assert "jsleak.txt" in src
     assert "buckets.json" in src
+    assert "Download this file" in src
+    assert "Download all reports (.zip)" in src
+    with tempfile.TemporaryDirectory() as td:
+        ws = Path(td)
+        (ws / "findings.json").write_text("[]\n", encoding="utf-8")
+        (ws / "summary.txt").write_text("ok\n", encoding="utf-8")
+        (ws / "evil.txt").write_text("nope\n", encoding="utf-8")
+        assert mod.resolve_workspace_file(ws, "findings.json") is not None
+        assert mod.resolve_workspace_file(ws, "summary.txt") is not None
+        assert mod.resolve_workspace_file(ws, "evil.txt") is None
+        assert mod.resolve_workspace_file(ws, "../findings.json") is None
+        assert mod.resolve_workspace_file(ws, "hits/../../../etc/passwd") is None
+        zipped = mod.write_artifacts_zip(ws)
+        assert zipped is not None and zipped.is_file()
+        import zipfile
+
+        with zipfile.ZipFile(zipped) as zf:
+            names = set(zf.namelist())
+        assert "findings.json" in names
+        assert "summary.txt" in names
+        assert "evil.txt" not in names
+        assert zipped.name == mod.ARTIFACT_ZIP_NAME
     print("[ok] reconpipegui import + form validation helpers")
 
 

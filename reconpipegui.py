@@ -13,9 +13,10 @@ import subprocess
 import sys
 import threading
 import time
+import zipfile
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 import asyncio
 
 HERE = Path(__file__).resolve().parent
@@ -32,6 +33,25 @@ except ImportError:
         file=sys.stderr,
     )
     sys.exit(1)
+
+try:
+    from nicegui import run as nicegui_run
+except Exception:
+    nicegui_run = None  # type: ignore[assignment]
+
+
+async def run_io_bound(func: Any, *args: Any, **kwargs: Any) -> Any:
+    """Run a blocking function off the UI loop (NiceGUI 1.x–3.x)."""
+    bound = getattr(ui, "run_io_bound", None)
+    if callable(bound):
+        return await bound(func, *args, **kwargs)
+    io_bound = getattr(nicegui_run, "io_bound", None) if nicegui_run is not None else None
+    if callable(io_bound):
+        return await io_bound(func, *args, **kwargs)
+    loop = asyncio.get_running_loop()
+    if kwargs:
+        return await loop.run_in_executor(None, lambda: func(*args, **kwargs))
+    return await loop.run_in_executor(None, func, *args)
 
 import reconpipe as rp
 
@@ -82,6 +102,84 @@ ARTIFACT_FILES = [
     "openapi_urls.txt",
     "download_etag.json",
 ]
+ARTIFACT_ZIP_NAME = "reconpipe_artifacts.zip"
+
+
+def _artifact_rel_ok(rel: str) -> bool:
+    name = (rel or "").replace("\\", "/").lstrip("/")
+    if not name or name.startswith("../") or "/../" in f"/{name}/" or name.endswith("/.."):
+        return False
+    allowed = {n.replace("\\", "/") for n in ARTIFACT_FILES}
+    allowed.add(ARTIFACT_ZIP_NAME)
+    return name in allowed
+
+
+def resolve_workspace_file(workspace: Path, rel: str) -> Optional[Path]:
+    """Return an existing artifact under workspace, or None if off-limits/missing."""
+    name = (rel or "").replace("\\", "/").lstrip("/")
+    if not _artifact_rel_ok(name):
+        return None
+    try:
+        ws = Path(workspace).expanduser().resolve()
+        path = (ws / name).resolve()
+        path.relative_to(ws)
+    except (OSError, ValueError):
+        return None
+    return path if path.is_file() else None
+
+
+def existing_artifact_files(workspace: Path) -> List[Tuple[str, Path]]:
+    ws = Path(workspace)
+    rows: List[Tuple[str, Path]] = []
+    for name in ARTIFACT_FILES:
+        path = resolve_workspace_file(ws, name)
+        if path is not None:
+            rows.append((name.replace("\\", "/"), path))
+    return rows
+
+
+def write_artifacts_zip(workspace: Path) -> Optional[Path]:
+    """Zip existing report artifacts (not downloaded_files/)."""
+    files = existing_artifact_files(workspace)
+    if not files:
+        return None
+    dest = Path(workspace) / ARTIFACT_ZIP_NAME
+    with zipfile.ZipFile(dest, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for name, path in files:
+            zf.write(path, arcname=name)
+    return dest if dest.is_file() else None
+
+
+def trigger_browser_download(path: Path, filename: Optional[str] = None) -> bool:
+    """Send a workspace file to the browser (NiceGUI 1.x–3.x)."""
+    if not path.is_file():
+        ui.notify(f"File not found: {path.name}", type="negative")
+        return False
+    name = filename or path.name
+    download = getattr(ui, "download", None)
+    if download is None:
+        ui.notify("Download is not available in this NiceGUI build", type="negative")
+        return False
+    file_fn = getattr(download, "file", None)
+    try:
+        if callable(file_fn):
+            try:
+                file_fn(path, filename=name)
+            except TypeError:
+                file_fn(path)
+        elif callable(download):
+            try:
+                download(path, filename=name)
+            except TypeError:
+                download(path.read_bytes(), name)
+        else:
+            ui.notify("Download is not available in this NiceGUI build", type="negative")
+            return False
+        ui.notify(f"Downloading {name}", type="positive")
+        return True
+    except Exception as exc:
+        ui.notify(f"Download failed: {exc}", type="negative")
+        return False
 
 def strip_ansi(text: str) -> str:
     return ANSI_RE.sub("", text or "")
@@ -714,6 +812,7 @@ class GuiState:
         self.filter_severity: str = "All"
         self.scan_queue: List[str] = []
         self.dark_on: bool = True
+        self.preview_artifact: str = ""
 
 
 STATE = GuiState()
@@ -1273,6 +1372,9 @@ def build_ui() -> None:
                             skip_openapi = ui.checkbox("Skip OpenAPI/Postman parse (--skip-openapi)")
                             ci_on = ui.checkbox("CI / local-repo mode (--ci)")
                             repo_shallow = ui.checkbox("Shallow git clone (--repo-shallow)")
+                            no_default_scope = ui.checkbox(
+                                "Allow off-target URLs (--no-default-scope)"
+                            )
                         with ui.row().classes("w-full gap-4"):
                             conc_in = ui.number(
                                 "Validation concurrency", value=10, min=1, max=200
@@ -1408,6 +1510,7 @@ def build_ui() -> None:
                             "skip_buckets": bool(skip_buckets.value),
                             "skip_openapi": bool(skip_openapi.value),
                             "ci": bool(ci_on.value),
+                            "no_default_scope": bool(no_default_scope.value),
                             "github_token": (github_token_in.value or "").strip() or None,
                             "gitlab_token": (gitlab_token_in.value or "").strip() or None,
                             "github_org": (github_org_in.value or "").strip() or None,
@@ -1618,6 +1721,15 @@ def build_ui() -> None:
                             "text-xs text-slate-400 font-mono mt-1"
                         )
                         stats_html = ui.html("", sanitize=False).classes("w-full")
+                        ui.button(
+                            "Download reports (.zip)",
+                            on_click=lambda: (
+                                build_ui.download_all_artifacts()  # type: ignore[attr-defined]
+                                if callable(getattr(build_ui, "download_all_artifacts", None))
+                                else ui.notify("Open the Artifacts tab first", type="warning")
+                            ),
+                            color="primary",
+                        ).props("unelevated dense").classes("mt-2")
 
                     with ui.card().classes("w-full rp-card"):
                         ui.label("Load workspace").classes("rp-section")
@@ -1645,6 +1757,9 @@ def build_ui() -> None:
                             ]
                             reload_findings()
                             update_stats(force=True)
+                            refresh = getattr(build_ui, "refresh_artifacts", None)
+                            if callable(refresh):
+                                refresh()
                             ui.notify("Workspace loaded", type="positive")
                             tabs.set_value(tab_findings)
 
@@ -1979,7 +2094,7 @@ def build_ui() -> None:
                                 return
                             ui.notify("Running configured validator…", type="info")
                             try:
-                                result = await ui.run_io_bound(
+                                result = await run_io_bound(
                                     rp.validate_finding_configured_sync,
                                     dict(finding),
                                     STATE.domain,
@@ -2190,7 +2305,7 @@ def build_ui() -> None:
                         if session:
                             finding["aws_session_token"] = session
                         try:
-                            result = await ui.run_io_bound(
+                            result = await run_io_bound(
                                 rp.validate_finding_configured_sync,
                                 finding,
                                 domain,
@@ -2301,22 +2416,102 @@ def build_ui() -> None:
                     "These files may contain live secrets. Handle according to your "
                     "engagement rules; do not share them casually."
                 ).classes("text-xs text-amber-400 mb-2")
+
+                def current_workspace() -> Optional[Path]:
+                    ws = STATE.workspace or STATE.runner.output_dir
+                    return Path(ws) if ws else None
+
+                def download_named(rel: str) -> None:
+                    ws = current_workspace()
+                    if ws is None:
+                        ui.notify("No output directory yet", type="warning")
+                        return
+                    path = resolve_workspace_file(ws, rel)
+                    if path is None:
+                        ui.notify(f"Not available: {rel}", type="warning")
+                        return
+                    trigger_browser_download(path, Path(rel).name)
+
+                def download_previewed() -> None:
+                    rel = STATE.preview_artifact
+                    if not rel:
+                        ui.notify("Preview a file first", type="warning")
+                        return
+                    download_named(rel)
+
+                def download_all_artifacts() -> None:
+                    ws = current_workspace()
+                    if ws is None or not ws.is_dir():
+                        ui.notify("No output directory yet", type="warning")
+                        return
+                    dest = write_artifacts_zip(ws)
+                    if dest is None:
+                        ui.notify("No report files to zip yet", type="warning")
+                        return
+                    trigger_browser_download(dest, dest.name)
+
+                with ui.row().classes("gap-2 mb-3"):
+                    ui.button(
+                        "Download all reports (.zip)",
+                        on_click=download_all_artifacts,
+                        color="primary",
+                    ).props("unelevated")
+                    ui.button(
+                        "Refresh artifact list",
+                        on_click=lambda: refresh_artifacts(),
+                        color="secondary",
+                    ).props("outline")
+
                 artifacts_host = ui.column().classes("w-full gap-2")
+                with ui.row().classes("w-full justify-between items-center mt-4"):
+                    preview_title = ui.label("Preview — pick a file").classes(
+                        "text-sm text-slate-400"
+                    )
+                    ui.button(
+                        "Download this file",
+                        on_click=download_previewed,
+                        color="primary",
+                    ).props("unelevated dense")
                 preview = ui.code("").classes("w-full max-h-96 overflow-auto")
+
+                def show_preview(rel: str) -> None:
+                    ws = current_workspace()
+                    path = resolve_workspace_file(ws, rel) if ws is not None else None
+                    if path is None:
+                        preview.set_content("")
+                        preview_title.set_text("Preview — file missing")
+                        STATE.preview_artifact = ""
+                        ui.notify(f"Not available: {rel}", type="warning")
+                        return
+                    STATE.preview_artifact = rel
+                    preview_title.set_text(f"Preview — {rel}")
+                    try:
+                        text = path.read_text(encoding="utf-8", errors="replace")
+                        if len(text) > 20000:
+                            text = text[:20000] + "\n… truncated …"
+                        preview.set_content(text)
+                    except Exception as exc:
+                        preview.set_content(str(exc))
 
                 def refresh_artifacts() -> None:
                     artifacts_host.clear()
-                    ws = STATE.workspace or STATE.runner.output_dir
+                    ws = current_workspace()
                     with artifacts_host:
-                        if not ws or not Path(ws).is_dir():
+                        if not ws or not ws.is_dir():
                             ui.label("No output directory yet.").classes(
                                 "text-slate-500 text-sm"
                             )
                             return
                         ui.label(str(ws)).classes("text-xs text-slate-400 break-all mb-2")
+                        present = existing_artifact_files(ws)
+                        ui.label(
+                            f"{len(present)} file(s) ready to download"
+                            if present
+                            else "Reports appear here when the scan finishes."
+                        ).classes("text-xs text-slate-500 mb-1")
                         for name in ARTIFACT_FILES:
-                            path = Path(ws) / name
-                            exists = path.is_file()
+                            path = resolve_workspace_file(ws, name)
+                            exists = path is not None
                             with ui.row().classes(
                                 "w-full justify-between items-center border-b border-slate-800 py-1"
                             ):
@@ -2325,42 +2520,27 @@ def build_ui() -> None:
                                     + ("text-slate-200" if exists else "text-slate-600")
                                 )
                                 with ui.row().classes("gap-1"):
-                                    if exists:
-                                        size = path.stat().st_size
-
-                                        def make_preview(p=path):
-                                            def _p():
-                                                try:
-                                                    text = p.read_text(
-                                                        encoding="utf-8", errors="replace"
-                                                    )
-                                                    if len(text) > 20000:
-                                                        text = text[:20000] + "\n… truncated …"
-                                                    preview.set_content(text)
-                                                except Exception as exc:
-                                                    preview.set_content(str(exc))
-
-                                            return _p
-
-                                        ui.label(f"{size} B").classes(
+                                    if exists and path is not None:
+                                        ui.label(fmt_bytes(path.stat().st_size)).classes(
                                             "text-xs text-slate-500"
                                         )
                                         ui.button(
                                             "Preview",
-                                            on_click=make_preview(),
+                                            on_click=lambda n=name: show_preview(n),
                                             color="secondary",
+                                        ).props("flat dense")
+                                        ui.button(
+                                            "Download",
+                                            on_click=lambda n=name: download_named(n),
+                                            color="primary",
                                         ).props("flat dense")
                                     else:
                                         ui.label("missing").classes(
                                             "text-xs text-slate-600"
                                         )
 
-                ui.button(
-                    "Refresh artifact list",
-                    on_click=refresh_artifacts,
-                    color="primary",
-                ).props("unelevated")
                 build_ui.refresh_artifacts = refresh_artifacts  # type: ignore[attr-defined]
+                build_ui.download_all_artifacts = download_all_artifacts  # type: ignore[attr-defined]
 
         # History 
         with ui.tab_panel(tab_history):
@@ -2646,6 +2826,13 @@ def build_ui() -> None:
                     pass
                 try:
                     build_ui.refresh_targets()  # type: ignore[attr-defined]
+                except Exception:
+                    pass
+                try:
+                    ui.notify(
+                        "Scan finished — download reports from Artifacts or the zip button",
+                        type="positive",
+                    )
                 except Exception:
                     pass
             update_stats(force=True)

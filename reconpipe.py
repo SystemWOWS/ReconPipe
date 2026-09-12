@@ -1199,6 +1199,58 @@ def apply_scope_files(
         SCOPE_EXCLUDE = list(dict.fromkeys(SCOPE_EXCLUDE + extra_exc))
 
 
+def default_scope_patterns(domain: str) -> List[str]:
+    """Apex + wildcard subdomains for -d, so crawls cannot wander to other sites."""
+    host = _host_from_target(domain)
+    if not host or "." not in host:
+        return [host] if host else []
+    patterns = [host, f"*.{host}"]
+    if host.startswith("www.") and host.count(".") >= 2:
+        apex = host[4:]
+        patterns.extend([apex, f"*.{apex}"])
+    return list(dict.fromkeys(p for p in patterns if p))
+
+
+def apply_default_target_scope(domain: str) -> List[str]:
+    """If the user did not set include globs, lock scope to the scan domain."""
+    global SCOPE_INCLUDE
+    if SCOPE_INCLUDE:
+        return []
+    added = default_scope_patterns(domain)
+    if not added:
+        return []
+    SCOPE_INCLUDE = list(added)
+    return added
+
+
+def is_local_scan_path(value: str) -> bool:
+    """True for repo/apk/downloaded file paths (not http URLs)."""
+    text = (value or "").strip()
+    if not text:
+        return False
+    low = text.lower()
+    if low.startswith(("http://", "https://", "ftp://")):
+        return False
+    if "://" in text and not low.startswith("file:"):
+        return False
+    if low.startswith("file:"):
+        return True
+    if re.match(r"^[a-zA-Z]:[\\/]", text) or text.startswith("\\\\"):
+        return True
+    if text.startswith("/") or text.startswith("./") or text.startswith(".\\"):
+        return True
+    return "/" in text or "\\" in text
+
+
+def _wayback_original_url(url: str) -> str:
+    m = re.search(
+        r"web\.archive\.org/web/\d+(?:id_)?/(https?://\S+)",
+        url or "",
+        re.I,
+    )
+    return (m.group(1) if m else "").rstrip(")")
+
+
 def _host_from_target(value: str) -> str:
     text = (value or "").strip().lower()
     if "://" in text:
@@ -1236,6 +1288,11 @@ def host_in_scope(host: str, include: Optional[List[str]] = None, exclude: Optio
 
 
 def url_in_scope(url: str, include: Optional[List[str]] = None, exclude: Optional[List[str]] = None) -> bool:
+    if is_local_scan_path(url):
+        return True
+    original = _wayback_original_url(url)
+    if original:
+        return host_in_scope(_host_from_target(original), include, exclude)
     return host_in_scope(_host_from_target(url), include, exclude)
 
 
@@ -1249,6 +1306,24 @@ def filter_urls_in_scope(urls: List[str]) -> List[str]:
     if not SCOPE_INCLUDE and not SCOPE_EXCLUDE:
         return list(urls)
     return [u for u in urls if url_in_scope(u)]
+
+
+def finding_in_scope(finding: Dict) -> bool:
+    src = str(finding.get("source_url") or finding.get("source") or "")
+    if not src:
+        return True
+    if url_in_scope(src):
+        return True
+    original = str(finding.get("wayback_url") or "")
+    if original and url_in_scope(original):
+        return True
+    return False
+
+
+def filter_findings_in_scope(findings: List[Dict]) -> List[Dict]:
+    if not SCOPE_INCLUDE and not SCOPE_EXCLUDE:
+        return list(findings)
+    return [f for f in findings if finding_in_scope(f)]
 
 
 SEVERITY_CRITICAL = frozenset({
@@ -5837,6 +5912,11 @@ Examples:
                         help="Host globs to exclude (one per line, e.g. *.cdn.example.com)")
     parser.add_argument("--include-pattern", metavar="FILE",
                         help="Only scan hosts matching these globs (one per line)")
+    parser.add_argument(
+        "--no-default-scope",
+        action="store_true",
+        help="Do not auto-limit hosts/URLs to the target domain and its subdomains",
+    )
     parser.add_argument("--vault-addr", metavar="URL",
                         help="Vault address for hvs/hvb token lookup-self")
     parser.add_argument("--grafana-url", metavar="HOST",
@@ -6003,6 +6083,7 @@ def argv_from_options(opts: Dict[str, Any]) -> List[str]:
         "skip_store": "--skip-store",
         "no_validation_cache": "--no-validation-cache",
         "ci": "--ci",
+        "no_default_scope": "--no-default-scope",
     }
     for key, flag in mapping_flags.items():
         if opts.get(key):
@@ -6216,6 +6297,14 @@ def main(argv: Optional[List[str]] = None) -> int:
             include_medium=bool(getattr(args, "secrets_db_medium", False)),
         )
     apply_scope_files(args.include_pattern, args.exclude_pattern)
+    if not getattr(args, "no_default_scope", False):
+        added = apply_default_target_scope(args.domain or "")
+        if added:
+            log(
+                f"Scope: default target {', '.join(added)} "
+                "(off-site URLs dropped; --no-default-scope to keep them)",
+                "info",
+            )
     if SCOPE_INCLUDE or SCOPE_EXCLUDE:
         log(
             f"Scope: {len(SCOPE_INCLUDE)} include / {len(SCOPE_EXCLUDE)} exclude pattern(s)",
@@ -6580,6 +6669,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         cs_hosts = collect_certstream_hosts(args.domain, int(args.certstream_seconds))
         if cs_hosts:
             live_list = merge_host_lists(live_list, cs_hosts)
+            live_list = filter_hosts_in_scope(live_list)
             live_count = len(live_list)
             live_hosts_file.write_text("\n".join(live_list) + "\n")
             log(f"certstream: +{len(cs_hosts)} host(s) → {live_count} live", "success")
@@ -7068,8 +7158,18 @@ def main(argv: Optional[List[str]] = None) -> int:
             args._spec_findings = spec_findings  # type: ignore[attr-defined]
     if extra_urls:
         url_list = dedupe_urls(url_list + extra_urls)
+    scoped_extra = filter_urls_in_scope(url_list)
+    if len(scoped_extra) != len(url_list):
+        log(
+            f"Scope filter: {len(url_list)} → {len(scoped_extra)} URL(s) "
+            "(dropped off-target hosts)",
+            "info",
+        )
+        url_list = scoped_extra
         if not args.files:
             files_to_scan.write_text("\n".join(url_list))
+    elif extra_urls and not args.files:
+        files_to_scan.write_text("\n".join(url_list))
     url_count = len(url_list)
 
     if url_count == 0:
@@ -7377,6 +7477,14 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     if not resumed_scan:
         annotate_wayback_findings(raw_findings)
+        before_scope = len(raw_findings)
+        raw_findings = filter_findings_in_scope(raw_findings)
+        dropped_scope = before_scope - len(raw_findings)
+        if dropped_scope:
+            log(
+                f"Scope filter: dropped {dropped_scope} off-target finding(s)",
+                "info",
+            )
         raw_findings, informational = split_informational(raw_findings)
         raw_findings, exposures = split_exposures(raw_findings)
         baseline = load_baseline(output_dir)
