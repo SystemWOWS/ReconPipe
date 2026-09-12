@@ -1,227 +1,333 @@
-# ReconPipe 🔑
+# ReconPipe
 
-**Automated API Key Leak Hunter**
+ReconPipe finds leaked API keys and secrets on a target you are authorized to test.
 
-Single-command pipeline:
+It enumerates hosts, crawls and archives URLs, downloads likely leak surfaces (JavaScript, `.env`, source maps, configs), scans them with several engines, then **live-validates** matches against provider APIs so you can tell a dead string from a working credential.
+
 ```
-Chaos → httpx → [Katana + waymore + gospider] → TruffleHog → Async Key Validator
+subdomains → live hosts → URL discovery → download → secret scan → validate → reports
 ```
 
-Patterns, validators, and confidence scores load from `config.yaml` (overridable with `--config`).
+Patterns, confidence scores, and validators load from [`config.yaml`](config.yaml). Overlay extra rules with `--config`. Missing tools are skipped; the pipeline keeps going.
+
+Use this only on assets you own or have written permission to test. Validated keys are live credentials — treat output as sensitive.
 
 ---
 
-## Quick Start
+## Contents
 
-```bash
-pip3 install -r requirements.txt
-python3 reconpipe.py -d target.com
+- [Quick start](#quick-start)
+- [How a scan works](#how-a-scan-works)
+- [Installation](#installation)
+- [API keys](#api-keys)
+- [Usage](#usage)
+- [Desktop GUI](#desktop-gui)
+- [Configuration](#configuration)
+- [Secret detection](#secret-detection)
+- [Output](#output)
+- [CLI reference](#cli-reference)
+- [Troubleshooting](#troubleshooting)
+- [Tests](#tests)
+- [License](#license)
 
-# Professional GUI (desktop window — not Firefox)
-python3 reconpipegui.py
-# or: ./reconpipe-gui
-```
+---
 
-Or on Linux (Debian, Ubuntu, Kali, Fedora, Arch, openSUSE, and derivatives), install system packages + Go tools + Python deps with:
+## Quick start
+
+**Linux (Debian, Ubuntu, Kali, Fedora, Arch, openSUSE):**
 
 ```bash
 sudo bash install.sh
+python3 reconpipe.py -d example.com
 ```
 
-The installer detects the user behind `sudo`, so Go tools land in `~/go/bin` and pip packages in `~/.local/bin` for *your* account (not root's). Each tool is also symlinked into `/usr/local/bin`, so it works in any shell — including new terminals and `sudo` — without reloading your profile.
+The installer puts Go tools in `~/go/bin`, Python packages in `~/.local/bin`, and links binaries into `/usr/local/bin`. Reload the shell after the first install:
+
+```bash
+source ~/.bashrc   # or ~/.zshrc
+```
+
+**Python only** (any OS with Python 3.9+):
+
+```bash
+pip3 install -r requirements.txt
+python3 reconpipe.py -d example.com
+```
+
+Without the Go tools you still get the built-in regex scanner and validators. Discovery and TruffleHog are richer once those binaries are on `PATH`.
+
+**GUI:**
+
+```bash
+python3 reconpipegui.py
+# Linux launcher after install.sh:
+reconpipe-gui
+```
+
+---
+
+## How a scan works
+
+Every stage is optional. If a binary is missing, ReconPipe logs it and continues.
+
+| Stage | What runs | Purpose |
+|-------|-----------|---------|
+| Subdomains | Chaos, subfinder, amass, assetfinder, findomain, crt.sh, optional Shodan / Censys / ZoomEye | Build a host list |
+| Resolve / live | dnsx, httpx | Keep hosts that actually respond |
+| URL discovery | Katana, gospider, hakrawler, paramspider, LinkFinder | Active crawl and JS endpoints |
+| Archives | waymore → gau → waybackurls | Historical URLs |
+| Extra surface | Sensitive paths (`.env`, `.git/config`, swagger), Wayback bodies for dead URLs, optional Nuclei / naabu / screenshots | Leak files that crawlers miss |
+| Download | Parallel fetch of JS, maps, JSON, HTML, env-like URLs | Local copies for scanners |
+| Secret scan | TruffleHog, Gitleaks, jsleak, `config.yaml` regex, [secrets-patterns-db](https://github.com/mazen160/secrets-patterns-db) extras | Extract candidates |
+| Validate | Async HTTP checks (aiohttp) against provider APIs | Confirm the key still works |
+| Report | JSON, SARIF, HTML/Markdown, HackerOne/Jira drafts | Review and CI |
+
+`--files urls.txt` skips URL discovery. `--subdomains hosts.txt` skips Chaos. `--no-trufflehog` uses only the built-in regex engine. `--no-validate` stops after detection.
 
 ---
 
 ## Installation
 
-### Python dependencies
+### Linux installer
 
 ```bash
-pip3 install -r requirements.txt   # aiohttp, PyYAML, nicegui (required)
-pip3 install waymore               # recommended passive archives
-# optional: pip3 install boto3     # cleaner AWS STS checks
+sudo bash install.sh
 ```
 
-### Professional GUI
+Installs system packages, Go (if needed), ProjectDiscovery tools, gospider, gau, waybackurls, jsluice, TruffleHog, Gitleaks, optional jsleak, Python deps (including the GUI), and a `reconpipe-gui` launcher.
+
+`sudo` is used for system packages. Go and pip installs still land in **your** home directory, not root’s.
+
+### Manual (Linux / macOS)
 
 ```bash
-python3 reconpipegui.py          # desktop window (WebKit) — does not use Firefox
-./reconpipe-gui                  # same, via launcher script
-python3 reconpipegui.py --browser
-# Bind address/port (browser mode, or the hidden local server):
-#   RECONPIPE_GUI_HOST=127.0.0.1 RECONPIPE_GUI_PORT=8088 python3 reconpipegui.py --browser
-# Force browser even on a desktop: RECONPIPE_GUI_NATIVE=0
+pip3 install -r requirements.txt
+pip3 install waymore          # recommended archive layer
+# optional: pip3 install boto3  # cleaner AWS STS checks
 ```
 
-Opens a **desktop window** by default when a display is available (pywebview + WebKitGTK). That keeps the UI out of Firefox so a long URL-discovery run cannot freeze your browser. Linux also needs:
+Go toolchain (1.21+):
+
+```bash
+# Subdomains and live hosts
+go install -v github.com/projectdiscovery/chaos-client/cmd/chaos@latest
+go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
+go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest
+go install -v github.com/projectdiscovery/dnsx/cmd/dnsx@latest
+
+# Crawl
+go install github.com/projectdiscovery/katana/cmd/katana@latest
+go install github.com/jaeles-project/gospider@latest
+go install github.com/BishopFox/jsluice/cmd/jsluice@latest   # optional, for Katana -jsl
+
+# Archives
+go install github.com/lc/gau/v2/cmd/gau@latest
+go install github.com/tomnomnom/waybackurls@latest
+
+# Secret scanners
+go install github.com/zricethezav/gitleaks/v8@latest
+go install github.com/byt3hx/jsleak@latest
+
+# TruffleHog
+curl -sSfL https://raw.githubusercontent.com/trufflesecurity/trufflehog/main/scripts/install.sh \
+  | sh -s -- -b /usr/local/bin
+```
+
+Put `$HOME/go/bin` **ahead** of `~/.local/bin` on `PATH`. The Python `httpx` package also ships a CLI named `httpx`; ReconPipe ignores that one, but a wrong binary on `PATH` is a common first-run issue. See [Troubleshooting](#troubleshooting).
+
+Optional but useful when present: amass, assetfinder, findomain, hakrawler, paramspider, LinkFinder, naabu, whatweb, wappalyzer, gowitness, nuclei, spray.
+
+`--docker-fallback` can run a missing tool via `docker run --rm` when an image is known.
+
+### Windows
+
+1. Install [Python 3.9+](https://www.python.org/downloads/) and (optionally) [Go](https://go.dev/dl/).
+2. From the `ReconPipe` folder:
+
+```powershell
+py -m pip install -r requirements.txt
+py reconpipe.py -d example.com
+py reconpipegui.py
+```
+
+`install.sh` is Linux-only. Install Go tools with the same `go install` commands, then ensure `%USERPROFILE%\go\bin` is on `PATH`. For native httpx on Kali-style setups the binary may be named `httpx-toolkit`.
+
+### GUI native window (Linux)
+
+The GUI prefers a desktop window (pywebview + WebKit), not Firefox, so a long crawl cannot freeze your browser.
 
 ```bash
 pip3 install pywebview
 sudo apt install python3-gi python3-gi-cairo gir1.2-gtk-3.0 gir1.2-webkit2-4.1
 ```
 
-(`install.sh` installs these.) Use `--browser` if you really want the old localhost tab.
+`install.sh` already does this. Use `--browser` if you want a localhost tab instead.
 
-The window includes:
+---
 
-- Every CLI option (domain, files, skips, concurrency, Chaos key, Shopify host, config overlays, ignore hashes, SARIF, fail-on-valid, headless, …)
-- Tool preflight status
-- Live pipeline console + stage tracker (runs `reconpipe.py` as a cancellable subprocess)
-- Findings browser (actionable / informational / exposures) with redacted secrets and Reveal
-- **Test with configured validator** — re-runs ReconPipe’s existing `config.yaml` validators only
-- Artifact preview for `findings.json`, `valid_keys.json`, `summary.txt`, SARIF, etc.
+## API keys
 
-Do not expose `--browser` mode beyond localhost on untrusted networks — result files can contain live secrets.
+None of these are required. Missing keys skip that source; a source error never aborts the scan.
 
-### Go tools (ProjectDiscovery + community stack)
+| Key | Environment | Used for |
+|-----|-------------|----------|
+| ProjectDiscovery Chaos | `CHAOS_KEY` or `PDCP_API_KEY` | Subdomain dataset ([cloud.projectdiscovery.io](https://cloud.projectdiscovery.io)) |
+| Shodan | `SHODAN_API_KEY` | Extra hostnames |
+| Censys | `CENSYS_API_ID`, `CENSYS_API_SECRET` | Extra hostnames |
+| ZoomEye | `ZOOMEYE_API_KEY` | Extra hostnames |
+| crt.sh | — | Certificate Transparency (no key) |
 
-```bash
-# Subdomain discovery
-go install -v github.com/projectdiscovery/chaos-client/cmd/chaos@latest
+CLI flags (`--chaos-key`, `--shodan-key`, …) override the environment. The GUI **Save keys** panel writes `~/.reconpipe/keys.yaml` (mode `0600`). Resolution order is **CLI → environment → saved file**.
 
-# Live host filtering
-go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest
-# NiceGUI/pip also ship a Python CLI named `httpx`. ReconPipe ignores it.
-# If preflight still shows httpx MISSING after `go install`:
-#   export HTTPX_BIN="$HOME/go/bin/httpx"
-#   # or put $HOME/go/bin before ~/.local/bin
-# Kali: apt install httpx-toolkit   # binary name: httpx-toolkit
-
-# PRIMARY: Active crawl + JS endpoint parsing
-go install github.com/projectdiscovery/katana/cmd/katana@latest
-
-# Optional: deeper JS analysis for Katana (-jsl)
-go install github.com/BishopFox/jsluice/cmd/jsluice@latest
-
-# Active web spider: JS links, S3 buckets, subdomains
-go install github.com/jaeles-project/gospider@latest
-
-# Passive archive fallback (Wayback + CommonCrawl + AlienVault OTX + VirusTotal)
-go install github.com/lc/gau/v2/cmd/gau@latest
-
-# Last-resort passive fallback
-go install github.com/tomnomnom/waybackurls@latest
-```
-
-### TruffleHog
+Override the config directory with `RECONPIPE_HOME`.
 
 ```bash
-curl -sSfL https://raw.githubusercontent.com/trufflesecurity/trufflehog/main/scripts/install.sh | sh -s -- -b /usr/local/bin
+export CHAOS_KEY="your_key"
+python3 reconpipe.py -d example.com
+python3 reconpipe.py -d example.com --skip-intel      # Chaos / subfinder only
+python3 reconpipe.py -d example.com --skip-crtsh
 ```
-
-### Chaos API Key
-
-```bash
-export CHAOS_KEY="your_key_here"   # get from https://cloud.projectdiscovery.io
-# or pass --chaos-key on the CLI
-```
-
-### Passive intel (optional)
-
-After Chaos, ReconPipe can merge extra hostnames from Shodan, Censys, ZoomEye, and crt.sh. Missing keys are skipped; a source error never aborts the scan.
-
-```bash
-export SHODAN_API_KEY="..."
-export CENSYS_API_ID="..."
-export CENSYS_API_SECRET="..."
-export ZOOMEYE_API_KEY="..."
-
-python3 reconpipe.py -d target.com
-python3 reconpipe.py -d target.com --skip-intel      # Chaos only
-python3 reconpipe.py -d target.com --skip-crtsh      # skip the no-key CT lookup
-```
-
-The GUI **Passive intel** panel maps to the same flags. crt.sh needs no key; the others do.
 
 ---
 
 ## Usage
 
+Replace `example.com` with a domain you are allowed to scan.
+
+### Typical scans
+
 ```bash
 # Full pipeline
-python3 reconpipe.py -d target.com
+python3 reconpipe.py -d example.com
 
-# Enable headless Chrome (for SPA/React/Angular targets)
-python3 reconpipe.py -d target.com --headless
+# SPA / React / Angular (Katana headless Chrome)
+python3 reconpipe.py -d example.com --headless
 
-# Use existing subdomain list (skip Chaos)
-python3 reconpipe.py -d target.com --subdomains subs.txt
+# You already have hosts
+python3 reconpipe.py -d example.com --subdomains subs.txt
 
-# Use existing URL list (skip URL discovery; Chaos/httpx still run unless skipped)
-python3 reconpipe.py -d target.com --files urls.txt
+# You already have URLs (skips crawl/archives)
+python3 reconpipe.py -d example.com --files urls.txt
 
-# Skip individual stages
-python3 reconpipe.py -d target.com --skip-chaos
-python3 reconpipe.py -d target.com --skip-httpx
-python3 reconpipe.py -d target.com --skip-gau          # skip waymore/gau/waybackurls only
-python3 reconpipe.py -d target.com --skip-discovery    # skip katana/waymore/gau/gospider
+# Several domains (each gets its own output directory)
+python3 reconpipe.py --domain-list domains.txt
 
-# Built-in regex scanner only (no TruffleHog required)
-python3 reconpipe.py -d target.com --no-trufflehog
+# Regex scanner only (no TruffleHog)
+python3 reconpipe.py -d example.com --no-trufflehog
 
-# Skip validation (scan only)
-python3 reconpipe.py -d target.com --no-validate
+# Detect but do not hit provider APIs
+python3 reconpipe.py -d example.com --no-validate
 
-# Custom output + higher concurrency
-python3 reconpipe.py -d target.com -o /tmp/results --concurrency 20
-
-# Shopify store host for shpat_ validation
-python3 reconpipe.py -d target.com --shopify-domain store.myshopify.com
-
-# Merge engagement overlay onto config.yaml
-python3 reconpipe.py -d target.com --config engagement.example.yaml
-
-# Write SARIF (default: <output>/results.sarif) and keep exit 0 even if live keys found
-python3 reconpipe.py -d target.com --sarif out.sarif --no-fail-on-valid
-
-# Permanently suppress a finding hash (from findings.json) in the baseline
-python3 reconpipe.py -d target.com --ignore-hash <sha256>
+# Custom output + validation concurrency
+python3 reconpipe.py -d example.com -o /tmp/results --concurrency 20
 ```
 
-By default, exit code **1** when any live-validated key is found (CI merge gate). Use `--no-fail-on-valid` to disable.
+### Skip stages
+
+```bash
+python3 reconpipe.py -d example.com --skip-chaos
+python3 reconpipe.py -d example.com --skip-httpx
+python3 reconpipe.py -d example.com --skip-gau          # archives only; Katana/gospider still run
+python3 reconpipe.py -d example.com --skip-discovery    # no crawl or archives; live hosts only
+```
+
+### Git repository
+
+Full clone (history included) plus TruffleHog git and Gitleaks:
+
+```bash
+python3 reconpipe.py -d example.com --repo https://github.com/org/app.git
+python3 reconpipe.py -d example.com --repo https://github.com/org/app.git --repo-shallow
+python3 reconpipe.py -d example.com --repo ./local-clone --iac-scan
+```
+
+### CI
+
+By default ReconPipe writes SARIF and **exits 1** if any key validates as live.
+
+```bash
+python3 reconpipe.py -d example.com --sarif out.sarif
+python3 reconpipe.py -d example.com --no-fail-on-valid   # always exit 0
+python3 reconpipe.py -d example.com --ignore-hash <sha256>  # suppress a known finding
+```
+
+### Resume
+
+```bash
+# Reuse files_to_scan.txt; skip re-download of files already on disk
+python3 reconpipe.py -d example.com --resume
+
+# Jump to a later pipeline checkpoint
+python3 reconpipe.py -d example.com --resume-from discovery
+python3 reconpipe.py -d example.com --resume-from validate
+```
+
+`--resume-from` choices: `chaos`, `httpx`, `discovery`, `trufflehog`, `validate`.
+
+### Extra regex packs and jsleak
+
+A small high-confidence pack ships in `wordlists/secrets_patterns.yml`. To pull a filtered slice of [secrets-patterns-db](https://github.com/mazen160/secrets-patterns-db) (~350 high-confidence rules, duplicates of built-in prefixes dropped):
+
+```bash
+python3 reconpipe.py -d example.com --refresh-secrets-db
+python3 reconpipe.py -d example.com --secrets-db ./my-patterns.yml
+python3 reconpipe.py -d example.com --skip-secrets-db
+python3 reconpipe.py -d example.com --skip-jsleak
+```
+
+`--refresh-secrets-db` writes `~/.reconpipe/secrets_patterns.yml`. It does **not** load all ~1600 upstream rules on every scan.
+
+If `jsleak` is on `PATH`, discovered JS URLs are scanned for links and secrets. The LinkFinder-style extractor is built in even without the binary.
+
+### Polite scanning, proxy, authenticated crawl
+
+```bash
+python3 reconpipe.py -d example.com --polite
+python3 reconpipe.py -d example.com --requests-per-second 2
+python3 reconpipe.py -d example.com --proxy http://127.0.0.1:8080
+python3 reconpipe.py -d example.com -H "Authorization: Bearer TOKEN"
+python3 reconpipe.py -d example.com --credentials cookies.yaml
+python3 reconpipe.py -d example.com --burp-import burp.xml
+```
+
+`--spray` is **opt-in**. It brute-forces extra leak/backup paths on live hosts. Leave it off unless that is in scope.
+
+### Alerts
+
+```bash
+python3 reconpipe.py -d example.com --notify-webhook https://hooks.slack.com/services/...
+python3 reconpipe.py -d example.com --telegram-bot TOKEN --telegram-chat ID
+python3 reconpipe.py -d example.com --smtp-host smtp.example.com --smtp-to you@example.com
+```
+
+PagerDuty and Opsgenie flags are also available. `--no-notify` skips the desktop notification when a scan finishes.
 
 ---
 
-## URL Discovery — 3-Layer Architecture
+## Desktop GUI
 
-Step 3 runs three layers (where tools are installed) and deduplicates the combined result:
+```bash
+python3 reconpipegui.py              # native window when a display + pywebview exist
+python3 reconpipegui.py --browser    # http://127.0.0.1:8088
+```
 
-| Layer | Tool | Type | What it finds |
-|-------|------|------|---------------|
-| 1 | **Katana** | Active crawler | Live endpoints, JS crawl (`-jc`), optional jsluice (`-jsl`), robots/sitemap (`-kf all`) |
-| 2 | **waymore** | Passive archive | Archived URLs from Wayback Machine (mode `U`) |
-| 2† | **gau** | Passive fallback | Wayback + CommonCrawl + AlienVault OTX + VirusTotal |
-| 2‡ | **waybackurls** | Last-resort fallback | Wayback Machine only |
-| 3 | **gospider** | Active spider | JS link extraction, S3-ish URLs, robots + sitemap |
+```bash
+RECONPIPE_GUI_HOST=127.0.0.1 RECONPIPE_GUI_PORT=8088 python3 reconpipegui.py --browser
+RECONPIPE_GUI_NATIVE=0 python3 reconpipegui.py   # force browser even on a desktop
+```
 
-† gau is used if waymore is not installed.  
-‡ waybackurls is used if neither waymore nor gau is installed.  
-`--skip-gau` skips the entire passive layer; Katana and gospider still run.  
-`--skip-discovery` skips all three layers and scans live hosts only.
+The window covers the same options as the CLI: domain, skips, concurrency, intel keys, Shopify host, config overlays, SARIF, headless, resume, and the extra scanners.
 
-### Why this is better than gau alone
+Also included:
 
-- **gau/waybackurls** are purely passive — they only return what's been archived.
-- **Katana** actively crawls live hosts, parses JS, and supports headless Chrome (`--headless` → `-hl -nos`) for SPAs.
-- **waymore** handles Wayback rate limiting better than gau for many targets.
-- **gospider** catches JS-linked endpoints that Katana may miss due to depth limits.
+- Tool preflight (what is on `PATH`)
+- Live console and stage tracker (`reconpipe.py` as a cancellable subprocess)
+- Domain queue and saved scan profiles (`~/.reconpipe/profiles.yaml`)
+- Findings browser (actionable / informational / exposures) with redacted secrets and Reveal
+- Re-test a finding with the configured validator
+- Artifact preview (`findings.json`, `valid_keys.json`, `summary.txt`, SARIF, …)
 
----
-
-## Full Pipeline
-
-| Step | Tool | Purpose | Fallback |
-|------|------|---------|----------|
-| 1 | **chaos** | Passive subdomain dataset | Single target domain / `--subdomains` |
-| 2 | **httpx** | Filter live/responsive hosts | Treat all subdomains as live |
-| 3a | **katana** | Active crawl + JS parsing | — |
-| 3b | **waymore** | Passive archive URLs | → gau → waybackurls |
-| 3c | **gospider** | Active JS spider | — |
-| 4 | **trufflehog** | Scan downloaded files for secrets | Built-in regex scanner (`config.yaml` patterns) |
-| 5 | **aiohttp** (async) | Validate keys against provider APIs | Sync urllib fallback |
-| 6 | — | Save JSON, SARIF, summary, baseline | — |
-
-Every external tool is optional — ReconPipe detects what's installed and falls back gracefully.
+Do not bind `--browser` beyond localhost on an untrusted network. Result files can contain live secrets.
 
 ---
 
@@ -229,68 +335,201 @@ Every external tool is optional — ReconPipe detects what's installed and falls
 
 Default rules live in `config.yaml` next to `reconpipe.py`:
 
-- `patterns` — regex detectors
-- `confidence` / `min_confidence` — scoring threshold (default min: 30)
-- `validators` — live check specs (URL, auth, AWS STS, Twilio pair, JWT inspect, etc.)
-- `informational_types` — public-by-design hits (e.g. Stripe publishable, Firebase URL)
-- `exposure_types` — non-secret leak surface (e.g. source map exposure)
+| Key | Role |
+|-----|------|
+| `patterns` | Regex detectors (~168 types) |
+| `confidence` / `min_confidence` | Score threshold (default minimum: 30) |
+| `validators` | Live checks (URL, auth, AWS STS, Twilio pair, JWT inspect, URI inspect, …) |
+| `informational_types` | Public-by-design hits (Stripe publishable, Firebase URL, …) |
+| `exposure_types` | Non-secret leak surface (source maps) |
+| `severity` / compliance tags | Report metadata |
 
-Overlay files merge on top (repeatable `--config`). Set a pattern or validator to `null` to remove it. See `engagement.example.yaml`.
+Overlays merge on top (repeatable `--config`). Set a pattern or validator to `null` to remove it:
 
----
-
-## Output Files
-
-```
-recon_target_com/
-├── subdomains.txt              ← Chaos subdomain list
-├── live_hosts.txt              ← httpx-filtered live hosts
-├── katana_input.txt            ← Input list for katana
-├── katana_urls.txt             ← Katana crawl output
-├── waymore_out/                ← Per-host waymore results
-├── gospider_input.txt          ← Input list for gospider
-├── gospider_out/               ← Per-host gospider results
-├── files_to_scan.txt           ← Deduplicated combined URL list
-├── downloaded_files/           ← Local copies for TruffleHog filesystem scan
-├── findings.json               ← Actionable findings (+ validation results)
-├── valid_keys.json             ← Confirmed valid keys only (if any)
-├── informational.json          ← Public-by-design hits
-├── source_map_exposures.json   ← Public .map / source-map exposures
-├── results.sarif               ← SARIF 2.1.0 (findings + exposures)
-├── summary.txt                 ← Human-readable report
-└── .reconpipe_ignore.json      ← Baseline (type+source suppression / --ignore-hash)
+```bash
+python3 reconpipe.py -d example.com --config engagement.example.yaml
 ```
 
----
+See [`engagement.example.yaml`](engagement.example.yaml) for the overlay shape.
 
-## Supported Key Types
+Shopify Admin tokens need a store host:
 
-**Regex scanner** (`config.yaml` patterns — 38 types), including: Google API/OAuth, AWS access/secret/session, GitHub PAT/fine-grained/OAuth/app, GitLab PAT, Stripe live/test/restricted/publishable, OpenAI, Anthropic, SendGrid, Mailgun, Twilio SID/token, Slack token/webhook, Firebase URL/key, DigitalOcean PAT, npm, PyPI, PEM private keys, UUID→Heroku context, JWT, Shopify token/secret, Mailchimp, Discord token/webhook, Telegram Bot, Mapbox, generic secrets.
+```bash
+python3 reconpipe.py -d example.com --shopify-domain store.myshopify.com
+```
 
-Also detects **source map exposures** (`.map` / source-map JSON) as a separate exposure tier.
-
-**Live validators** (provider API / STS / inspect — where configured): Google, GitHub (PAT/fine/OAuth), GitLab, Stripe (live/test/restricted), OpenAI, Anthropic, DigitalOcean, npm, PyPI, Slack token/webhook, SendGrid, Mailgun, AWS STS (`aws_access_key` + paired secret/session), Twilio SID+token pair, Shopify (`--shopify-domain`), Discord token/webhook, Telegram Bot, Mapbox, Heroku, JWT inspect.
-
-Informational (not treated as secrets): Stripe publishable keys, Firebase RTDB URLs.
+Vault (`hvs`/`hvb`) and Grafana (`glsa_`) checks take `--vault-addr` and `--grafana-url`.
 
 ---
 
-## Notes
+## Secret detection
 
-- **Referer spoofing:** Validator sets `Referer: https://target.com/` on requests — helps exercise domain-restricted keys that return 403 from your IP.
-- **Deduplication:** SHA256-hashed keys; only unique instances are validated. Baseline remembers type+source so re-scans suppress known hits (or permanently via `--ignore-hash`).
-- **Rate limiting:** Async `DomainRateLimiter` (global `--concurrency`, capped per host) plus short jittered delays (~300ms) between validation slots.
-- **`--headless`:** Enables Katana headless Chrome (`-hl -nos`) for React/Angular/Vue SPAs.
-- **CI:** Writes SARIF by default; exit 1 on live-validated keys unless `--no-fail-on-valid`.
+ReconPipe stacks several engines. Hits are de-duplicated (SHA-256 of the secret) and scored before validation.
+
+| Engine | When it runs |
+|--------|----------------|
+| `config.yaml` regex | Always |
+| Bundled secrets pack | Unless `--skip-secrets-db` |
+| User / refreshed secrets-patterns-db YAML | If `~/.reconpipe/secrets_patterns.yml` exists, or `--secrets-db` |
+| Public-API query keys (`?api_key=`, `?appid=`) | Fingerprints from [public-apis](https://github.com/public-apis/public-apis); `--skip-public-apis` / `--refresh-public-apis` |
+| TruffleHog filesystem (and `trufflehog git` for `--repo`) | If installed; `--no-trufflehog` disables |
+| Gitleaks | If installed; `--skip-gitleaks` disables |
+| jsleak | If installed; `--skip-jsleak` disables |
+| Built-in JS parser | Endpoints + assignments in downloaded JS |
+
+Covered families include cloud (AWS, GCP, Azure, OCI), git forges, payments, email/SMS, Slack/Discord/Telegram, AI vendors, PaaS (Vercel, Railway, Render, Fly, Heroku), data stores (Mongo, Postgres, Redis URIs), CI, observability, and generic `api_key=` assignments. Informational hits (publishable keys, client SDK IDs) are stored separately and are not treated as secrets.
+
+Validators send `Referer: https://<target>/` so domain-restricted keys are more likely to exercise than fail as 403 from your IP. AWS access keys pair with nearby secrets for STS. Database URIs are inspected locally — ReconPipe does not connect to leaked database hosts.
+
+Low-confidence or noisy matches can land in `quarantine.json` instead of the main findings list.
 
 ---
 
-## Install as global command
+## Output
+
+Default directory: `recon_<domain>/` (override with `-o`).
+
+Start here:
+
+| File | Contents |
+|------|----------|
+| `summary.txt` | Human-readable wrap-up |
+| `report.html` / `report.md` | Reviewable reports |
+| `findings.json` | Actionable findings and validation results |
+| `valid_keys.json` | Confirmed live keys only |
+| `informational.json` | Public-by-design hits |
+| `source_map_exposures.json` | Public `.map` files |
+| `results.sarif` | SARIF 2.1.0 for CI |
+| `export_hackerone.md` / `export_jira.md` | Draft write-ups |
+| `.reconpipe_ignore.json` | Baseline (type + source, or `--ignore-hash`) |
+
+Useful intermediates: `subdomains.txt`, `live_hosts.txt`, `files_to_scan.txt`, `downloaded_files/`, `js_endpoints.json`, `js_secrets.json`, `gitleaks.json`, `jsleak.txt`, `sensitive_paths.txt`, `wayback_sources.json`, `pipeline_metrics.json`, `checkpoint.json`.
+
+Keep the output directory private. `valid_keys.json` is the highest-risk file.
+
+---
+
+## CLI reference
+
+Run `python3 reconpipe.py -h` for the full list. Grouped below.
+
+**Target**
+
+| Flag | Meaning |
+|------|---------|
+| `-d`, `--domain` | Target domain |
+| `--domain-list FILE` | One domain per line |
+| `--subdomains FILE` | Existing hosts (skips Chaos) |
+| `--files FILE` | Existing URLs (skips discovery) |
+| `-o`, `--output DIR` | Output directory |
+| `--include-pattern FILE` / `--exclude-pattern FILE` | Host globs |
+| `--repo URL` | Clone and scan a git repo |
+| `--repo-shallow` | `--depth 1` clone (no history scan) |
+| `--iac-scan` | Also walk Docker / K8s / Terraform files |
+
+**Skip / extra stages**
+
+| Flag | Meaning |
+|------|---------|
+| `--skip-chaos` `--skip-subfinder` `--skip-amass` `--skip-assetfinder` `--skip-findomain` | Subdomain sources |
+| `--skip-intel` `--skip-crtsh` | Passive hostname intel |
+| `--skip-dnsx` `--skip-httpx` | Resolve / live filter |
+| `--skip-gau` | Passive archives only |
+| `--skip-discovery` | All URL discovery |
+| `--skip-hakrawler` `--skip-paramspider` `--skip-naabu` `--skip-whatweb` `--skip-gowitness` | Optional recon |
+| `--nuclei` `--nuclei-templates PATH` `--nuclei-import FILE` | Nuclei |
+| `--skip-wayback-bodies` | Do not fetch Wayback snapshots for dead URLs |
+| `--skip-sensitive-paths` | Skip `.env` / `.git` / swagger probes |
+| `--spray` | Opt-in extra leak-path brute |
+| `--no-trufflehog` `--skip-gitleaks` `--skip-jsleak` | Secret engines |
+| `--no-validate` | Detection only |
+| `--headless` | Katana Chrome for SPAs |
+| `--amass-active` | Amass without `-passive` |
+
+**Secrets packs**
+
+| Flag | Meaning |
+|------|---------|
+| `--secrets-db FILE` | Extra YAML (repeatable) |
+| `--refresh-secrets-db` | Download filtered secrets-patterns-db |
+| `--skip-secrets-db` | Ignore bundled/user extra regexes |
+| `--secrets-db-medium` | Also keep medium-confidence rules |
+| `--skip-public-apis` / `--refresh-public-apis` | Query-string vendor key catalog |
+
+**Runtime**
+
+| Flag | Meaning |
+|------|---------|
+| `--concurrency N` | Validation concurrency (default 10) |
+| `--download-workers N` | Download parallelism (default 16) |
+| `--gau-threads N` | gau threads (default 5) |
+| `--polite` | ~500 ms delay between requests |
+| `--requests-per-second N` | Global rate limit |
+| `--proxy URL` `--proxy-auth USER:PASS` | HTTP proxy |
+| `-H NAME:VALUE` | Extra request header (repeatable) |
+| `--credentials FILE` | Cookies + headers YAML/JSON |
+| `--burp-import FILE` | Burp XML URLs |
+| `--docker-fallback` | Run missing tools in Docker when possible |
+| `--resume` / `--resume-from STAGE` | Continue a previous run |
+| `--config FILE` | Overlay YAML (repeatable) |
+| `--sarif FILE` | SARIF path |
+| `--no-fail-on-valid` | Do not exit 1 on live keys |
+| `--ignore-hash SHA256` | Permanent baseline suppress (repeatable) |
+
+---
+
+## Troubleshooting
+
+**`httpx` shows as missing after `go install`**
+
+The Python `httpx` library installs a different CLI with the same name. ReconPipe only accepts ProjectDiscovery httpx.
+
+```bash
+export HTTPX_BIN="$HOME/go/bin/httpx"
+# or put $HOME/go/bin before ~/.local/bin
+# Kali package: apt install httpx-toolkit   # binary name: httpx-toolkit
+```
+
+**Chaos returns nothing**
+
+Set `CHAOS_KEY` or `PDCP_API_KEY`, or pass `--chaos-key`. You can always feed `--subdomains`.
+
+**Scan is slow**
+
+Archives (waymore/gau) and headless Katana dominate runtime. Use `--skip-gau` or `--skip-discovery` with `--files`, lower `--concurrency`, or `--polite` / `--requests-per-second` on fragile targets.
+
+**Too many false positives**
+
+Raise `min_confidence` in an overlay, disable `generic_secret`, or `--skip-secrets-db`. Do not enable `--secrets-db-medium` unless you want noisier vendor-context regexes.
+
+**GUI opens in a browser instead of a window**
+
+Install pywebview and WebKit (see [Installation](#installation)), or pass `--native`. `--browser` forces a localhost tab.
+
+**Need a global `reconpipe` command**
 
 ```bash
 chmod +x reconpipe.py
-sudo ln -sf $(pwd)/reconpipe.py /usr/local/bin/reconpipe
-reconpipe -d target.com
+sudo ln -sf "$(pwd)/reconpipe.py" /usr/local/bin/reconpipe
+reconpipe -d example.com
 ```
 
 ---
+
+## Tests
+
+```bash
+python3 -m unittest tests.test_wave2 tests.test_new_features tests.test_cli_and_keys \
+  tests.test_patterns tests.test_user_settings tests.test_httpx_resolve tests.test_osint -q
+
+# GUI wiring (Windows: set PYTHONIOENCODING=utf-8)
+python3 tests/test_gui_integration.py
+```
+
+---
+
+## License
+
+MIT. See [LICENSE](LICENSE).
+
+Third-party scanners keep their own licenses. TruffleHog-derived pattern sets are AGPL; ReconPipe does not vendor that full database. The bundled extras in `wordlists/secrets_patterns.yml` follow [secrets-patterns-db](https://github.com/mazen160/secrets-patterns-db) (CC BY-SA 4.0).
