@@ -1,0 +1,62 @@
+# ReconPipe in Docker — tools are baked into the image.
+#
+# First time:
+#   docker compose build
+#
+# Scan (results in ./scans, keys/history in ./docker-home):
+#   docker compose run --rm reconpipe -d example.com
+#   docker compose run --rm reconpipe --rescan -d example.com
+#
+# GUI at http://127.0.0.1:8088 :
+#   docker compose --profile gui up gui
+
+services:
+  reconpipe:
+    build: .
+    image: reconpipe:local
+    working_dir: /work
+    volumes:
+      - ./scans:/work
+      - ./docker-home:/root/.reconpipe
+    environment:
+      RECONPIPE_HOME: /root/.reconpipe
+      RECONPIPE_WORKDIR: /work
+      PYTHONUNBUFFERED: "1"
+      CHAOS_KEY: ${CHAOS_KEY:-}
+      PDCP_API_KEY: ${PDCP_API_KEY:-}
+      SHODAN_API_KEY: ${SHODAN_API_KEY:-}
+      CENSYS_API_ID: ${CENSYS_API_ID:-}
+      CENSYS_API_SECRET: ${CENSYS_API_SECRET:-}
+      ZOOMEYE_API_KEY: ${ZOOMEYE_API_KEY:-}
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      GITLAB_TOKEN: ${GITLAB_TOKEN:-}
+    stdin_open: true
+    tty: true
+
+  gui:
+    profiles: ["gui"]
+    image: reconpipe:local
+    build: .
+    working_dir: /work
+    ports:
+      - "8088:8088"
+    volumes:
+      - ./scans:/work
+      - ./docker-home:/root/.reconpipe
+    environment:
+      RECONPIPE_HOME: /root/.reconpipe
+      RECONPIPE_WORKDIR: /work
+      RECONPIPE_GUI_HOST: "0.0.0.0"
+      RECONPIPE_GUI_PORT: "8088"
+      RECONPIPE_GUI_NATIVE: "0"
+      RECONPIPE_GUI_SHOW: "0"
+      PYTHONUNBUFFERED: "1"
+      CHAOS_KEY: ${CHAOS_KEY:-}
+      PDCP_API_KEY: ${PDCP_API_KEY:-}
+      SHODAN_API_KEY: ${SHODAN_API_KEY:-}
+      CENSYS_API_ID: ${CENSYS_API_ID:-}
+      CENSYS_API_SECRET: ${CENSYS_API_SECRET:-}
+      ZOOMEYE_API_KEY: ${ZOOMEYE_API_KEY:-}
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      GITLAB_TOKEN: ${GITLAB_TOKEN:-}
+    command: ["gui"]

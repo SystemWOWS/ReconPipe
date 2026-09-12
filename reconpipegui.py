@@ -163,7 +163,9 @@ def count_lines(path: Path) -> int:
 
 def default_output_dir(domain: str) -> Path:
     safe = (domain or "target").replace(".", "_")
-    return HERE / f"recon_{safe}"
+    env = (os.environ.get("RECONPIPE_WORKDIR") or "").strip()
+    root = Path(env) if env else HERE
+    return root / f"recon_{safe}"
 
 
 def guess_key_types(key: str) -> List[str]:
@@ -259,6 +261,7 @@ class PipelineRunner:
             argv = rp.argv_from_options(opts)
             domain = (opts.get("domain") or "").strip() or "multi"
             out = (opts.get("output") or "").strip()
+            work = Path(os.environ.get("RECONPIPE_WORKDIR") or HERE)
             self.output_dir = Path(out).expanduser() if out else default_output_dir(domain)
             self.output_dir.mkdir(parents=True, exist_ok=True)
             if not out:
@@ -279,7 +282,7 @@ class PipelineRunner:
 
             self.proc = subprocess.Popen(
                 cmd,
-                cwd=str(HERE),
+                cwd=str(work),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
@@ -766,6 +769,9 @@ def build_ui() -> None:
                                 "Save target", on_click=save_current_target, color="primary"
                             ).props("unelevated dense")
                             ui.button(
+                                "Rescan", on_click=lambda: rescan_saved_target(), color="primary"
+                            ).props("unelevated dense")
+                            ui.button(
                                 "Delete", on_click=delete_selected_target, color="negative"
                             ).props("flat dense")
                         refresh_target_select()
@@ -890,6 +896,7 @@ def build_ui() -> None:
                             polite = ui.checkbox("Polite mode (--polite)")
                             nuclei_on = ui.checkbox("Run nuclei (--nuclei)")
                             docker_fb = ui.checkbox("Docker fallback (--docker-fallback)")
+                            resume_on = ui.checkbox("Resume previous output (--resume)")
                             skip_wayback = ui.checkbox("Skip Wayback bodies (--skip-wayback-bodies)")
                             skip_sens = ui.checkbox("Skip leak-path probe (--skip-sensitive-paths)")
                             skip_gitleaks = ui.checkbox("Skip Gitleaks (--skip-gitleaks)")
@@ -1025,6 +1032,7 @@ def build_ui() -> None:
                             "polite": bool(polite.value),
                             "nuclei": bool(nuclei_on.value),
                             "docker_fallback": bool(docker_fb.value),
+                            "resume": bool(resume_on.value),
                             "skip_wayback_bodies": bool(skip_wayback.value),
                             "skip_sensitive_paths": bool(skip_sens.value),
                             "skip_gitleaks": bool(skip_gitleaks.value),
@@ -1104,6 +1112,7 @@ def build_ui() -> None:
                         STATE.informational.clear()
                         STATE.exposures.clear()
                         STATE.revealed.clear()
+                        STATE._finalized_at = None  # type: ignore[attr-defined]
                         try:
                             console.clear()
                         except Exception:
@@ -1113,6 +1122,34 @@ def build_ui() -> None:
                         ui.notify("Pipeline started", type="positive")
                         tabs.set_value(tab_console)
                         update_stats(force=True)
+
+                    def fill_from_saved(row: Dict[str, Any]) -> None:
+                        apply_target(row)
+                        out = (row.get("output") or row.get("output_dir") or "").strip()
+                        if out:
+                            out_in.set_value(out)
+                            load_in.set_value(out)
+                        files = (row.get("files") or "").strip()
+                        if files:
+                            files_in.set_value(files)
+                        subs = (row.get("subdomains") or "").strip()
+                        if subs:
+                            sub_in.set_value(subs)
+
+                    def rescan_saved_target() -> None:
+                        name = (target_select.value or domain_in.value or "").strip()
+                        row = next(
+                            (r for r in rp.list_saved_targets() if r.get("name") == name),
+                            None,
+                        )
+                        if not row:
+                            row = rp.find_saved_target(name)  # type: ignore[assignment]
+                        if not row:
+                            ui.notify("Load or save a target first", type="warning")
+                            return
+                        fill_from_saved(row)
+                        resume_on.set_value(True)
+                        start_scan()
 
                     def stop_scan() -> None:
                         STATE.runner.stop()
@@ -1959,25 +1996,62 @@ def build_ui() -> None:
         with ui.tab_panel(tab_history):
             with ui.card().classes("w-full rp-card"):
                 ui.label("History").classes("rp-section")
+                ui.label(
+                    "Past scans from this machine (or docker-home). "
+                    "Open reviews findings; Rescan reuses the URL list and output folder."
+                ).classes("text-xs text-gray-500 mb-2")
                 history_host = ui.column().classes("w-full gap-2")
+
+                def open_history_item(item: Dict[str, Any]) -> None:
+                    path = Path(str(item.get("output_dir") or item.get("output") or "")).expanduser()
+                    if not path.is_dir():
+                        ui.notify(f"Output folder not found: {path}", type="negative")
+                        return
+                    load_in.set_value(str(path))
+                    load_domain.set_value(str(item.get("domain") or ""))
+                    domain_in.set_value(str(item.get("domain") or ""))
+                    load_workspace()
+
+                def rescan_history_item(item: Dict[str, Any]) -> None:
+                    domain = str(item.get("domain") or "").strip()
+                    if not domain:
+                        ui.notify("History row has no domain", type="warning")
+                        return
+                    domain_in.set_value(domain)
+                    fill_from_saved(item)
+                    resume_on.set_value(True)
+                    start_scan()
 
                 def render_history() -> None:
                     history_host.clear()
+                    rows = rp.load_scan_history()
+                    STATE.history = rows
                     with history_host:
-                        if not STATE.history:
-                            ui.label("No completed runs in this session yet.").classes(
+                        if not rows:
+                            ui.label("No saved scans yet. Finish a run to see it here.").classes(
                                 "text-slate-500 text-sm"
                             )
                             return
-                        for item in reversed(STATE.history):
+                        for item in rows:
                             with ui.card().classes("w-full rp-subcard"):
                                 ui.label(
-                                    f"{item.get('domain')} · exit {item.get('exit_code')} · "
-                                    f"{item.get('started_at')} → {item.get('finished_at')}"
-                                ).classes("text-sm text-slate-200")
-                                ui.label(str(item.get("output_dir"))).classes(
+                                    f"{item.get('domain')} · "
+                                    f"{item.get('finished_at') or item.get('started_at') or ''}"
+                                ).classes("text-sm")
+                                ui.label(str(item.get("output_dir") or "")).classes(
                                     "text-xs text-slate-500 break-all"
                                 )
+                                with ui.row().classes("gap-2 mt-1"):
+                                    ui.button(
+                                        "Open",
+                                        on_click=lambda it=item: open_history_item(it),
+                                        color="secondary",
+                                    ).props("flat dense")
+                                    ui.button(
+                                        "Rescan",
+                                        on_click=lambda it=item: rescan_history_item(it),
+                                        color="primary",
+                                    ).props("unelevated dense")
 
                 build_ui.render_history = render_history  # type: ignore[attr-defined]
                 render_history()
@@ -2137,19 +2211,13 @@ def build_ui() -> None:
                         build_ui.render_findings()  # type: ignore[attr-defined]
         elif STATE.runner.finished_at and STATE.runner.exit_code is not None:
             # Finalize once
-            code = STATE.runner.exit_code
-            if not STATE.history or STATE.history[-1].get("finished_at") != STATE.runner.finished_at:
-                STATE.history.append(
-                    {
-                        "domain": STATE.runner.domain,
-                        "output_dir": str(STATE.runner.output_dir),
-                        "exit_code": code,
-                        "started_at": STATE.runner.started_at,
-                        "finished_at": STATE.runner.finished_at,
-                        "command": " ".join(STATE.runner.command),
-                    }
-                )
+            if getattr(STATE, "_finalized_at", None) != STATE.runner.finished_at:
+                STATE._finalized_at = STATE.runner.finished_at
                 STATE.workspace = STATE.runner.output_dir
+                try:
+                    STATE.history = rp.load_scan_history()
+                except Exception:
+                    pass
                 try:
                     build_ui.reload_findings()  # type: ignore[attr-defined]
                 except Exception:

@@ -551,7 +551,7 @@ install_go_tools() {
     install_go_tool "assetfinder" "github.com/tomnomnom/assetfinder@latest" || true
     install_go_tool "hakrawler"   "github.com/hakluke/hakrawler@latest" || true
     # v2 CLI: `gowitness file -f …` (what ReconPipe calls). v3 changed to `scan file`.
-    install_go_tool "gowitness"   "github.com/sensepost/gowitness@v2.5.1" || true
+    install_go_tool "gowitness"   "github.com/sensepost/gowitness@latest" || true
     install_go_tool "jsluice"     "github.com/BishopFox/jsluice/cmd/jsluice@latest" \
         || warn "jsluice is optional — katana works without it"
 
@@ -755,25 +755,25 @@ exec ruby \"$src/whatweb\" \"\$@\""
         warn "whatweb is optional. Skip with --skip-whatweb"
     fi
 }
-
-install_wappalyzer() {
-    header "STEP 6i: Wappalyzer CLI"
-    if tool_present wappalyzer; then
-        success "wappalyzer already installed"
-        return 0
-    fi
-    if ! command -v npm &>/dev/null; then
-        warn "npm not found — skipping wappalyzer (optional tech fingerprint)"
-        return 0
-    fi
-    log "npm install -g wappalyzer (optional; pulls Chromium via puppeteer)..."
-    if run_as_user npm config set prefix "$REAL_HOME/.local" \
-        && run_as_user npm install -g wappalyzer; then
-        success "wappalyzer installed via npm"
-    else
-        warn "wappalyzer is optional. Manual: npm install -g wappalyzer"
-    fi
-}
+# will need to find a differnet version or package for that.
+# install_wappalyzer() {
+#     header "STEP 6i: Wappalyzer CLI"
+#     if tool_present wappalyzer; then
+#         success "wappalyzer already installed"
+#         return 0
+#     fi
+#     if ! command -v npm &>/dev/null; then
+#         warn "npm not found — skipping wappalyzer (optional tech fingerprint)"
+#         return 0
+#     fi
+#     log "npm install -g wappalyzer (optional; pulls Chromium via puppeteer)..."
+#     if run_as_user npm config set prefix "$REAL_HOME/.local" \
+#         && run_as_user npm install -g wappalyzer; then
+#         success "wappalyzer installed via npm"
+#     else
+#         warn "wappalyzer is optional. Manual: npm install -g wappalyzer"
+#     fi
+# }
 
 install_nuclei_templates() {
     header "STEP 6j: Nuclei templates"
@@ -918,7 +918,7 @@ install_spray
 install_paramspider
 install_linkfinder
 install_whatweb
-install_wappalyzer
+# install_wappalyzer
 install_nuclei_templates
 link_tools_system_wide
 install_reconpipe_commands

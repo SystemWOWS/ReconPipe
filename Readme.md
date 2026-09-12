@@ -19,6 +19,7 @@ Use this only on assets you own or have written permission to test. Validated ke
 ## Contents
 
 - [Quick start](#quick-start)
+- [Docker](#docker)
 - [How a scan works](#how-a-scan-works)
 - [Installation](#installation)
 - [API keys](#api-keys)
@@ -37,6 +38,17 @@ Use this only on assets you own or have written permission to test. Validated ke
 
 
 ## Quick start
+
+**Docker (fastest if you already have Docker Desktop):** all core recon binaries are in the image, so you skip `install.sh`. First build takes a few minutes; every scan after that is just `docker compose run`.
+
+```bash
+docker compose build
+docker compose run --rm reconpipe -d example.com
+docker compose run --rm reconpipe --rescan -d example.com
+docker compose --profile gui up gui    # http://127.0.0.1:8088
+```
+
+Results land in `scans/`. Saved keys, targets, and history land in `docker-home/` (same role as `~/.reconpipe` on the host).
 
 **Linux (Debian, Ubuntu, Kali, Fedora, Arch, openSUSE):**
 
@@ -67,6 +79,34 @@ python3 reconpipegui.py
 # Linux launcher after install.sh:
 reconpipe-gui
 ```
+
+---
+
+
+
+## Docker
+
+Use this when you want a full tool PATH without running `install.sh` on the host. Docker Desktop on Windows works; run the commands from the `ReconPipe` folder.
+
+```bash
+docker compose build
+docker compose run --rm reconpipe -d example.com
+docker compose run --rm reconpipe --rescan -d example.com
+docker compose --profile gui up gui
+```
+
+| Path on host     | Path in container        | What it is                                      |
+| ---------------- | ------------------------ | ----------------------------------------------- |
+| `scans/`         | `/work`                  | Output folders (`recon_example_com/`, …)        |
+| `docker-home/`   | `/root/.reconpipe`       | `keys.yaml`, `targets.yaml`, `history.yaml`     |
+
+Pass API keys as env vars (`CHAOS_KEY`, `GITHUB_TOKEN`, …) or save them from the GUI into `docker-home/keys.yaml`.
+
+`--rescan` reuses the saved URL list and output directory for that domain, then `--resume` (skip files already downloaded). In the GUI: **Saved targets → Rescan**, or **History → Rescan**.
+
+`--docker-fallback` is a different feature: it runs *missing* host binaries via `docker run --rm`. You do not need it inside this image.
+
+Katana `--headless` needs Chrome, which this image does not ship. Leave headless off in Docker.
 
 ---
 
@@ -227,6 +267,10 @@ python3 reconpipe.py -d example.com --subdomains subs.txt
 # You already have URLs (skips crawl/archives)
 python3 reconpipe.py -d example.com --files urls.txt
 
+# Rescan a domain you already ran (saved URL list + output dir + resume)
+python3 reconpipe.py -d example.com --rescan
+docker compose run --rm reconpipe --rescan -d example.com
+
 # Several domains (each gets its own output directory)
 python3 reconpipe.py --domain-list domains.txt
 
@@ -290,6 +334,8 @@ python3 reconpipe.py -d example.com --resume-from validate
 
 `--resume-from` choices: `chaos`, `httpx`, `discovery`, `trufflehog`, `validate`.
 
+`--rescan` is the usual “run this domain again” flag: it loads `~/.reconpipe/targets.yaml` (or `docker-home/targets.yaml` in Docker), points `-o` / `--files` at the last run, and turns on `--resume`.
+
 ### Extra regex packs and jsleak
 
 A small high-confidence pack ships in `wordlists/secrets_patterns.yml`. To pull a filtered slice of [secrets-patterns-db](https://github.com/mazen160/secrets-patterns-db) (~350 high-confidence rules, duplicates of built-in prefixes dropped):
@@ -350,7 +396,8 @@ Also included:
 
 - Tool preflight (what is on `PATH`)
 - Live console and stage tracker (`reconpipe.py` as a cancellable subprocess)
-- Domain queue and saved scan profiles (`~/.reconpipe/profiles.yaml`)
+- Domain queue, saved targets, and **Rescan** (reuses URL list + output folder)
+- History of past scans (persisted in `~/.reconpipe/history.yaml`) with Open / Rescan
 - Findings browser (actionable / informational / exposures) with redacted secrets and Reveal
 - Re-test a finding with the configured validator
 - Artifact preview (`findings.json`, `valid_keys.json`, `summary.txt`, SARIF, …)
@@ -564,6 +611,7 @@ Run `python3 reconpipe.py -h` for the full list. Grouped below.
 | `--burp-import FILE`                   | Burp XML URLs                             |
 | `--docker-fallback`                    | Run missing tools in Docker when possible |
 | `--resume` / `--resume-from STAGE`     | Continue a previous run                   |
+| `--rescan`                             | Reuse saved target lists + output, resume |
 | `--config FILE`                        | Overlay YAML (repeatable)                 |
 | `--sarif FILE`                         | SARIF path                                |
 | `--no-fail-on-valid`                   | Do not exit 1 on live keys                |
@@ -618,7 +666,7 @@ reconpipe -d example.com
 
 ```bash
 python3 -m unittest tests.test_wave2 tests.test_wave3 tests.test_new_features tests.test_cli_and_keys \
-  tests.test_patterns tests.test_user_settings tests.test_httpx_resolve tests.test_osint -q
+  tests.test_patterns tests.test_user_settings tests.test_httpx_resolve tests.test_osint tests.test_docker -q
 
 # GUI wiring (Windows: set PYTHONIOENCODING=utf-8)
 python3 tests/test_gui_integration.py

@@ -68,6 +68,24 @@ class UserSettingsTests(unittest.TestCase):
         self.assertTrue(Path(entry["files"]).is_file())
         self.assertIn("lists", entry["files"])
         self.assertIn("example.com", Path(entry["files"]).read_text(encoding="utf-8"))
+        hist = rp.load_scan_history()
+        self.assertTrue(hist)
+        self.assertEqual(hist[0]["domain"], "example.com")
+
+    def test_rescan_defaults_reuse_saved_target(self):
+        urls = self.home / "files_to_scan.txt"
+        urls.write_text("https://example.com/app.js\n", encoding="utf-8")
+        out = self.home / "recon_example_com"
+        out.mkdir()
+        rp.remember_scan_target("example.com", files=urls, output=out)
+        args = rp.build_parser().parse_args(["-d", "example.com", "--rescan"])
+        rp.apply_rescan_defaults(args)
+        self.assertTrue(args.resume)
+        self.assertTrue(Path(args.files).is_file())
+        self.assertEqual(Path(args.output), out)
+        argv = rp.argv_from_options({"domain": "example.com", "rescan": True, "resume": True})
+        self.assertIn("--rescan", argv)
+        self.assertIn("--resume", argv)
 
 
 class HitBundleTests(unittest.TestCase):

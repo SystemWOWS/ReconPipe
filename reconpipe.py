@@ -1015,6 +1015,72 @@ def delete_saved_target(name: str) -> List[Dict[str, str]]:
     return rows
 
 
+def find_saved_target(domain: str) -> Optional[Dict[str, str]]:
+    """Match a saved target by name or domain (case-insensitive)."""
+    want = (domain or "").strip().lower()
+    if not want:
+        return None
+    named: Optional[Dict[str, str]] = None
+    by_domain: Optional[Dict[str, str]] = None
+    for row in list_saved_targets():
+        if (row.get("name") or "").strip().lower() == want:
+            named = row
+            break
+        if (row.get("domain") or "").strip().lower() == want and by_domain is None:
+            by_domain = row
+    return named or by_domain
+
+
+def load_scan_history() -> List[Dict[str, str]]:
+    rows = _load_user_yaml("history.yaml").get("runs") or []
+    if not isinstance(rows, list):
+        return []
+    out: List[Dict[str, str]] = []
+    for row in rows:
+        if isinstance(row, dict) and (row.get("domain") or row.get("output_dir")):
+            out.append({str(k): "" if v is None else str(v) for k, v in row.items()})
+    return out
+
+
+def append_scan_history(entry: Dict[str, str], limit: int = 50) -> List[Dict[str, str]]:
+    row = {str(k): "" if v is None else str(v) for k, v in (entry or {}).items()}
+    if not row.get("domain") and not row.get("output_dir"):
+        return load_scan_history()
+    rows = [r for r in load_scan_history() if not (
+        r.get("output_dir") == row.get("output_dir")
+        and r.get("finished_at") == row.get("finished_at")
+    )]
+    rows.insert(0, row)
+    kept = rows[: max(1, int(limit))]
+    _save_user_yaml("history.yaml", {"runs": kept})
+    return kept
+
+
+def apply_rescan_defaults(args: Any) -> Any:
+    """Reuse a saved target's lists/output and enable --resume."""
+    domain = (getattr(args, "domain", None) or "").strip()
+    row = find_saved_target(domain)
+    if row:
+        if not (getattr(args, "files", None) or "").strip():
+            files = (row.get("files") or "").strip()
+            if files and Path(files).is_file():
+                args.files = files
+        if not (getattr(args, "subdomains", None) or "").strip():
+            subs = (row.get("subdomains") or "").strip()
+            if subs and Path(subs).is_file():
+                args.subdomains = subs
+        if not (getattr(args, "output", None) or "").strip():
+            out = (row.get("output") or "").strip()
+            if out:
+                args.output = out
+    if not (getattr(args, "output", None) or "").strip() and domain:
+        guess = Path(f"recon_{domain.replace('.', '_')}")
+        if guess.is_dir():
+            args.output = str(guess)
+    args.resume = True
+    return args
+
+
 def remember_scan_target(
     domain: str,
     *,
@@ -1043,6 +1109,16 @@ def remember_scan_target(
         "output": str(Path(output).resolve()) if output else "",
     }
     upsert_saved_target(entry)
+    try:
+        append_scan_history({
+            "domain": domain,
+            "output_dir": entry["output"],
+            "files": entry["files"],
+            "subdomains": entry["subdomains"],
+            "finished_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        })
+    except Exception:
+        pass
     return entry
 
 
@@ -5745,6 +5821,8 @@ Examples:
                         help="Parallel file download workers (default: 16)")
     parser.add_argument("--resume", action="store_true",
                         help="Reuse files_to_scan.txt and skip re-download of existing files")
+    parser.add_argument("--rescan", action="store_true",
+                        help="Reuse the saved target (URL list + output dir) for this domain and --resume")
     parser.add_argument("--skip-amass", action="store_true", help="Skip amass subdomain enumeration")
     parser.add_argument("--amass-active", action="store_true", help="Run amass without -passive")
     parser.add_argument("--skip-assetfinder", action="store_true", help="Skip assetfinder")
@@ -5865,6 +5943,7 @@ def argv_from_options(opts: Dict[str, Any]) -> List[str]:
         "skip_subfinder": "--skip-subfinder",
         "no_notify": "--no-notify",
         "resume": "--resume",
+        "rescan": "--rescan",
         "skip_amass": "--skip-amass",
         "amass_active": "--amass-active",
         "skip_assetfinder": "--skip-assetfinder",
@@ -6037,6 +6116,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     apply_saved_keys(args)
     if getattr(args, "ci", False):
         apply_ci_defaults(args)
+    if getattr(args, "rescan", False):
+        apply_rescan_defaults(args)
+        log(
+            f"Rescan: output={getattr(args, 'output', None) or '(default)'} "
+            f"files={getattr(args, 'files', None) or '(from output dir)'} "
+            f"resume={bool(getattr(args, 'resume', False))}",
+            "info",
+        )
 
     if args.domain_list and not (args.domain or "").strip():
         return run_domain_list(args, argv)
