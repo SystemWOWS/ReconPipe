@@ -333,6 +333,33 @@ def sanitize_upload_name(name: str) -> str:
     return cleaned[:180]
 
 
+def upload_event_name(e: Any) -> str:
+    """Filename from NiceGUI 2 (e.name) or 3 (e.file.name)."""
+    file_obj = getattr(e, "file", None)
+    raw = getattr(file_obj, "name", None) or getattr(e, "name", None) or ""
+    return str(raw).strip()
+
+
+async def read_upload_bytes(e: Any) -> bytes:
+    """File bytes from NiceGUI 2 (e.content) or 3 (await e.file.read())."""
+    file_obj = getattr(e, "file", None)
+    if file_obj is not None:
+        read = getattr(file_obj, "read", None)
+        if callable(read):
+            data = read()
+            if inspect.isawaitable(data):
+                data = await data
+            return data or b""
+    content = getattr(e, "content", None)
+    if content is not None and hasattr(content, "read"):
+        try:
+            content.seek(0)
+        except Exception:
+            pass
+        return content.read() or b""
+    return b""
+
+
 def stage_mobile_bytes(filename: str, data: bytes) -> Path:
     dest_dir = work_root() / "mobile_uploads"
     dest_dir.mkdir(parents=True, exist_ok=True)
@@ -1133,6 +1160,29 @@ def build_ui() -> None:
             transition: border-color .15s ease;
           }
           .rp-subcard:hover { border-color: var(--rp-orange) !important; }
+          .rp-opt-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+            gap: 2px 10px;
+            width: 100%;
+          }
+          .rp-expansion {
+            width: 100%;
+            border: 1px solid var(--rp-border-soft) !important;
+            border-radius: var(--rp-radius-sm) !important;
+            background: var(--rp-panel-2) !important;
+            margin: 0 0 8px 0;
+          }
+          .rp-expansion .q-expansion-item__container {
+            border-radius: var(--rp-radius-sm);
+          }
+          .rp-expansion .q-item {
+            min-height: 40px;
+            padding: 6px 12px;
+          }
+          .rp-expansion .q-item__label { font-weight: 650; font-size: 13px; color: var(--rp-text-strong); }
+          .rp-expansion .q-expansion-item__content { padding: 4px 12px 12px 12px; }
+          .rp-hint { font-size: 11.5px; color: var(--rp-muted); margin: 0 0 8px 0; }
         </style>
         """
     )
@@ -1220,16 +1270,6 @@ def build_ui() -> None:
                                 "SARIF path (--sarif)",
                                 placeholder="optional override",
                             ).classes("flex-1").props("outlined dense")
-                        chaos_in = ui.input(
-                            "Chaos API key (--chaos-key)",
-                            password=True,
-                            password_toggle_button=True,
-                            placeholder="or set CHAOS_KEY / PDCP_API_KEY in env",
-                        ).classes("w-full").props("outlined dense")
-                        shopify_in = ui.input(
-                            "Shopify store host (--shopify-domain)",
-                            placeholder="store.myshopify.com",
-                        ).classes("w-full").props("outlined dense")
                         domain_list_in = ui.input(
                             "Domain list (--domain-list)",
                             placeholder="/path/to/domains.txt",
@@ -1243,27 +1283,36 @@ def build_ui() -> None:
                                 "Exclude hosts (--exclude-pattern)",
                                 placeholder="*.cdn.example.com file",
                             ).classes("flex-1").props("outlined dense")
-                        with ui.row().classes("w-full gap-2"):
-                            vault_in = ui.input(
-                                "Vault address (--vault-addr)",
-                                placeholder="https://vault.example.com",
-                            ).classes("flex-1").props("outlined dense")
-                            grafana_in = ui.input(
-                                "Grafana host (--grafana-url)",
-                                placeholder="grafana.example.com",
-                            ).classes("flex-1").props("outlined dense")
-                        webhook_in = ui.input(
-                            "Notify webhook (--notify-webhook)",
-                            placeholder="Slack/Discord/custom URL",
-                        ).classes("w-full").props("outlined dense")
-                        config_in = ui.textarea(
-                            "Config overlays (--config, one path per line)",
-                            placeholder="engagement.example.yaml",
-                        ).classes("w-full").props("outlined dense")
-                        ignore_in = ui.textarea(
-                            "Ignore hashes (--ignore-hash, one SHA256 per line)",
-                            placeholder="paste finding hashes to suppress",
-                        ).classes("w-full").props("outlined dense")
+
+                        with ui.expansion(
+                            "Advanced target (Shopify, Vault, notify, config)",
+                            icon="tune",
+                        ).classes("rp-expansion"):
+                            shopify_in = ui.input(
+                                "Shopify store host (--shopify-domain)",
+                                placeholder="store.myshopify.com",
+                            ).classes("w-full").props("outlined dense")
+                            with ui.row().classes("w-full gap-2"):
+                                vault_in = ui.input(
+                                    "Vault address (--vault-addr)",
+                                    placeholder="https://vault.example.com",
+                                ).classes("flex-1").props("outlined dense")
+                                grafana_in = ui.input(
+                                    "Grafana host (--grafana-url)",
+                                    placeholder="grafana.example.com",
+                                ).classes("flex-1").props("outlined dense")
+                            webhook_in = ui.input(
+                                "Notify webhook (--notify-webhook)",
+                                placeholder="Slack/Discord/custom URL",
+                            ).classes("w-full").props("outlined dense")
+                            config_in = ui.textarea(
+                                "Config overlays (--config, one path per line)",
+                                placeholder="engagement.example.yaml",
+                            ).classes("w-full").props("outlined dense")
+                            ignore_in = ui.textarea(
+                                "Ignore hashes (--ignore-hash, one SHA256 per line)",
+                                placeholder="paste finding hashes to suppress",
+                            ).classes("w-full").props("outlined dense")
 
                         def apply_target(row: Dict[str, Any]) -> None:
                             domain_in.set_value(row.get("domain") or "")
@@ -1336,7 +1385,13 @@ def build_ui() -> None:
                         ui.label(
                             "Saved to ~/.reconpipe/keys.yaml so you do not re-enter them. "
                             "That file stays on this machine (chmod 600)."
-                        ).classes("text-xs text-gray-500 mb-2")
+                        ).classes("rp-hint")
+                        chaos_in = ui.input(
+                            "Chaos API key (--chaos-key)",
+                            password=True,
+                            password_toggle_button=True,
+                            placeholder="or set CHAOS_KEY / PDCP_API_KEY in env",
+                        ).classes("w-full").props("outlined dense")
                         shodan_in = ui.input(
                             "Shodan API key (--shodan-key)",
                             password=True,
@@ -1429,62 +1484,119 @@ def build_ui() -> None:
 
                     with ui.card().classes("w-full rp-card"):
                         ui.label("Pipeline options").classes("rp-section")
-                        with ui.row().classes("w-full flex-wrap gap-4"):
-                            skip_chaos = ui.checkbox("Skip Chaos (--skip-chaos)")
-                            skip_subfinder = ui.checkbox("Skip subfinder (--skip-subfinder)")
-                            skip_httpx = ui.checkbox("Skip httpx (--skip-httpx)")
-                            skip_gau = ui.checkbox("Skip passive archives (--skip-gau)")
-                            skip_discovery = ui.checkbox(
-                                "Skip all URL discovery (--skip-discovery)"
-                            )
-                            no_trufflehog = ui.checkbox(
-                                "Built-in scanner only (--no-trufflehog)"
-                            )
-                            no_validate = ui.checkbox("Skip validation (--no-validate)")
-                            headless = ui.checkbox("Katana headless Chrome (--headless)")
-                            no_fail = ui.checkbox(
-                                "Do not fail on valid keys (--no-fail-on-valid)"
-                            )
-                            no_notify = ui.checkbox("No desktop notify (--no-notify)")
-                            skip_amass = ui.checkbox("Skip amass (--skip-amass)")
-                            polite = ui.checkbox("Polite mode (--polite)")
-                            nuclei_on = ui.checkbox("Run nuclei (--nuclei)")
-                            docker_fb = ui.checkbox("Docker fallback (--docker-fallback)")
-                            resume_on = ui.checkbox("Resume previous output (--resume)")
-                            skip_wayback = ui.checkbox("Skip Wayback bodies (--skip-wayback-bodies)")
-                            skip_sens = ui.checkbox("Skip leak-path probe (--skip-sensitive-paths)")
-                            skip_gitleaks = ui.checkbox("Skip Gitleaks (--skip-gitleaks)")
-                            spray_on = ui.checkbox("Run spray leak paths (--spray)")
-                            skip_public_apis = ui.checkbox("Skip public-apis catalog (--skip-public-apis)")
-                            skip_secrets_db = ui.checkbox("Skip secrets-patterns-db (--skip-secrets-db)")
-                            skip_jsleak = ui.checkbox("Skip jsleak (--skip-jsleak)")
-                            skip_code_search = ui.checkbox("Skip GitHub/GitLab code search (--skip-code-search)")
-                            skip_buckets = ui.checkbox("Skip cloud bucket probe (--skip-buckets)")
-                            skip_openapi = ui.checkbox("Skip OpenAPI/Postman parse (--skip-openapi)")
-                            ci_on = ui.checkbox("CI / local-repo mode (--ci)")
-                            repo_shallow = ui.checkbox("Shallow git clone (--repo-shallow)")
-                            no_default_scope = ui.checkbox(
-                                "Allow off-target URLs (--no-default-scope)"
-                            )
-                        with ui.row().classes("w-full gap-4"):
-                            conc_in = ui.number(
-                                "Validation concurrency", value=10, min=1, max=200
-                            ).classes("w-40")
-                            gau_in = ui.number(
-                                "gau threads", value=5, min=1, max=100
-                            ).classes("w-40")
-                        proxy_in = ui.input("Proxy (--proxy)", placeholder="http://127.0.0.1:8080").classes("w-full").props("outlined dense")
-                        header_in = ui.textarea(
-                            "Extra headers (-H), one NAME: VALUE per line"
-                        ).classes("w-full").props("outlined dense")
-                        proxy_auth_in = ui.input("Proxy auth (--proxy-auth)", password=True).classes("w-full").props("outlined dense")
-                        burp_in = ui.input("Burp XML (--burp-import)").classes("w-full").props("outlined dense")
-                        repo_in = ui.input("Git repo to clone (--repo)").classes("w-full").props("outlined dense")
                         ui.label(
-                            "APK / IPA scanning lives on the Apps tab (upload or path)."
-                        ).classes("text-xs text-slate-500")
-                        github_org_in = ui.input("GitHub org for code search (--github-org)").classes("w-full").props("outlined dense")
-                        creds_in = ui.input("Scan credentials YAML (--credentials)").classes("w-full").props("outlined dense")
+                            "Common skips are grouped. Open a section only when you need it."
+                        ).classes("rp-hint")
+
+                        with ui.expansion("Discovery", icon="travel_explore", value=True).classes(
+                            "rp-expansion"
+                        ):
+                            ui.label("Subdomains, live hosts, and URL collection.").classes("rp-hint")
+                            with ui.element("div").classes("rp-opt-grid"):
+                                skip_chaos = ui.checkbox("Skip Chaos (--skip-chaos)")
+                                skip_subfinder = ui.checkbox("Skip subfinder (--skip-subfinder)")
+                                skip_amass = ui.checkbox("Skip amass (--skip-amass)")
+                                skip_httpx = ui.checkbox("Skip httpx (--skip-httpx)")
+                                skip_gau = ui.checkbox("Skip passive archives (--skip-gau)")
+                                skip_discovery = ui.checkbox(
+                                    "Skip all URL discovery (--skip-discovery)"
+                                )
+                                skip_wayback = ui.checkbox(
+                                    "Skip Wayback bodies (--skip-wayback-bodies)"
+                                )
+                                headless = ui.checkbox("Katana headless Chrome (--headless)")
+                            with ui.row().classes("w-full gap-4 mt-2"):
+                                gau_in = ui.number(
+                                    "gau threads", value=5, min=1, max=100
+                                ).classes("w-40")
+
+                        with ui.expansion("Secret engines", icon="vpn_key").classes("rp-expansion"):
+                            ui.label("How secrets are detected after files are collected.").classes(
+                                "rp-hint"
+                            )
+                            with ui.element("div").classes("rp-opt-grid"):
+                                no_trufflehog = ui.checkbox(
+                                    "Built-in scanner only (--no-trufflehog)"
+                                )
+                                skip_gitleaks = ui.checkbox("Skip Gitleaks (--skip-gitleaks)")
+                                skip_jsleak = ui.checkbox("Skip jsleak (--skip-jsleak)")
+                                skip_secrets_db = ui.checkbox(
+                                    "Skip secrets-patterns-db (--skip-secrets-db)"
+                                )
+                                skip_public_apis = ui.checkbox(
+                                    "Skip public-apis catalog (--skip-public-apis)"
+                                )
+                                no_validate = ui.checkbox("Skip validation (--no-validate)")
+                            with ui.row().classes("w-full gap-4 mt-2"):
+                                conc_in = ui.number(
+                                    "Validation concurrency", value=10, min=1, max=200
+                                ).classes("w-40")
+
+                        with ui.expansion("Extra leak surfaces", icon="public").classes(
+                            "rp-expansion"
+                        ):
+                            ui.label(
+                                "Optional probes on top of the main crawl. APK/IPA is on the Apps tab."
+                            ).classes("rp-hint")
+                            with ui.element("div").classes("rp-opt-grid"):
+                                skip_code_search = ui.checkbox(
+                                    "Skip GitHub/GitLab code search (--skip-code-search)"
+                                )
+                                skip_buckets = ui.checkbox(
+                                    "Skip cloud bucket probe (--skip-buckets)"
+                                )
+                                skip_openapi = ui.checkbox(
+                                    "Skip OpenAPI/Postman parse (--skip-openapi)"
+                                )
+                                skip_sens = ui.checkbox(
+                                    "Skip leak-path probe (--skip-sensitive-paths)"
+                                )
+                                spray_on = ui.checkbox("Run spray leak paths (--spray)")
+                                nuclei_on = ui.checkbox("Run nuclei (--nuclei)")
+                            github_org_in = ui.input(
+                                "GitHub org for code search (--github-org)"
+                            ).classes("w-full").props("outlined dense")
+                            burp_in = ui.input(
+                                "Burp XML (--burp-import)"
+                            ).classes("w-full").props("outlined dense")
+                            repo_in = ui.input(
+                                "Git repo to clone (--repo)"
+                            ).classes("w-full").props("outlined dense")
+                            creds_in = ui.input(
+                                "Scan credentials YAML (--credentials)"
+                            ).classes("w-full").props("outlined dense")
+                            with ui.element("div").classes("rp-opt-grid"):
+                                repo_shallow = ui.checkbox("Shallow git clone (--repo-shallow)")
+                                ci_on = ui.checkbox("CI / local-repo mode (--ci)")
+
+                        with ui.expansion("Runtime", icon="settings").classes("rp-expansion"):
+                            ui.label("Speed, resume, proxy, and fail behavior.").classes("rp-hint")
+                            with ui.element("div").classes("rp-opt-grid"):
+                                resume_on = ui.checkbox("Resume previous output (--resume)")
+                                polite = ui.checkbox("Polite mode (--polite)")
+                                docker_fb = ui.checkbox("Docker fallback (--docker-fallback)")
+                                no_fail = ui.checkbox(
+                                    "Do not fail on valid keys (--no-fail-on-valid)"
+                                )
+                                no_notify = ui.checkbox("No desktop notify (--no-notify)")
+                                no_default_scope = ui.checkbox(
+                                    "Allow off-target URLs (--no-default-scope)"
+                                )
+                            proxy_in = ui.input(
+                                "Proxy (--proxy)", placeholder="http://127.0.0.1:8080"
+                            ).classes("w-full").props("outlined dense")
+                            proxy_auth_in = ui.input(
+                                "Proxy auth (--proxy-auth)", password=True
+                            ).classes("w-full").props("outlined dense")
+                            header_in = ui.textarea(
+                                "Extra headers (-H), one NAME: VALUE per line"
+                            ).classes("w-full").props("outlined dense")
+
+                    with ui.card().classes("w-full rp-card"):
+                        ui.label("Queue & profiles").classes("rp-section")
+                        ui.label(
+                            "Queue several domains, or save the current option set as a named profile."
+                        ).classes("rp-hint")
                         with ui.row().classes("w-full gap-2"):
                             queue_in = ui.input("Queue domain").classes("flex-1").props("outlined dense")
                             queue_box = ui.column().classes("w-full")
@@ -1872,7 +1984,7 @@ def build_ui() -> None:
                         ).classes("text-sm text-slate-500 mb-2")
                         app_domain_in = ui.input(
                             "App / backend domain (-d)",
-                            placeholder="example.com  (112.gov.in for 112 India)",
+                            placeholder="example.com",
                         ).classes("w-full").props("outlined dense")
                         app_path_in = ui.input(
                             "Add a file path",
@@ -1949,31 +2061,23 @@ def build_ui() -> None:
                             else:
                                 ui.notify(f"Queued {Path(path).name}", type="positive")
 
-                        def on_app_upload(e: Any) -> None:
-                            name = sanitize_upload_name(
-                                getattr(e, "name", None) or "app.bin"
-                            )
-                            if not classify_mobile_path(name):
-                                ui.notify(
-                                    "Upload an .apk, .xapk, .apkm, or .ipa",
-                                    type="warning",
-                                )
-                                return
-                            content = getattr(e, "content", None)
-                            data = b""
-                            if content is not None and hasattr(content, "read"):
-                                try:
-                                    content.seek(0)
-                                except Exception:
-                                    pass
-                                data = content.read() or b""
-                            if not data:
-                                ui.notify("Upload was empty", type="negative")
-                                return
+                        async def on_app_upload(e: Any) -> None:
                             try:
+                                raw_name = upload_event_name(e)
+                                name = sanitize_upload_name(raw_name or "app.bin")
+                                if not classify_mobile_path(name):
+                                    ui.notify(
+                                        f"Upload an .apk, .xapk, .apkm, or .ipa (got {raw_name or name})",
+                                        type="warning",
+                                    )
+                                    return
+                                data = await read_upload_bytes(e)
+                                if not data:
+                                    ui.notify("Upload was empty", type="negative")
+                                    return
                                 dest = stage_mobile_bytes(name, data)
-                            except OSError as exc:
-                                ui.notify(str(exc), type="negative")
+                            except Exception as exc:
+                                ui.notify(f"Upload failed: {exc}", type="negative")
                                 return
                             add_app_path(str(dest))
 
