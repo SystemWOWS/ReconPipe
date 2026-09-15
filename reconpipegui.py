@@ -272,6 +272,85 @@ def default_output_dir(domain: str) -> Path:
     return root / f"recon_{safe}"
 
 
+APK_SUFFIXES = (".apk", ".xapk", ".apkm")
+IPA_SUFFIXES = (".ipa",)
+
+
+def work_root() -> Path:
+    env = (os.environ.get("RECONPIPE_WORKDIR") or "").strip()
+    return Path(env) if env else HERE
+
+
+def running_in_docker() -> bool:
+    if (os.environ.get("RECONPIPE_WORKDIR") or "").strip():
+        return True
+    try:
+        return Path("/.dockerenv").exists()
+    except OSError:
+        return False
+
+
+def classify_mobile_path(raw: str) -> str:
+    path = (raw or "").strip().strip('"').strip("'")
+    low = path.lower()
+    if low.endswith(IPA_SUFFIXES):
+        return "ipa"
+    if low.endswith(APK_SUFFIXES):
+        return "apk"
+    return ""
+
+
+def parse_mobile_paths(text: str) -> Tuple[List[str], List[str]]:
+    apk: List[str] = []
+    ipa: List[str] = []
+    for ln in (text or "").splitlines():
+        raw = ln.strip().strip('"').strip("'")
+        if not raw:
+            continue
+        kind = classify_mobile_path(raw)
+        if kind == "apk":
+            apk.append(raw)
+        elif kind == "ipa":
+            ipa.append(raw)
+    return apk, ipa
+
+
+def split_mobile_file_list(paths: List[str]) -> Tuple[List[str], List[str]]:
+    apk: List[str] = []
+    ipa: List[str] = []
+    for raw in paths or []:
+        kind = classify_mobile_path(raw)
+        if kind == "apk":
+            apk.append(raw.strip().strip('"').strip("'"))
+        elif kind == "ipa":
+            ipa.append(raw.strip().strip('"').strip("'"))
+    return apk, ipa
+
+
+def sanitize_upload_name(name: str) -> str:
+    base = Path(name or "app.bin").name
+    cleaned = re.sub(r"[^a-zA-Z0-9._-]", "_", base).strip("._") or "app.bin"
+    return cleaned[:180]
+
+
+def stage_mobile_bytes(filename: str, data: bytes) -> Path:
+    dest_dir = work_root() / "mobile_uploads"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / sanitize_upload_name(filename)
+    dest.write_bytes(data or b"")
+    return dest
+
+
+def mobile_path_missing_hint(path: str) -> str:
+    msg = f"App package not found: {path}"
+    if running_in_docker():
+        msg += (
+            " — this GUI is in Docker and cannot see host paths. "
+            "Upload the file on the Apps tab, or copy it into scans/ and use /work/<filename>."
+        )
+    return msg
+
+
 def fmt_bytes(n: int) -> str:
     """Human size for the CPU/RAM meter (1024-based)."""
     n = max(0, int(n or 0))
@@ -676,6 +755,14 @@ def validate_form(opts: Dict[str, Any]) -> List[str]:
         except Exception:
             errors.append(f"Invalid output directory: {out}")
 
+    for key, label in (("apk", "APK"), ("ipa", "IPA")):
+        for raw in opts.get(key) or []:
+            path = str(raw or "").strip()
+            if not path:
+                continue
+            if not Path(path).expanduser().is_file():
+                errors.append(mobile_path_missing_hint(path))
+
     return errors
 
 # Pipeline worker (subprocess — safe cancel / isolation)
@@ -811,6 +898,7 @@ class GuiState:
         self.min_confidence: int = 0
         self.filter_severity: str = "All"
         self.scan_queue: List[str] = []
+        self.mobile_paths: List[str] = []
         self.dark_on: bool = True
         self.preview_artifact: str = ""
 
@@ -1072,11 +1160,14 @@ def build_ui() -> None:
 
     with ui.tabs().classes("w-full") as tabs:
         tab_scan = ui.tab("Scan")
+        tab_apps = ui.tab("Apps")
         tab_console = ui.tab("Console")
         tab_findings = ui.tab("Findings")
         tab_tester = ui.tab("Key Tester")
         tab_artifacts = ui.tab("Artifacts")
         tab_history = ui.tab("History")
+
+    scan_actions: Dict[str, Any] = {}
 
     with ui.tab_panels(tabs, value=tab_scan).classes("w-full px-4 pt-4 pb-12"):
         # Scan 
@@ -1389,7 +1480,9 @@ def build_ui() -> None:
                         proxy_auth_in = ui.input("Proxy auth (--proxy-auth)", password=True).classes("w-full").props("outlined dense")
                         burp_in = ui.input("Burp XML (--burp-import)").classes("w-full").props("outlined dense")
                         repo_in = ui.input("Git repo to clone (--repo)").classes("w-full").props("outlined dense")
-                        apk_in = ui.textarea("APK/IPA paths (--apk/--ipa), one per line").classes("w-full").props("outlined dense")
+                        ui.label(
+                            "APK / IPA scanning lives on the Apps tab (upload or path)."
+                        ).classes("text-xs text-slate-500")
                         github_org_in = ui.input("GitHub org for code search (--github-org)").classes("w-full").props("outlined dense")
                         creds_in = ui.input("Scan credentials YAML (--credentials)").classes("w-full").props("outlined dense")
                         with ui.row().classes("w-full gap-2"):
@@ -1519,16 +1612,8 @@ def build_ui() -> None:
                             "proxy_auth": (proxy_auth_in.value or "").strip() or None,
                             "burp_import": (burp_in.value or "").strip() or None,
                             "repo": (repo_in.value or "").strip() or None,
-                            "apk": [
-                                ln.strip()
-                                for ln in (apk_in.value or "").splitlines()
-                                if ln.strip() and ln.strip().lower().endswith((".apk", ".xapk"))
-                            ],
-                            "ipa": [
-                                ln.strip()
-                                for ln in (apk_in.value or "").splitlines()
-                                if ln.strip().lower().endswith(".ipa")
-                            ],
+                            "apk": split_mobile_file_list(STATE.mobile_paths)[0],
+                            "ipa": split_mobile_file_list(STATE.mobile_paths)[1],
                             "credentials": (creds_in.value or "").strip() or None,
                             "header": [
                                 ln.strip()
@@ -1557,19 +1642,18 @@ def build_ui() -> None:
                         except Exception as exc:
                             form_error.text = str(exc)
 
-                    def start_scan() -> None:
-                        opts = collect_opts()
+                    def launch_from_opts(opts: Dict[str, Any]) -> bool:
                         errs = validate_form(opts)
                         if errs:
                             form_error.text = " · ".join(errs)
                             ui.notify("Fix form errors before starting", type="negative")
-                            return
+                            return False
                         form_error.text = ""
                         try:
                             STATE.runner.start(opts)
                         except Exception as exc:
                             ui.notify(str(exc), type="negative")
-                            return
+                            return False
                         STATE.domain = opts["domain"]
                         STATE.shopify_domain = opts.get("shopify_domain") or ""
                         STATE.config_overlays = list(opts.get("config") or [])
@@ -1589,6 +1673,14 @@ def build_ui() -> None:
                         ui.notify("Pipeline started", type="positive")
                         tabs.set_value(tab_console)
                         update_stats(force=True)
+                        return True
+
+                    def start_scan() -> None:
+                        launch_from_opts(collect_opts())
+
+                    scan_actions["collect"] = collect_opts
+                    scan_actions["launch"] = launch_from_opts
+                    scan_actions["domain_in"] = domain_in
 
                     def fill_from_saved(row: Dict[str, Any]) -> None:
                         apply_target(row)
@@ -1766,6 +1858,220 @@ def build_ui() -> None:
                         ui.button(
                             "Load findings", on_click=load_workspace, color="secondary"
                         ).props("outline")
+
+        # Apps (APK / IPA)
+        with ui.tab_panel(tab_apps):
+            with ui.row().classes("w-full gap-3 items-stretch"):
+                with ui.column().classes("w-full lg:w-7/12 gap-3"):
+                    with ui.card().classes("w-full rp-card"):
+                        ui.label("APK / IPA scanner").classes("rp-section")
+                        ui.label(
+                            "Unzip the app, keep JS/JSON/XML/plist/.env, strings-dump binaries, "
+                            "then run the same secret scanners. In Docker, upload the file here "
+                            "instead of a host path like /home/.../Downloads."
+                        ).classes("text-sm text-slate-500 mb-2")
+                        app_domain_in = ui.input(
+                            "App / backend domain (-d)",
+                            placeholder="example.com  (112.gov.in for 112 India)",
+                        ).classes("w-full").props("outlined dense")
+                        app_path_in = ui.input(
+                            "Add a file path",
+                            placeholder="/work/app.apk  or  C:\\Users\\...\\app.apk",
+                        ).classes("w-full").props("outlined dense")
+                        app_files_box = ui.column().classes("w-full gap-1")
+
+                        def render_app_files() -> None:
+                            app_files_box.clear()
+                            with app_files_box:
+                                if not STATE.mobile_paths:
+                                    ui.label("No packages queued.").classes(
+                                        "text-xs text-slate-500"
+                                    )
+                                    return
+                                for idx, path in enumerate(list(STATE.mobile_paths)):
+                                    exists = Path(path).expanduser().is_file()
+                                    with ui.row().classes(
+                                        "w-full items-center justify-between gap-2"
+                                    ):
+                                        ui.label(path).classes(
+                                            "font-mono text-xs break-all flex-1"
+                                        )
+                                        ui.label(
+                                            "ready" if exists else "missing"
+                                        ).classes(
+                                            "text-xs rp-badge-ok"
+                                            if exists
+                                            else "text-xs rp-badge-miss"
+                                        )
+
+                                        def _drop(i: int = idx) -> None:
+                                            if 0 <= i < len(STATE.mobile_paths):
+                                                STATE.mobile_paths.pop(i)
+                                            render_app_files()
+
+                                        ui.button(
+                                            "Remove", on_click=_drop, color="secondary"
+                                        ).props("flat dense")
+
+                        def add_app_path(raw: str, *, copy_into_work: bool = False) -> None:
+                            path = (raw or "").strip().strip('"').strip("'")
+                            if not path:
+                                ui.notify("Enter or upload an APK/IPA first", type="warning")
+                                return
+                            if not classify_mobile_path(path):
+                                ui.notify(
+                                    "Use .apk, .xapk, .apkm, or .ipa",
+                                    type="warning",
+                                )
+                                return
+                            src = Path(path).expanduser()
+                            staged_root = work_root() / "mobile_uploads"
+                            already = False
+                            try:
+                                already = src.resolve().is_relative_to(staged_root.resolve())
+                            except (OSError, ValueError):
+                                already = False
+                            if src.is_file() and not already and (
+                                copy_into_work or running_in_docker()
+                            ):
+                                try:
+                                    staged = stage_mobile_bytes(src.name, src.read_bytes())
+                                    path = str(staged)
+                                except OSError as exc:
+                                    ui.notify(f"Could not stage file: {exc}", type="negative")
+                                    return
+                            if path not in STATE.mobile_paths:
+                                STATE.mobile_paths.append(path)
+                            app_path_in.set_value("")
+                            render_app_files()
+                            if not Path(path).expanduser().is_file():
+                                ui.notify(mobile_path_missing_hint(path), type="warning")
+                            else:
+                                ui.notify(f"Queued {Path(path).name}", type="positive")
+
+                        def on_app_upload(e: Any) -> None:
+                            name = sanitize_upload_name(
+                                getattr(e, "name", None) or "app.bin"
+                            )
+                            if not classify_mobile_path(name):
+                                ui.notify(
+                                    "Upload an .apk, .xapk, .apkm, or .ipa",
+                                    type="warning",
+                                )
+                                return
+                            content = getattr(e, "content", None)
+                            data = b""
+                            if content is not None and hasattr(content, "read"):
+                                try:
+                                    content.seek(0)
+                                except Exception:
+                                    pass
+                                data = content.read() or b""
+                            if not data:
+                                ui.notify("Upload was empty", type="negative")
+                                return
+                            try:
+                                dest = stage_mobile_bytes(name, data)
+                            except OSError as exc:
+                                ui.notify(str(exc), type="negative")
+                                return
+                            add_app_path(str(dest))
+
+                        with ui.row().classes("w-full gap-2 flex-wrap"):
+                            ui.button(
+                                "Add path",
+                                on_click=lambda: add_app_path(app_path_in.value or ""),
+                                color="secondary",
+                            ).props("outline dense")
+                            ui.upload(
+                                on_upload=on_app_upload,
+                                auto_upload=True,
+                                max_file_size=200_000_000,
+                                label="Upload APK / IPA",
+                            ).props(
+                                'accept=".apk,.xapk,.apkm,.ipa" dense'
+                            ).classes("flex-1")
+                        render_app_files()
+
+                    with ui.card().classes("w-full rp-card"):
+                        ui.label("How to scan").classes("rp-section")
+                        app_only = ui.checkbox(
+                            "Apps only — skip live recon (no subdomain/URL crawl)"
+                        )
+                        app_only.value = True
+                        app_no_validate = ui.checkbox(
+                            "Skip key validation (--no-validate)"
+                        )
+                        app_no_validate.value = True
+                        ui.label(
+                            "Apps-only still needs a domain for reports. "
+                            "Untick it to attach the package to a full Scan-tab run."
+                        ).classes("text-xs text-slate-500")
+                        app_error = ui.label("").classes("text-red-400 text-sm")
+
+                        def start_app_scan() -> None:
+                            collect = scan_actions.get("collect")
+                            launch = scan_actions.get("launch")
+                            domain_widget = scan_actions.get("domain_in")
+                            if not callable(collect) or not callable(launch):
+                                ui.notify("Scan form is not ready", type="negative")
+                                return
+                            apk, ipa = split_mobile_file_list(STATE.mobile_paths)
+                            if not apk and not ipa:
+                                app_error.text = "Add or upload an APK/IPA first."
+                                ui.notify(app_error.text, type="warning")
+                                return
+                            domain = (app_domain_in.value or "").strip()
+                            if not domain and domain_widget is not None:
+                                domain = (domain_widget.value or "").strip()
+                            if domain and domain_widget is not None and not (
+                                domain_widget.value or ""
+                            ).strip():
+                                domain_widget.set_value(domain)
+                            opts = collect()
+                            if domain:
+                                opts["domain"] = domain
+                            opts["apk"] = apk
+                            opts["ipa"] = ipa
+                            if bool(app_only.value):
+                                opts["skip_chaos"] = True
+                                opts["skip_subfinder"] = True
+                                opts["skip_httpx"] = True
+                                opts["skip_gau"] = True
+                                opts["skip_discovery"] = True
+                                opts["skip_intel"] = True
+                                opts["skip_amass"] = True
+                                opts["skip_buckets"] = True
+                                opts["skip_code_search"] = True
+                                opts["skip_openapi"] = True
+                                opts["skip_sensitive_paths"] = True
+                                opts["spray"] = False
+                            if bool(app_no_validate.value):
+                                opts["no_validate"] = True
+                            app_error.text = ""
+                            launch(opts)
+
+                        with ui.row().classes("gap-2 mt-2"):
+                            ui.button(
+                                "Scan apps",
+                                on_click=start_app_scan,
+                                color="primary",
+                            ).props("unelevated")
+                            ui.button(
+                                "Open Scan tab",
+                                on_click=lambda: tabs.set_value(tab_scan),
+                                color="secondary",
+                            ).props("flat")
+
+                with ui.column().classes("w-full lg:w-5/12 gap-3"):
+                    with ui.card().classes("w-full rp-card"):
+                        ui.label("What this does").classes("rp-section")
+                        ui.label(
+                            "Accepts .apk, .xapk, .apkm (APKMirror), and .ipa. "
+                            "Extracts into recon_<domain>/mobile_extract/. "
+                            "Findings show on Findings / Artifacts. "
+                            "In Docker, uploads land in /work/mobile_uploads/."
+                        ).classes("text-sm text-slate-500")
 
         # Console
         with ui.tab_panel(tab_console):

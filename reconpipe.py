@@ -5998,7 +5998,7 @@ Examples:
     parser.add_argument("--skip-code-search", action="store_true",
                         help="Skip GitHub/GitLab public code search")
     parser.add_argument("--apk", metavar="FILE", action="append", default=[],
-                        help="Unzip and scan an APK/XAPK (repeatable)")
+                        help="Unzip and scan an APK/XAPK/APKM (repeatable)")
     parser.add_argument("--ipa", metavar="FILE", action="append", default=[],
                         help="Unzip and scan an IPA (repeatable)")
     parser.add_argument("--skip-buckets", action="store_true",

@@ -39,6 +39,7 @@ MOBILE_KEEP_NAMES = {
     "awsconfiguration.json", "network_security_config.xml", "info.plist",
     "strings.xml", "config.json", "firebase-config.json",
 }
+MOBILE_PKG_SUFFIX = {".apk", ".xapk", ".apkm", ".ipa"}
 
 GENERIC_PAIRS = (
     ("paypal_client_id", "paypal_secret", "paypal_secret", "paypal_client_id"),
@@ -79,7 +80,7 @@ def _http_text(url: str, headers: Optional[Dict[str, str]] = None, timeout: int 
         return 0, "", {}
 
 
-# --- GitHub / GitLab code search ------------------------------------------------
+#  GitHub / GitLab code search 
 
 def github_search_queries(domain: str, org: str = "", extra_hosts: Optional[Iterable[str]] = None) -> List[str]:
     host = (domain or "").strip().lower().lstrip(".")
@@ -235,7 +236,7 @@ def collect_code_search_urls(
     return urls[:MAX_CODE_URLS]
 
 
-# --- OpenAPI / Swagger / Postman ------------------------------------------------
+#  OpenAPI / Swagger / Postman 
 
 def looks_like_openapi(text: str) -> bool:
     blob = (text or "").lstrip()[:4000]
@@ -470,15 +471,17 @@ def harvest_spec_secret_findings(text: str, source_url: str = "") -> List[Dict[s
     return out
 
 
-# --- APK / IPA ------------------------------------------------------------------
+# APK / IPA 
 
 def extract_printable_strings(data: bytes, min_len: int = 8) -> str:
     chunks = [m.group().decode("ascii", errors="ignore") for m in PRINTABLE_RE.finditer(data or b"")]
     return "\n".join(c for c in chunks if len(c) >= min_len)
 
 
-def extract_mobile_archive(archive: Path, dest: Path, limit_files: int = 400) -> List[Path]:
-    """Unzip APK/IPA/XAPK and write text-ish members (+ strings dump of binaries)."""
+def extract_mobile_archive(
+    archive: Path, dest: Path, limit_files: int = 400, depth: int = 0
+) -> List[Path]:
+    """Unzip APK/IPA/XAPK/APKM and write text-ish members (+ strings dump of binaries)."""
     archive = Path(archive)
     dest = Path(dest)
     dest.mkdir(parents=True, exist_ok=True)
@@ -497,18 +500,22 @@ def extract_mobile_archive(archive: Path, dest: Path, limit_files: int = 400) ->
                 continue
             low = name.lower()
             base = Path(low).name
+            suffix = Path(low).suffix
             try:
                 info = zf.getinfo(name)
             except KeyError:
                 continue
-            if info.file_size > 4_000_000:
+            is_pkg = suffix in MOBILE_PKG_SUFFIX
+            if info.file_size > 80_000_000:
+                continue
+            if info.file_size > 4_000_000 and not is_pkg:
                 continue
             try:
                 blob = zf.read(name)
             except Exception:
                 continue
             keep = (
-                Path(low).suffix in MOBILE_KEEP_SUFFIX
+                suffix in MOBILE_KEEP_SUFFIX
                 or base in MOBILE_KEEP_NAMES
                 or low.endswith(".jsbundle")
             )
@@ -522,6 +529,16 @@ def extract_mobile_archive(archive: Path, dest: Path, limit_files: int = 400) ->
                     text = blob.decode("utf-8", errors="ignore")
                 out.write_text(text, encoding="utf-8")
                 written.append(out)
+            elif is_pkg and depth < 1:
+                pkg_path = dest / "_nested" / Path(safe).name
+                pkg_path.parent.mkdir(parents=True, exist_ok=True)
+                pkg_path.write_bytes(blob)
+                nested_dest = pkg_path.parent / (pkg_path.stem + "_unpacked")
+                written.extend(
+                    extract_mobile_archive(
+                        pkg_path, nested_dest, max(1, limit_files - len(written)), depth + 1
+                    )
+                )
             else:
                 extracted = extract_printable_strings(blob)
                 if extracted:
@@ -535,7 +552,7 @@ def extract_mobile_archive(archive: Path, dest: Path, limit_files: int = 400) ->
     return written
 
 
-# --- Cloud buckets --------------------------------------------------------------
+# Cloud buckets
 
 def bucket_name_candidates(domain: str) -> List[str]:
     host = (domain or "").strip().lower().lstrip(".")
@@ -657,7 +674,7 @@ def probe_buckets(
     return {"buckets": found, "urls": object_urls}
 
 
-# --- ETag download cache --------------------------------------------------------
+#  ETag download cache 
 
 def load_etag_cache(path: Path) -> Dict[str, Dict[str, str]]:
     try:
@@ -699,7 +716,7 @@ def etag_cache_update(entry: Dict[str, str], headers: Dict[str, str], sha256: st
     return out
 
 
-# --- SQLite finding store + validation cache ------------------------------------
+#  SQLite finding store + validation cache 
 
 def findings_db_path(explicit: Optional[Path] = None) -> Path:
     if explicit:
@@ -825,7 +842,7 @@ def cache_put(conn: sqlite3.Connection, key_hash: str, finding: Dict, ttl: int =
     conn.commit()
 
 
-# --- git blame / log -S ---------------------------------------------------------
+#  git blame / log -S 
 
 def git_commit_for_secret(repo: Path, rel_path: str, snippet: str) -> Optional[Dict[str, str]]:
     """First commit that introduced snippet (git log -S). Offline-friendly if git missing."""
@@ -881,7 +898,7 @@ def annotate_repo_findings(findings: List[Dict], repo: Path) -> int:
     return n
 
 
-# --- Proximity / extra pairing --------------------------------------------------
+#  Proximity / extra pairing 
 
 def pair_generic_findings(findings: List[Dict]) -> List[Dict]:
     """Attach partner values for PayPal / Woo / Mixpanel / Algolia halves."""
@@ -929,7 +946,7 @@ def proximity_partners(content: str, a: str, b: str, window: int = 240) -> bool:
     return abs(ia - ib) <= window
 
 
-# --- CI defaults + crt.sh / certstream ------------------------------------------
+#  CI defaults + crt.sh / certstream 
 
 CI_SKIP_FLAGS = (
     "skip_chaos", "skip_httpx", "skip_gau", "skip_discovery", "skip_intel",

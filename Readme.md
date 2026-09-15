@@ -511,7 +511,7 @@ These run during discovery unless you skip them.
 
 **Public code search** — GitHub (and GitLab with a token) for the target domain, then the same regex/validators on the raw files. Set `GITHUB_TOKEN` (or `--github-token`) to raise the search rate limit. `--github-org acme` scopes to an org. `--skip-code-search` disables it.
 
-**Mobile apps** — `--apk app.apk` / `--ipa app.ipa` unzips the archive, keeps JS/JSON/XML/plist, and strings-dumps binaries (Firebase, Maps keys, `.env`).
+**Mobile apps** — GUI **Apps** tab, or CLI `--apk app.apk` / `--ipa app.ipa` (repeatable; `.xapk` / `.apkm` too). Unzips the archive, keeps JS/JSON/XML/plist, strings-dumps binaries (Firebase, Maps keys, `.env`), and scans those files. In Docker, upload the package on the Apps tab (host `/home/.../Downloads` paths are not visible in the container).
 
 **Cloud buckets** — Guess S3/GCS/Azure names from the domain, probe listing, and queue readable objects that look like configs. `--skip-buckets` disables it. Only names derived from the target are tried.
 
