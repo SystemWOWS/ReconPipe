@@ -140,6 +140,8 @@ PIPELINE_METRICS: Optional["PipelineMetrics"] = None
 _POLITE_LOCK = threading.Lock()
 _POLITE_LAST = 0.0
 SCAN_WAYBACK_BODIES = True
+SCAN_JS_HISTORY = True
+SCAN_SOURCEMAPS = True
 SCAN_PUBLIC_APIS = True
 WAYBACK_BY_FILE: Dict[str, Dict[str, str]] = {}
 DOWNLOAD_ETAG_CACHE: Dict[str, Dict[str, str]] = {}
@@ -377,6 +379,7 @@ CONTEXT_WORDS = {
     "aws_session", "session_token",
     "cloudflare", "huggingface", "notion", "grafana", "vault", "datadog",
     "linear", "supabase", "azure", "sas",
+    "mcp", "claude", "cursor",
     "vercel", "netlify", "railway", "render", "flyio", "planetscale",
     "circleci", "sentry", "doppler", "pagerduty", "atlassian", "clerk",
     "mongodb", "postgres", "redis", "stripe", "algolia",
@@ -413,6 +416,17 @@ extract_js_urls = addons.extract_js_urls
 extract_endpoints_from_js = addons.extract_endpoints_from_js
 extract_js_secret_assignments = addons.extract_js_secret_assignments
 parse_source_map = addons.parse_source_map
+extract_source_mapping_url = addons.extract_source_mapping_url
+source_map_url_candidates = addons.source_map_url_candidates
+decode_source_map_data_url = addons.decode_source_map_data_url
+safe_source_relpath = addons.safe_source_relpath
+write_reconstructed_sources = addons.write_reconstructed_sources
+source_fetch_urls = addons.source_fetch_urls
+looks_like_js_url = addons.looks_like_js_url
+parse_cdx_rows = addons.parse_cdx_rows
+parse_cdx_text = addons.parse_cdx_text
+diff_removed_lines = addons.diff_removed_lines
+list_cdx_snapshots = addons.list_cdx_snapshots
 normalize_url = addons.normalize_url
 dedupe_urls = addons.dedupe_urls
 AdaptiveConcurrency = addons.AdaptiveConcurrency
@@ -477,6 +491,9 @@ trufflehog_git_cmd = addons.trufflehog_git_cmd
 build_clone_cmd = addons.build_clone_cmd
 leak_wordlist_path = addons.leak_wordlist_path
 env_like_urls = addons.env_like_urls
+mcp_like_urls = addons.mcp_like_urls
+looks_like_mcp_config = addons.looks_like_mcp_config
+extract_mcp_secrets = addons.extract_mcp_secrets
 build_gitleaks_cmd = addons.build_gitleaks_cmd
 build_gitleaks_detect_cmd = addons.build_gitleaks_detect_cmd
 build_spray_cmd = addons.build_spray_cmd
@@ -509,6 +526,17 @@ github_raw_url = wave3.github_raw_url
 parse_github_search_payload = wave3.parse_github_search_payload
 parse_gitlab_search_payload = wave3.parse_gitlab_search_payload
 collect_code_search_urls = wave3.collect_code_search_urls
+docker_hub_queries = wave3.docker_hub_queries
+parse_docker_hub_search = wave3.parse_docker_hub_search
+collect_docker_hub_images = wave3.collect_docker_hub_images
+extract_image_refs = wave3.extract_image_refs
+select_images_for_target = wave3.select_images_for_target
+extract_docker_save_credentials = wave3.extract_docker_save_credentials
+findings_from_trivy_secrets = wave3.findings_from_trivy_secrets
+scan_public_image_layers = wave3.scan_public_image_layers
+apply_ai_verdict = wave3.apply_ai_verdict
+ai_verdict_for = wave3.ai_verdict_for
+keep_layer_member = wave3.keep_layer_member
 looks_like_openapi = wave3.looks_like_openapi
 looks_like_postman = wave3.looks_like_postman
 parse_openapi_spec = wave3.parse_openapi_spec
@@ -1335,12 +1363,12 @@ SEVERITY_HIGH = frozenset({
     "openai_key", "anthropic_key", "sendgrid", "heroku_api", "cloudflare_api",
     "huggingface_token", "notion_token", "linear_api_key", "supabase_service",
     "digitalocean_pat", "npm_token", "pypi_token", "shopify_token", "shopify_secret",
-    "slack_token", "twilio_sid", "twilio_token", "azure_sas",
+    "slack_token", "twilio_sid", "twilio_token", "azure_sas", "mcp_credential",
 })
 SEVERITY_MEDIUM = frozenset({
     "stripe_test", "stripe_restricted", "firebase_key", "mailgun", "mailchimp",
     "discord_token", "discord_webhook", "telegram_bot", "grafana_token",
-    "datadog_api_key", "mapbox_token", "source_map_exposure", "google_api",
+    "datadog_api_key", "mapbox_token",     "source_map_exposure", "google_api",
     "google_oauth", "slack_webhook",
 })
 SEVERITY_LOW = frozenset({
@@ -1432,6 +1460,14 @@ def _report_rows(
         row.setdefault("revocation", REVOCATION_URLS.get(typ, ""))
         if typ in COMPLIANCE_TAGS:
             row.setdefault("compliance", list(COMPLIANCE_TAGS[typ]))
+    _sev_rank = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+    rows.sort(
+        key=lambda r: (
+            0 if r.get("bucket") == "finding" else 1,
+            -int(r.get("ai_score") or 0),
+            _sev_rank.get(str(r.get("severity") or ""), 9),
+        )
+    )
     return rows
 
 
@@ -1558,6 +1594,7 @@ def write_html_report(
         valid = "VALID" if row.get("valid") else ("checked" if row.get("validated") else "unverified")
         cvss = finding_cvss(sev)
         revoke = html.escape(str(row.get("revocation") or ""))
+        verdict = html.escape(str(row.get("ai_verdict") or ""))
         tags = row.get("compliance") or []
         tag_html = ""
         if isinstance(tags, list) and tags:
@@ -1572,7 +1609,9 @@ def write_html_report(
         cards.append(
             "<article class='hit'>"
             f"<div class='sev' style='background:{color}'>{html.escape(sev)}</div>"
-            f"<div class='meta'><strong>{typ}</strong> · {valid} · CVSS {cvss}{tag_html}</div>"
+            f"<div class='meta'><strong>{typ}</strong> · {valid}"
+            + (f" · {verdict}" if verdict else "")
+            + f" · CVSS {cvss}{tag_html}</div>"
             f"<div class='key'>{key}</div>"
             f"<div class='src'><a href='{src}'>{src}</a></div>"
             f"<div class='note'>{note}</div>"
@@ -2024,6 +2063,350 @@ def download_files_parallel(
     return counts
 
 
+def iter_scan_files(*roots: Path, limit: int = 2500) -> List[Path]:
+    """Walk downloaded / reconstructed / history trees for secret scanners."""
+    out: List[Path] = []
+    seen: Set[str] = set()
+    for root in roots:
+        if root is None:
+            continue
+        base = Path(root)
+        if not base.exists():
+            continue
+        files = [base] if base.is_file() else sorted(p for p in base.rglob("*") if p.is_file())
+        for path in files:
+            try:
+                key = str(path.resolve())
+            except OSError:
+                key = str(path)
+            if key in seen:
+                continue
+            try:
+                if path.stat().st_size > 4_000_000:
+                    continue
+            except OSError:
+                continue
+            seen.add(key)
+            out.append(path)
+            if len(out) >= limit:
+                return out
+    return out
+
+
+def _http_get_bytes(url: str, timeout: int = 10) -> Optional[bytes]:
+    ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+    apply_polite_delay()
+    try:
+        req = urllib.request.Request(
+            url, headers={"User-Agent": ua, "Accept": "*/*", **SCAN_EXTRA_HEADERS}
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            ct = resp.headers.get("Content-Type") or ""
+            if ct and not content_type_allowed(ct) and "json" not in ct.lower():
+                return None
+            return resp.read() or b""
+    except Exception:
+        return None
+
+
+def reconstruct_downloaded_js_maps(
+    urls: List[str],
+    dl_dir: Path,
+    dest_dir: Path,
+) -> Tuple[int, int]:
+    """Fetch public maps for downloaded JS and write sourcesContent as files."""
+    dest_dir = Path(dest_dir)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    maps = 0
+    files = 0
+    index: List[Dict[str, str]] = []
+    for url in urls:
+        if maps >= addons.SOURCEMAP_MAX_MAPS:
+            break
+        if not looks_like_js_url(url):
+            continue
+        js_path = Path(dl_dir) / download_filename(url)
+        if not js_path.is_file():
+            continue
+        try:
+            js_text = js_path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        map_blob: Optional[str] = None
+        map_url_used = ""
+        for cand in source_map_url_candidates(url, js_text):
+            if cand.lower().startswith("data:"):
+                map_blob = decode_source_map_data_url(cand)
+                map_url_used = cand[:80]
+            else:
+                raw = _http_get_bytes(cand, timeout=10)
+                if not raw:
+                    continue
+                try:
+                    map_blob = raw.decode("utf-8", errors="replace")
+                except Exception:
+                    continue
+                map_url_used = cand
+                map_disk = Path(dl_dir) / download_filename(cand)
+                try:
+                    if not map_disk.is_file():
+                        map_disk.write_bytes(raw)
+                except OSError:
+                    pass
+            if map_blob and looks_like_source_map_json(map_blob):
+                break
+            map_blob = None
+        if not map_blob:
+            continue
+        prefix = hashlib.md5((map_url_used or url).encode()).hexdigest()[:10]
+        written = write_reconstructed_sources(
+            map_blob, dest_dir, prefix=prefix
+        )
+        if not written:
+            for src_url in source_fetch_urls(map_blob, map_url_used):
+                raw = _http_get_bytes(src_url, timeout=8)
+                if not raw:
+                    continue
+                try:
+                    text = raw.decode("utf-8", errors="replace")
+                except Exception:
+                    continue
+                rel = safe_source_relpath(urlparse(src_url).path or "source.js")
+                path = dest_dir / prefix / rel
+                try:
+                    path.resolve().relative_to(dest_dir.resolve())
+                except (OSError, ValueError):
+                    continue
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(text, encoding="utf-8", errors="replace")
+                written.append(path)
+                if len(written) >= addons.RECONSTRUCT_MAX_FILES:
+                    break
+        if not written:
+            continue
+        maps += 1
+        files += len(written)
+        index.append(
+            {
+                "js_url": url,
+                "map_url": map_url_used,
+                "files": str(len(written)),
+            }
+        )
+    if index:
+        try:
+            (dest_dir / "index.json").write_text(
+                json.dumps(index, indent=2), encoding="utf-8"
+            )
+        except Exception:
+            pass
+        try:
+            (dest_dir.parent / "reconstructed_sources.json").write_text(
+                json.dumps(index, indent=2), encoding="utf-8"
+            )
+        except Exception:
+            pass
+    return maps, files
+
+
+def fetch_live_js_history(
+    urls: List[str],
+    dl_dir: Path,
+    dest_dir: Path,
+) -> Tuple[int, List[Dict]]:
+    """
+    Full CDX timestamp history for live JS. Distinct bodies (content-hash
+    deduped) land under dest_dir/_wayback so scanners treat them like maps.
+    Consecutive unique versions are diffed; removed secret-like lines become findings.
+    """
+    dest_dir = Path(dest_dir)
+    wb_dir = dest_dir / "_wayback"
+    wb_dir.mkdir(parents=True, exist_ok=True)
+    written_n = 0
+    index: List[Dict[str, str]] = []
+    removed_rows: List[Dict[str, str]] = []
+    diff_findings: List[Dict] = []
+    js_urls = [u for u in urls if looks_like_js_url(u)][: addons.JS_HISTORY_MAX_URLS]
+    ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+    for url in js_urls:
+        live = Path(dl_dir) / download_filename(url)
+        live_bytes = b""
+        live_hash = ""
+        live_text = ""
+        if live.is_file():
+            try:
+                live_bytes = live.read_bytes()
+                live_hash = hashlib.sha256(live_bytes).hexdigest()
+                live_text = live_bytes.decode("utf-8", errors="replace")
+            except OSError:
+                live_hash = ""
+        snaps = list_cdx_snapshots(url, timeout=20, limit=addons.JS_HISTORY_CDX_LIMIT)
+        seen_hash: Set[str] = set()
+        if live_hash:
+            seen_hash.add(live_hash)
+        versions: List[Tuple[str, str, str]] = []  # ts, hash, text
+        fetched = 0
+        for snap in snaps:
+            if fetched >= addons.JS_HISTORY_MAX_FETCH:
+                break
+            archive = snap.get("archive_url") or ""
+            if not archive:
+                continue
+            fetched += 1
+            apply_polite_delay()
+            try:
+                req = urllib.request.Request(
+                    archive, headers={"User-Agent": ua, "Accept": "*/*"}
+                )
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    body = resp.read() or b""
+            except Exception:
+                continue
+            if not body or looks_like_html_shell(body):
+                continue
+            body_hash = hashlib.sha256(body).hexdigest()
+            if body_hash in seen_hash:
+                continue
+            seen_hash.add(body_hash)
+            fname = f"{snap.get('timestamp') or 'snap'}_{download_filename(url)}"
+            out = wb_dir / fname
+            try:
+                out.write_bytes(body)
+            except OSError:
+                continue
+            remember_wayback_file(
+                out,
+                {
+                    **snap,
+                    "original": snap.get("original") or url,
+                    "archive_url": archive,
+                },
+            )
+            try:
+                text = body.decode("utf-8", errors="replace")
+            except Exception:
+                text = ""
+            versions.append((snap.get("timestamp") or "", body_hash, text))
+            index.append(
+                {
+                    "js_url": url,
+                    "timestamp": snap.get("timestamp") or "",
+                    "archive_url": archive,
+                    "sha256": body_hash,
+                    "file": f"_wayback/{fname}",
+                }
+            )
+            written_n += 1
+        if live_text:
+            versions.append(("live", live_hash or "live", live_text))
+        for i in range(len(versions) - 1):
+            old_ts, _, old_text = versions[i]
+            new_ts, _, new_text = versions[i + 1]
+            gone = diff_removed_lines(old_text, new_text)
+            if not gone:
+                continue
+            hits = findings_from_removed_js_lines(
+                gone,
+                js_url=url,
+                old_ts=old_ts,
+                new_ts=new_ts,
+            )
+            diff_findings.extend(hits)
+            if hits or gone:
+                removed_rows.append(
+                    {
+                        "js_url": url,
+                        "from": old_ts,
+                        "to": new_ts,
+                        "removed_lines": str(len(gone)),
+                        "secret_hits": str(len(hits)),
+                    }
+                )
+    if index:
+        try:
+            (dest_dir.parent / "js_history.json").write_text(
+                json.dumps(index, indent=2), encoding="utf-8"
+            )
+        except Exception:
+            pass
+        try:
+            (wb_dir / "index.json").write_text(
+                json.dumps(index, indent=2), encoding="utf-8"
+            )
+        except Exception:
+            pass
+    if removed_rows or diff_findings:
+        payload = {
+            "pairs": removed_rows,
+            "findings": [
+                {
+                    "type": f.get("type"),
+                    "source_url": f.get("source_url"),
+                    "note": f.get("note"),
+                    "from": f.get("history_from"),
+                    "to": f.get("history_to"),
+                }
+                for f in diff_findings
+            ],
+        }
+        try:
+            (dest_dir.parent / "js_history_removed.json").write_text(
+                json.dumps(payload, indent=2), encoding="utf-8"
+            )
+        except Exception:
+            pass
+    return written_n, diff_findings
+
+
+def findings_from_removed_js_lines(
+    lines: List[str],
+    *,
+    js_url: str,
+    old_ts: str,
+    new_ts: str,
+) -> List[Dict]:
+    """Regex-scan lines that vanished between consecutive JS snapshots."""
+    hits: List[Dict] = []
+    seen: Set[str] = set()
+    note = (
+        f"Removed between Wayback {old_ts or '?'} and {new_ts or 'live'} "
+        f"— still present in an archived copy of {js_url}"
+    )
+    for line in lines:
+        if len(line) < 8:
+            continue
+        for key_type, pattern in PATTERNS.items():
+            if key_type in INFORMATIONAL_TYPES:
+                continue
+            for m in re.finditer(pattern, line):
+                raw = m.group(0)
+                grp = m.group(m.lastindex) if m.lastindex else raw
+                key = grp if grp is not None else raw
+                if looks_fake(key):
+                    continue
+                if key_type == "mapbox_token" and not is_mapbox_token(key):
+                    continue
+                marker = f"{key_type}:{key}"
+                if marker in seen:
+                    continue
+                seen.add(marker)
+                hits.append(
+                    {
+                        "type": key_type,
+                        "key": key,
+                        "source_url": js_url,
+                        "scanner": "js_history_diff",
+                        "verified": False,
+                        "from_js_history": True,
+                        "history_from": old_ts,
+                        "history_to": new_ts,
+                        "note": note,
+                        "removed_line": line[:400],
+                    }
+                )
+    return hits
+
+
 def _link_or_copy(src: Path, dest: Path) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
     if dest.exists():
@@ -2056,6 +2439,9 @@ def pack_hit_bundle(
         "valid_keys.json",
         "informational.json",
         "source_map_exposures.json",
+        "reconstructed_sources.json",
+        "js_history.json",
+        "js_history_removed.json",
         "summary.txt",
         "results.sarif",
         "files_to_scan.txt",
@@ -3368,6 +3754,56 @@ def split_exposures(findings: List[Dict]) -> Tuple[List[Dict], List[Dict]]:
     return actionable, exposures
 
 
+MCP_CLASSIFY_SKIP = frozenset({
+    "generic_secret", "uuid_candidate", "jwt", "firebase_url", "public_api_key",
+})
+
+
+def classify_secret_type(value: str) -> Optional[str]:
+    """Map a raw MCP env/header value onto an existing PATTERNS type."""
+    text = (value or "").strip()
+    if not text:
+        return None
+    for key_type, pattern in PATTERNS.items():
+        if key_type in MCP_CLASSIFY_SKIP or key_type in INFORMATIONAL_TYPES:
+            continue
+        try:
+            if re.search(pattern, text):
+                return key_type
+        except re.error:
+            continue
+    return None
+
+
+def findings_from_mcp_content(
+    page: str,
+    url: str,
+    scanner: str = "mcp_config",
+) -> List[Dict]:
+    """AI/MCP credential detection for mcp.json and sibling client configs."""
+    if not looks_like_mcp_config(url, page):
+        return []
+    out: List[Dict] = []
+    for row in extract_mcp_secrets(page, url):
+        key = str(row.get("key") or "").strip()
+        if not key or looks_fake(key):
+            continue
+        key_type = classify_secret_type(key) or "mcp_credential"
+        item = {
+            "type": key_type,
+            "key": key,
+            "hash": finding_hash(key_type, key),
+            "source_url": url,
+            "scanner": scanner,
+            "verified": False,
+            "mcp_config": True,
+            "mcp_field": row.get("field") or "",
+            "confidence": max(int(CONFIDENCE.get(key_type, 70)), 70),
+        }
+        out.append(item)
+    return out
+
+
 def _load_scan_text(url: str, ua: str) -> Tuple[Optional[str], Dict[str, Any]]:
     """Load page text from a local path, live HTTP, or a Wayback snapshot."""
     extra: Dict[str, Any] = {}
@@ -3613,6 +4049,8 @@ def custom_scan(urls_file: str, output_dir: Optional[Path] = None) -> List[Dict]
                             finding["wayback_url"] = extra["wayback_url"]
                     if hint:
                         attach_public_api_meta(finding, hint)
+                    if looks_like_mcp_config(url, page):
+                        finding["mcp_config"] = True
                     findings.append(finding)
                     if FINDINGS_STREAM is not None:
                         FINDINGS_STREAM.emit(finding)
@@ -3624,6 +4062,16 @@ def custom_scan(urls_file: str, output_dir: Optional[Path] = None) -> List[Dict]
                     findings.append(item)
                     if FINDINGS_STREAM is not None:
                         FINDINGS_STREAM.emit(item)
+
+            for item in findings_from_mcp_content(page, url):
+                h = item.get("hash") or finding_hash(item.get("type") or "", item.get("key") or "")
+                item["hash"] = h
+                if baseline_should_suppress(baseline, h, url) or (h, url) in seen_pairs:
+                    continue
+                seen_pairs.add((h, url))
+                findings.append(item)
+                if FINDINGS_STREAM is not None:
+                    FINDINGS_STREAM.emit(item)
 
         except Exception:
             pass
@@ -4128,6 +4576,7 @@ def parse_trufflehog(output: bytes) -> List[Dict]:
         "github":       "github_pat",
         "gitlab":       "gitlab_pat",
         "stripe":       "stripe_live",
+        "huggingface":  "huggingface_token",
         "openai":       "openai_key",
         "anthropic":    "anthropic_key",
         "sendgrid":     "sendgrid",
@@ -4286,6 +4735,7 @@ GITLEAKS_RULE_MAP = {
     "twilio-api-key": "twilio_token",
     "openai": "openai_key",
     "anthropic": "anthropic_key",
+    "huggingface": "huggingface_token",
 }
 
 
@@ -5711,7 +6161,7 @@ def _metrics_finish(name: str, items_out: int = 0, errors: int = 0) -> None:
 def configure_scan_runtime(args: Any, output_dir: Path) -> None:
     global SCAN_PROXY, SCAN_PROXY_AUTH, SCAN_EXTRA_HEADERS, SCAN_POLITE_DELAY
     global SCAN_RPS, SCAN_CREDENTIALS, DOCKER_FALLBACK, FINDINGS_STREAM, PIPELINE_METRICS
-    global SCAN_WAYBACK_BODIES, SCAN_PUBLIC_APIS
+    global SCAN_WAYBACK_BODIES, SCAN_PUBLIC_APIS, SCAN_JS_HISTORY, SCAN_SOURCEMAPS
     SCAN_PROXY = (getattr(args, "proxy", None) or "").strip()
     SCAN_PROXY_AUTH = (getattr(args, "proxy_auth", None) or "").strip()
     SCAN_EXTRA_HEADERS = parse_header_list(getattr(args, "header", None) or [])
@@ -5719,6 +6169,8 @@ def configure_scan_runtime(args: Any, output_dir: Path) -> None:
     SCAN_POLITE_DELAY = polite_delay_seconds(bool(getattr(args, "polite", False)), SCAN_RPS)
     DOCKER_FALLBACK = bool(getattr(args, "docker_fallback", False))
     SCAN_WAYBACK_BODIES = not bool(getattr(args, "skip_wayback_bodies", False))
+    SCAN_JS_HISTORY = not bool(getattr(args, "skip_js_history", False))
+    SCAN_SOURCEMAPS = not bool(getattr(args, "skip_sourcemaps", False))
     SCAN_PUBLIC_APIS = not bool(getattr(args, "skip_public_apis", False))
     WAYBACK_BY_FILE.clear()
     creds_file = (getattr(args, "credentials", None) or "").strip()
@@ -5969,8 +6421,12 @@ Examples:
                         help="Also walk Docker/K8s/Terraform files under --repo or output dir")
     parser.add_argument("--skip-wayback-bodies", action="store_true",
                         help="Do not fetch Wayback snapshots when a discovered URL is dead")
+    parser.add_argument("--skip-js-history", action="store_true",
+                        help="Do not fetch older Wayback copies of JavaScript that is still live")
+    parser.add_argument("--skip-sourcemaps", action="store_true",
+                        help="Do not fetch public JS source maps or reconstruct original sources")
     parser.add_argument("--skip-sensitive-paths", action="store_true",
-                        help="Skip probing /.env, /.git/config, swagger.json, and similar leak paths")
+                        help="Skip probing /.env, /.git/config, swagger.json, MCP configs, and similar leak paths")
     parser.add_argument("--skip-gitleaks", action="store_true",
                         help="Do not run Gitleaks (default: run when the binary is on PATH)")
     parser.add_argument("--spray", action="store_true",
@@ -5997,6 +6453,10 @@ Examples:
                         help="GitHub org to scope public code search")
     parser.add_argument("--skip-code-search", action="store_true",
                         help="Skip GitHub/GitLab public code search")
+    parser.add_argument("--skip-docker-hub", action="store_true",
+                        help="Skip Docker Hub public image search")
+    parser.add_argument("--skip-image-layers", action="store_true",
+                        help="Do not pull/scan public container image layers for baked-in secrets")
     parser.add_argument("--apk", metavar="FILE", action="append", default=[],
                         help="Unzip and scan an APK/XAPK/APKM (repeatable)")
     parser.add_argument("--ipa", metavar="FILE", action="append", default=[],
@@ -6071,6 +6531,8 @@ def argv_from_options(opts: Dict[str, Any]) -> List[str]:
         "iac_scan": "--iac-scan",
         "repo_shallow": "--repo-shallow",
         "skip_wayback_bodies": "--skip-wayback-bodies",
+        "skip_js_history": "--skip-js-history",
+        "skip_sourcemaps": "--skip-sourcemaps",
         "skip_sensitive_paths": "--skip-sensitive-paths",
         "skip_gitleaks": "--skip-gitleaks",
         "spray": "--spray",
@@ -6081,6 +6543,8 @@ def argv_from_options(opts: Dict[str, Any]) -> List[str]:
         "secrets_db_medium": "--secrets-db-medium",
         "skip_jsleak": "--skip-jsleak",
         "skip_code_search": "--skip-code-search",
+        "skip_docker_hub": "--skip-docker-hub",
+        "skip_image_layers": "--skip-image-layers",
         "skip_buckets": "--skip-buckets",
         "skip_openapi": "--skip-openapi",
         "skip_store": "--skip-store",
@@ -6988,11 +7452,16 @@ def main(argv: Optional[List[str]] = None) -> int:
         if not args.files:
             files_to_scan.write_text("\n".join(url_list))
     extra_urls: List[str] = []
+    hub_images: List[str] = []
     repo_dir_scanned: Optional[Path] = None
     env_hits = env_like_urls(harvest_discovery_url_pool(output_dir, url_list))
     if env_hits:
         extra_urls.extend(env_hits)
         log(f".env-like URLs: {len(env_hits)}", "info")
+    mcp_hits = mcp_like_urls(harvest_discovery_url_pool(output_dir, url_list))
+    if mcp_hits:
+        extra_urls.extend(mcp_hits)
+        log(f"MCP/AI config URLs: {len(mcp_hits)}", "info")
     if getattr(args, "spray", False):
         if tools_status.get("spray"):
             extra_urls.extend(run_spray_leak_probe(live_list, output_dir))
@@ -7074,6 +7543,24 @@ def main(argv: Optional[List[str]] = None) -> int:
             log(f"Code search: {len(code_urls)} public file URL(s)", "success")
         else:
             log("Code search: no extra URLs (set GITHUB_TOKEN for higher limits)", "info")
+
+    hub_images: List[str] = []
+    if not getattr(args, "skip_docker_hub", False):
+        try:
+            hub_images = collect_docker_hub_images(
+                args.domain,
+                extra_hosts=live_list[:8],
+            )
+        except Exception as exc:
+            hub_images = []
+            log(f"Docker Hub search: {str(exc)[:120]}", "warn")
+        if hub_images:
+            (output_dir / "docker_hub_images.json").write_text(
+                json.dumps(hub_images, indent=2), encoding="utf-8"
+            )
+            log(f"Docker Hub: {len(hub_images)} public image(s)", "success")
+        else:
+            log("Docker Hub: no public images matched the target", "info")
 
     if not getattr(args, "skip_buckets", False):
         try:
@@ -7252,19 +7739,122 @@ def main(argv: Optional[List[str]] = None) -> int:
             "success",
         )
 
+        recon_dir = output_dir / "reconstructed_sources"
+        history_diff: List[Dict] = []
+        if ready > 0 and SCAN_SOURCEMAPS:
+            n_maps, n_src = reconstruct_downloaded_js_maps(to_fetch, dl_dir, recon_dir)
+            if n_src:
+                log(
+                    f"Source maps: reconstructed {n_src} original file(s) "
+                    f"from {n_maps} public map(s) → {recon_dir}",
+                    "success",
+                )
+        if ready > 0 and SCAN_JS_HISTORY:
+            n_hist, history_diff = fetch_live_js_history(to_fetch, dl_dir, recon_dir)
+            if n_hist:
+                log(
+                    f"JS history: {n_hist} distinct archived version(s) → "
+                    f"{recon_dir / '_wayback'}",
+                    "success",
+                )
+            if history_diff:
+                log(
+                    f"JS history diff: {len(history_diff)} removed-line secret(s)",
+                    "warn",
+                )
+        scan_roots: List[Path] = [dl_dir]
+        if recon_dir.is_dir() and any(
+            p.is_file() and p.name != "index.json" for p in recon_dir.rglob("*")
+        ):
+            scan_roots.append(recon_dir)
+        if repo_dir_scanned and Path(repo_dir_scanned).is_dir():
+            scan_roots.append(Path(repo_dir_scanned))
+
+        image_layer_findings: List[Dict] = []
+        if not getattr(args, "skip_image_layers", False):
+            ref_pool: List[str] = list(hub_images)
+            for root in list(scan_roots):
+                for f_path in iter_scan_files(root, limit=250):
+                    name = f_path.name.lower()
+                    if not (
+                        is_iac_file(f_path)
+                        or name in {
+                            "dockerfile", "docker-compose.yml", "docker-compose.yaml",
+                            "compose.yml", "compose.yaml",
+                        }
+                        or f_path.suffix.lower() in {".yml", ".yaml", ".json", ".tf"}
+                    ):
+                        continue
+                    try:
+                        ref_pool.extend(
+                            extract_image_refs(
+                                f_path.read_text(encoding="utf-8", errors="ignore")
+                            )
+                        )
+                    except Exception:
+                        continue
+            selected = select_images_for_target(
+                ref_pool, args.domain, hub_hits=hub_images
+            )
+            (output_dir / "image_refs.json").write_text(
+                json.dumps(selected, indent=2), encoding="utf-8"
+            )
+            if selected:
+                log(f"Image layers: scanning {len(selected)} public image(s)...", "info")
+                have_docker = shutil.which("docker") is not None
+                have_trivy = shutil.which("trivy") is not None
+                pull_fn = (
+                    wave3.docker_save_image if have_docker else (lambda _ref, _tar: None)
+                )
+                trivy_fn = wave3.trivy_image_secrets if have_trivy else None
+                image_dir = output_dir / "image_layers"
+                layer_files, image_layer_findings = scan_public_image_layers(
+                    selected,
+                    image_dir,
+                    pull_and_save=pull_fn,
+                    trivy_scan=trivy_fn,
+                )
+                if layer_files:
+                    scan_roots.append(image_dir)
+                    extra_urls.extend(str(p) for p in layer_files)
+                    log(
+                        f"Image layers: extracted {len(layer_files)} credential-like file(s)",
+                        "success",
+                    )
+                elif image_layer_findings:
+                    log(
+                        f"Image layers: {len(image_layer_findings)} Trivy secret hit(s)",
+                        "success",
+                    )
+                elif not have_docker and not have_trivy:
+                    log(
+                        "Image layers: docker/trivy not installed — recorded refs only",
+                        "info",
+                    )
+            else:
+                log("Image layers: no target-related public images", "info")
+
         if ready > 0:
             output = b""
             rc = 0
             if use_trufflehog:
-                log("Running TruffleHog on downloaded files...", "info")
-                rc, output = run_cmd(
-                    trufflehog_filesystem_cmd(str(dl_dir)),
-                    timeout=600,
-                )
-            if use_trufflehog and output and output.strip():
-                raw_findings = parse_trufflehog(output)
-                annotate_wayback_findings(raw_findings)
-                log(f"TruffleHog: {len(raw_findings)} raw findings", "success")
+                raw_findings = []
+                any_th = False
+                for root in scan_roots:
+                    log(f"Running TruffleHog on {root.name}...", "info")
+                    rc, output = run_cmd(
+                        trufflehog_filesystem_cmd(str(root)),
+                        timeout=600,
+                    )
+                    if output and output.strip():
+                        any_th = True
+                        chunk = parse_trufflehog(output)
+                        annotate_wayback_findings(chunk)
+                        raw_findings.extend(chunk)
+                if any_th:
+                    log(f"TruffleHog: {len(raw_findings)} raw findings", "success")
+            if use_trufflehog and raw_findings:
+                pass
             elif use_trufflehog:
                 if rc not in (0, None):
                     log(
@@ -7277,7 +7867,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                     log("TruffleHog returned no findings — running custom scanner too", "warn")
                 with eta_heartbeat(90):
                     raw_findings = custom_scan(str(files_to_scan), output_dir)
-                for f_path in dl_dir.iterdir():
+                for f_path in iter_scan_files(*scan_roots):
                     try:
                         content_text = f_path.read_text(errors="ignore")
                         from_source_map = (
@@ -7384,7 +7974,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                     except Exception:
                         pass
             if SCAN_PUBLIC_APIS:
-                for f_path in dl_dir.iterdir():
+                for f_path in iter_scan_files(*scan_roots):
                     try:
                         raw_findings.extend(
                             collect_public_api_query_findings(
@@ -7394,10 +7984,24 @@ def main(argv: Optional[List[str]] = None) -> int:
                         )
                     except Exception:
                         pass
+            mcp_n = 0
+            for f_path in iter_scan_files(*scan_roots, limit=400):
+                try:
+                    if not f_path.is_file() or f_path.stat().st_size > 2_000_000:
+                        continue
+                    text = f_path.read_text(encoding="utf-8", errors="ignore")
+                except Exception:
+                    continue
+                hits = findings_from_mcp_content(text, str(f_path), scanner="mcp_config")
+                if hits:
+                    raw_findings.extend(hits)
+                    mcp_n += len(hits)
+            if mcp_n:
+                log(f"AI/MCP configs: {mcp_n} credential(s)", "warn")
             if not getattr(args, "skip_openapi", False):
                 spec_urls: List[str] = []
                 spec_hits = 0
-                for f_path in list(dl_dir.iterdir())[:400]:
+                for f_path in iter_scan_files(*scan_roots, limit=400):
                     try:
                         if not f_path.is_file() or f_path.stat().st_size > 2_000_000:
                             continue
@@ -7417,23 +8021,68 @@ def main(argv: Optional[List[str]] = None) -> int:
                 if spec_urls or spec_hits:
                     log(f"OpenAPI/Postman: {len(merge_unique(spec_urls))} URL(s), {spec_hits} example secret(s)", "info")
             if use_gitleaks:
-                log("Running Gitleaks on downloaded files...", "info")
-                gl_hits = run_gitleaks_source(
-                    dl_dir, output_dir / "gitleaks.json", git=False
-                )
-                if gl_hits:
-                    raw_findings.extend(gl_hits)
-                    log(f"Gitleaks: {len(gl_hits)} finding(s)", "success")
+                gl_total = 0
+                for root in scan_roots:
+                    report = output_dir / (
+                        "gitleaks.json"
+                        if root == dl_dir
+                        else f"gitleaks_{root.name}.json"
+                    )
+                    log(f"Running Gitleaks on {root.name}...", "info")
+                    gl_hits = run_gitleaks_source(root, report, git=False)
+                    if gl_hits:
+                        raw_findings.extend(gl_hits)
+                        gl_total += len(gl_hits)
+                if gl_total:
+                    log(f"Gitleaks: {gl_total} finding(s)", "success")
                 else:
                     log("Gitleaks: no findings", "info")
             if not use_trufflehog:
                 log("Running built-in regex scanner...", "info")
                 with eta_heartbeat(90):
                     raw_findings.extend(custom_scan(str(files_to_scan), output_dir))
+                for f_path in iter_scan_files(*scan_roots):
+                    try:
+                        content_text = f_path.read_text(errors="ignore")
+                        from_source_map = (
+                            is_source_map_path(str(f_path))
+                            or looks_like_source_map_json(content_text)
+                        )
+                        if from_source_map:
+                            content_text = expand_source_map_content(content_text)
+                        for key_type, pattern in PATTERNS.items():
+                            for m in re.finditer(pattern, content_text):
+                                raw = m.group(0)
+                                grp = m.group(m.lastindex) if m.lastindex else raw
+                                key = grp if grp is not None else raw
+                                if looks_fake(key) or key_type in INFORMATIONAL_TYPES:
+                                    continue
+                                raw_findings.append({
+                                    "type": key_type,
+                                    "key": key,
+                                    "source_url": str(f_path),
+                                    "scanner": "custom_local",
+                                    "verified": False,
+                                    "from_source_map": bool(from_source_map),
+                                    "from_reconstructed": "reconstructed_sources" in str(f_path),
+                                    "from_js_history": "_wayback" in str(f_path).replace("\\", "/"),
+                                })
+                    except Exception:
+                        pass
+            if history_diff:
+                raw_findings.extend(history_diff)
+            if image_layer_findings:
+                raw_findings.extend(image_layer_findings)
+                log(
+                    f"Image layers: {len(image_layer_findings)} Trivy/layer finding(s)",
+                    "success",
+                )
         else:
             log("No files downloaded — falling back to custom HTTP scanner", "warn")
             with eta_heartbeat(90):
                 raw_findings = custom_scan(str(files_to_scan), output_dir)
+            if image_layer_findings:
+                raw_findings.extend(image_layer_findings)
     elif not resumed_scan:
         if not args.no_trufflehog:
             log("trufflehog not found — using built-in regex scanner", "warn")
@@ -7587,6 +8236,27 @@ def main(argv: Optional[List[str]] = None) -> int:
     validated = annotate_severity(validated)
     exposures = annotate_severity(exposures)
     informational = annotate_severity(informational)
+    validated = apply_ai_verdict(validated)
+    exposures = apply_ai_verdict(exposures)
+    (output_dir / "ai_verdict.json").write_text(
+        json.dumps(
+            [
+                {
+                    "type": f.get("type"),
+                    "ai_verdict": f.get("ai_verdict"),
+                    "ai_score": f.get("ai_score"),
+                    "ai_reasons": f.get("ai_reasons") or [],
+                    "valid": bool(f.get("valid")),
+                    "mcp_config": bool(f.get("mcp_config")),
+                    "source_url": f.get("source_url"),
+                    "key": redact_key(str(f.get("key") or "")),
+                }
+                for f in validated
+            ],
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
     if VALIDATION_STORE is not None:
         try:
             stats = upsert_findings(VALIDATION_STORE, args.domain, validated)

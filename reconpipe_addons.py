@@ -16,7 +16,8 @@ from datetime import datetime, timezone
 from email.message import EmailMessage
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
-from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
+import base64
+from urllib.parse import parse_qs, unquote, urlencode, urljoin, urlparse, urlunparse
 import urllib.request
 import urllib.error
 
@@ -70,6 +71,7 @@ SECRETS_DB_PREFIX_MARKERS = (
     "akia", "asia", "ghp_", "gho_", "ghs_", "github_pat", "glpat-",
     "xoxb-", "xoxp-", "xoxa-", "xoxr-", "sk_live", "sk_test", "pk_live",
     "pk_test", "sg.", "shpat_", "dop_v1", "phc_", "lin_api", "npm_",
+    "sk-proj-", "sk-ant-", "sk-svcacct-", "hf_",
 )
 SECRETS_DB_MAX = 350
 JSLEAK_SECRET_LINE = re.compile(
@@ -237,6 +239,222 @@ def parse_source_map(map_content: str) -> Dict[str, str]:
             if content:
                 sources[str(name)] = str(content)
     return sources
+
+
+SOURCE_MAPPING_URL_RE = re.compile(
+    r"(?:/{2}[#@]|/\*)\s*sourceMappingURL\s*=\s*(\S+?)(?:\s*\*/)?\s*$",
+    re.I | re.M,
+)
+JS_URL_SUFFIXES = (".js", ".mjs", ".cjs", ".jsx")
+JS_HISTORY_MAX_URLS = 40
+JS_HISTORY_MAX_FETCH = 80
+JS_HISTORY_CDX_LIMIT = 500
+SOURCEMAP_MAX_MAPS = 80
+RECONSTRUCT_MAX_FILES = 400
+
+
+def looks_like_js_url(url: str) -> bool:
+    path = urlparse((url or "").split("#", 1)[0]).path.lower()
+    return any(path.endswith(ext) for ext in JS_URL_SUFFIXES)
+
+
+def extract_source_mapping_url(js_text: str) -> Optional[str]:
+    text = js_text or ""
+    if len(text) > 16_384:
+        text = text[-12_288:]
+    matches = list(SOURCE_MAPPING_URL_RE.finditer(text))
+    if not matches:
+        return None
+    ref = matches[-1].group(1).strip().strip("\"'")
+    return ref or None
+
+
+def decode_source_map_data_url(ref: str) -> Optional[str]:
+    raw = (ref or "").strip()
+    if not raw.lower().startswith("data:"):
+        return None
+    if "," not in raw:
+        return None
+    header, data = raw.split(",", 1)
+    try:
+        if ";base64" in header.lower():
+            return base64.b64decode(data).decode("utf-8", errors="replace")
+        return unquote(data)
+    except Exception:
+        return None
+
+
+def source_map_url_candidates(js_url: str, js_text: str = "") -> List[str]:
+    """Comment URL (resolved) plus same-path.js.map fallbacks."""
+    out: List[str] = []
+    seen: set = set()
+
+    def _add(url: str) -> None:
+        text = (url or "").strip()
+        if not text or text in seen:
+            return
+        seen.add(text)
+        out.append(text)
+
+    ref = extract_source_mapping_url(js_text)
+    if ref:
+        if ref.lower().startswith("data:"):
+            _add(ref)
+        else:
+            _add(urljoin(js_url, ref))
+    parsed = urlparse((js_url or "").strip())
+    if parsed.scheme and parsed.netloc:
+        path = parsed.path or ""
+        if path.endswith(".js"):
+            _add(urlunparse(parsed._replace(path=path + ".map")))
+        if path and not path.endswith(".map"):
+            _add(urlunparse(parsed._replace(path=path + ".map")))
+    return out
+
+
+def safe_source_relpath(name: str) -> str:
+    text = (name or "").replace("\\", "/")
+    lower = text.lower()
+    for prefix in ("webpack:///", "webpack://", "source://", "file://"):
+        if lower.startswith(prefix):
+            text = text[len(prefix):]
+            lower = text.lower()
+            break
+    parts: List[str] = []
+    for part in text.split("/"):
+        if part in ("", ".", ".."):
+            continue
+        if ":" in part and part.split(":")[0].lower() in {"webpack", "http", "https"}:
+            continue
+        cleaned = re.sub(r"[^a-zA-Z0-9._-]", "_", part).strip("._")
+        if cleaned:
+            parts.append(cleaned[:80])
+    rel = "/".join(parts)[:200]
+    return rel or "_source.js"
+
+
+def write_reconstructed_sources(
+    map_content: str,
+    dest_dir: Path,
+    prefix: str = "",
+    limit_files: int = RECONSTRUCT_MAX_FILES,
+) -> List[Path]:
+    """Write sourcesContent entries as real files under dest_dir."""
+    dest = Path(dest_dir)
+    dest.mkdir(parents=True, exist_ok=True)
+    written: List[Path] = []
+    try:
+        sources = parse_source_map(map_content)
+    except Exception:
+        return written
+    for name, content in sources.items():
+        if len(written) >= max(1, int(limit_files)):
+            break
+        text = str(content or "")
+        if not text.strip():
+            continue
+        rel = safe_source_relpath(str(name))
+        path = dest.joinpath(*([prefix] if prefix else []), *rel.split("/"))
+        try:
+            path.resolve().relative_to(dest.resolve())
+        except (OSError, ValueError):
+            continue
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8", errors="replace")
+        written.append(path)
+    return written
+
+
+def source_fetch_urls(map_content: str, map_url: str = "") -> List[str]:
+    """HTTP(S) source URLs listed in a map when sourcesContent is missing."""
+    try:
+        data = json.loads(map_content)
+    except Exception:
+        return []
+    if not isinstance(data, dict):
+        return []
+    contents = data.get("sourcesContent") or []
+    if isinstance(contents, list) and any(isinstance(c, str) and c.strip() for c in contents):
+        return []
+    names = data.get("sources") or []
+    if not isinstance(names, list):
+        return []
+    root = str(data.get("sourceRoot") or "")
+    base = urljoin(map_url, root) if map_url else root
+    out: List[str] = []
+    for name in names:
+        raw = str(name or "").strip()
+        if not raw:
+            continue
+        joined = urljoin(base, raw) if base else raw
+        if joined.startswith("http://") or joined.startswith("https://"):
+            out.append(joined)
+    return out[:80]
+
+
+def parse_cdx_text(text: str) -> List[Dict[str, str]]:
+    """Parse CDX `output=text&fl=original,timestamp` (all snapshots, oldest-first)."""
+    rows: List[Dict[str, str]] = []
+    seen_ts: set = set()
+    for line in (text or "").splitlines():
+        line = line.strip()
+        if not line or line.lower().startswith("original"):
+            continue
+        parts = line.rsplit(None, 1)
+        if len(parts) != 2:
+            continue
+        original, ts = parts[0].strip(), parts[1].strip()
+        if not ts.isdigit() or not original:
+            continue
+        if ts in seen_ts:
+            continue
+        seen_ts.add(ts)
+        rows.append({"original": original, "timestamp": ts})
+    rows.sort(key=lambda r: r["timestamp"])
+    return rows
+
+
+def diff_removed_lines(old_text: str, new_text: str) -> List[str]:
+    """Lines present in old_text but gone in new_text (exact line match)."""
+    new_set = set((new_text or "").splitlines())
+    out: List[str] = []
+    seen: set = set()
+    for line in (old_text or "").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped in seen:
+            continue
+        if line not in new_set:
+            seen.add(stripped)
+            out.append(line)
+    return out
+
+
+def parse_cdx_rows(data: Any) -> List[Dict[str, str]]:
+    """Unique CDX snapshots (timestamp, original, digest) oldest-first."""
+    if not isinstance(data, list) or len(data) < 2:
+        return []
+    seen_digest: set = set()
+    rows: List[Dict[str, str]] = []
+    for row in data[1:]:
+        if not isinstance(row, (list, tuple)) or len(row) < 2:
+            continue
+        ts, original = str(row[0] or ""), str(row[1] or "")
+        digest = str(row[4] or "") if len(row) >= 5 else ""
+        if not ts.isdigit() or not original.strip():
+            continue
+        key = digest or ts
+        if key in seen_digest:
+            continue
+        seen_digest.add(key)
+        rows.append(
+            {
+                "timestamp": ts,
+                "original": original.strip(),
+                "digest": digest,
+            }
+        )
+    rows.sort(key=lambda r: r["timestamp"])
+    return rows
 
 
 def normalize_url(url: str) -> str:
@@ -957,7 +1175,158 @@ SENSITIVE_PATHS = (
     "/docker-compose.yml",
     "/main.js.map",
     "/static/js/main.js.map",
+    #  AI / MCP client configs
+    "/.cursor/mcp.json",
+    "/.cursor.json",
+    "/.mcp.json",
+    "/mcp.json",
+    "/mcp_config.json",
+    "/.vscode/mcp.json",
+    "/.claude.json",
+    "/.claude/settings.json",
+    "/.claude/claude_desktop_config.json",
+    "/claude_desktop_config.json",
+    "/.anthropic/config.json",
+    "/.codeium/windsurf/mcp_config.json",
+    "/.windsurf/mcp.json",
+    "/.continue/config.json",
+    "/.continue/mcpServers/mcp.json",
+    "/.codex/config.toml",
+    "/.gemini/settings.json",
+    "/.cline/mcp.json",
+    "/.roo/mcp.json",
+    # gcloud ADC — web-root equivalents of ~/.config/gcloud/application_default_credentials.json
+    "/.config/gcloud/application_default_credentials.json",
+    "/root/.config/gcloud/application_default_credentials.json",
+    "/gcloud/application_default_credentials.json",
+    "/application_default_credentials.json",
+    "/adc.json",
+    "/gcp-credentials.json",
+    "/.gcp/credentials.json",
+    "/.cache/huggingface/token",
+    "/.huggingface/token",
 )
+
+MCP_CONFIG_FILENAMES = frozenset({
+    "mcp.json",
+    "mcp_config.json",
+    "claude_desktop_config.json",
+    ".mcp.json",
+    ".claude.json",
+    ".cursor.json",
+})
+MCP_PATH_HINTS = (
+    "/.cursor/",
+    "/.vscode/mcp",
+    "/.claude/",
+    "/.anthropic/",
+    "/.codeium/windsurf/",
+    "/.windsurf/",
+    "/.continue/",
+    "/.codex/",
+    "/.gemini/",
+    "/.cline/",
+    "/.roo/",
+    "mcpservers",
+    "claude_desktop_config",
+)
+MCP_JSON_MARKERS = ('"mcpServers"', '"mcp_servers"', '"mcp.servers"')
+MCP_SECRET_KEY_RE = re.compile(
+    r"(api[_-]?key|token|secret|password|passwd|authorization|auth|"
+    r"credential|access[_-]?key|private[_-]?key|client[_-]?secret|"
+    r"database[_-]?uri|connection[_-]?string)",
+    re.I,
+)
+MCP_ARG_SECRET_RE = re.compile(
+    r"^--?[A-Za-z0-9_-]*(?:api[_-]?key|token|secret|password|auth)(?:=|\s+)(\S+)$",
+    re.I,
+)
+MCP_PLACEHOLDER_RE = re.compile(
+    r"\$\{|\$\(|YOUR[_-]|REPLACE|_HERE|changeme|example|placeholder|<[^>]{2,}>|env:[A-Z0-9_]+",
+    re.I,
+)
+MCP_INTERP_RE = re.compile(r"^\$\{(?:env|workspaceFolder|userHome):[^}]+\}$", re.I)
+
+
+def _mcp_source_path(source: str) -> str:
+    text = (source or "").replace("\\", "/")
+    if "://" in text:
+        return (urlparse(text).path or text).lower()
+    return text.lower()
+
+
+def looks_like_mcp_config(source: str, text: str = "") -> bool:
+    path = _mcp_source_path(source)
+    name = path.rsplit("/", 1)[-1]
+    if name in MCP_CONFIG_FILENAMES:
+        return True
+    if any(hint in path for hint in MCP_PATH_HINTS):
+        return True
+    blob = (text or "")[:8000]
+    return any(marker in blob for marker in MCP_JSON_MARKERS)
+
+
+def mcp_value_is_placeholder(value: str) -> bool:
+    text = (value or "").strip()
+    if len(text) < 8:
+        return True
+    if MCP_INTERP_RE.match(text):
+        return True
+    return bool(MCP_PLACEHOLDER_RE.search(text))
+
+
+def _walk_mcp_json(obj: Any, prefix: str = "") -> List[Tuple[str, str]]:
+    out: List[Tuple[str, str]] = []
+    if isinstance(obj, dict):
+        for key, val in obj.items():
+            path = f"{prefix}.{key}" if prefix else str(key)
+            key_s = str(key)
+            if isinstance(val, str):
+                if MCP_SECRET_KEY_RE.search(key_s) or key_s.lower() in {
+                    "authorization", "x-api-key", "api-key", "apikey",
+                }:
+                    out.append((path, val))
+            elif isinstance(val, list) and key_s.lower() in {"args", "argv"}:
+                for i, item in enumerate(val):
+                    if not isinstance(item, str):
+                        continue
+                    m = MCP_ARG_SECRET_RE.match(item.strip())
+                    if m:
+                        out.append((f"{path}[{i}]", m.group(1)))
+                    elif i + 1 < len(val) and MCP_SECRET_KEY_RE.search(item):
+                        nxt = val[i + 1]
+                        if isinstance(nxt, str) and not str(nxt).startswith("-"):
+                            out.append((f"{path}[{i + 1}]", nxt))
+            else:
+                out.extend(_walk_mcp_json(val, path))
+    elif isinstance(obj, list):
+        for i, val in enumerate(obj):
+            out.extend(_walk_mcp_json(val, f"{prefix}[{i}]"))
+    return out
+
+
+def extract_mcp_secrets(text: str, source: str = "") -> List[Dict[str, str]]:
+    """Pull hardcoded env/header/arg secrets from MCP client JSON."""
+    blob = (text or "").strip()
+    if not blob or not looks_like_mcp_config(source, blob):
+        return []
+    try:
+        data = json.loads(blob)
+    except Exception:
+        return []
+    if not isinstance(data, (dict, list)):
+        return []
+    rows: List[Dict[str, str]] = []
+    seen = set()
+    for field, raw in _walk_mcp_json(data):
+        value = (raw or "").strip().strip("'\"")
+        if value.lower().startswith("bearer "):
+            value = value[7:].strip()
+        if mcp_value_is_placeholder(value) or value in seen:
+            continue
+        seen.add(value)
+        rows.append({"key": value, "field": field, "source": source})
+    return rows
 
 
 def is_archive_org_url(url: str) -> bool:
@@ -1015,6 +1384,40 @@ def cdx_lookup(url: str, timeout: int = 12) -> Optional[Dict[str, str]]:
         return None
     snap["archive_url"] = wayback_id_url(snap["timestamp"], snap["original"])
     return snap
+
+
+def list_cdx_snapshots(
+    url: str,
+    timeout: int = 12,
+    limit: int = JS_HISTORY_CDX_LIMIT,
+) -> List[Dict[str, str]]:
+    """Full timestamp history for an exact URL via CDX text output. Network call."""
+    target = (url or "").strip()
+    if not target or is_archive_org_url(target):
+        return []
+    cap = max(1, min(int(limit or JS_HISTORY_CDX_LIMIT), 2000))
+    qs = urlencode(
+        {
+            "url": target,
+            "output": "text",
+            "fl": "original,timestamp",
+            "filter": "statuscode:200",
+            "limit": str(cap),
+        }
+    )
+    req = urllib.request.Request(
+        WAYBACK_CDX + "?" + qs,
+        headers={"User-Agent": "ReconPipe/1.3 (+wayback-cdx)"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read().decode("utf-8", errors="ignore")
+    except Exception:
+        return []
+    rows = parse_cdx_text(raw)
+    for snap in rows:
+        snap["archive_url"] = wayback_id_url(snap["timestamp"], snap["original"])
+    return rows
 
 
 def fetch_wayback_body(
@@ -1146,12 +1549,37 @@ def env_like_urls(urls: List[str]) -> List[str]:
     return hits
 
 
+def mcp_like_urls(urls: List[str]) -> List[str]:
+    """URLs whose path looks like an MCP / ADC / AI-client config."""
+    hits: List[str] = []
+    seen = set()
+    for raw in urls or []:
+        text = (raw or "").strip()
+        if not text:
+            continue
+        path = urlparse(text).path.lower() if "://" in text else text.lower()
+        name = path.rsplit("/", 1)[-1].split("?")[0]
+        if looks_like_mcp_config(path) or name in {
+            "application_default_credentials.json",
+            "adc.json",
+            "gcp-credentials.json",
+        }:
+            if text not in seen:
+                seen.add(text)
+                hits.append(text)
+    return hits
+
+
 # Keep source-ish and env-ish URLs from noisy archive dumps (.env.local is not `.env$`).
 DISCOVERY_KEEP_URL_RE = re.compile(
-    r"(?:\.(?:js|json|jsx|ts|tsx|map|html|htm|css|env|config|conf|yml|yaml|xml|ini|php|asp|aspx)(?:\?|$|#))"
+    r"(?:\.(?:js|json|jsx|ts|tsx|map|html|htm|css|env|config|conf|yml|yaml|xml|ini|php|asp|aspx|toml)(?:\?|$|#))"
     r"|(?:/\.env(?:\.[A-Za-z0-9._-]*)?)(?:\?|$|#)"
     r"|(?:/(?:backup\.env|env\.bak|env\.local|env\.production|env\.development|"
-    r"env\.staging|env\.backup)(?:\?|$|#))",
+    r"env\.staging|env\.backup)(?:\?|$|#))"
+    r"|(?:/(?:\.cursor/|\.vscode/mcp|\.claude/|\.anthropic/|\.config/gcloud/|"
+    r"\.continue/|\.codeium/|\.windsurf/|\.codex/|\.gemini/))"
+    r"|(?:(?:mcp\.json|mcp_config\.json|claude_desktop_config\.json|"
+    r"application_default_credentials\.json))",
     re.I,
 )
 

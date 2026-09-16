@@ -2,16 +2,18 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 import re
 import sqlite3
 import subprocess
+import tarfile
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urlencode, urljoin, urlparse
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 
@@ -91,6 +93,8 @@ def github_search_queries(domain: str, org: str = "", extra_hosts: Optional[Iter
         f'"{host}" filename:.env',
         f'"{host}" filename:config.json',
         f'"{host}" extension:js (AIza OR firebase OR aws_access)',
+        f'"{host}" (filename:mcp.json OR filename:claude_desktop_config.json OR filename:.mcp.json)',
+        f'"{host}" (sk-ant- OR sk-proj- OR hf_ OR "mcpServers")',
     ]
     if org:
         q.append(f'org:{org.strip()} "{host}"')
@@ -105,7 +109,7 @@ def github_search_queries(domain: str, org: str = "", extra_hosts: Optional[Iter
         if item not in seen:
             seen.add(item)
             out.append(item)
-    return out[:8]
+    return out[:12]
 
 
 def github_raw_url(html_url: str, sha: str = "", path: str = "") -> str:
@@ -898,7 +902,508 @@ def annotate_repo_findings(findings: List[Dict], repo: Path) -> int:
     return n
 
 
-#  Proximity / extra pairing 
+#  Docker Hub + public image layers 
+
+DOCKER_HUB_SEARCH = "https://hub.docker.com/v2/search/repositories/"
+MAX_HUB_IMAGES = 12
+MAX_IMAGE_SCAN = 8
+IMAGE_FROM_RE = re.compile(
+    r"(?im)^\s*(?:FROM|image:)\s+['\"]?([a-z0-9][a-z0-9._\-/:@]+)['\"]?"
+)
+IMAGE_REF_RE = re.compile(
+    r"""(?ix)
+    \b(
+      (?:ghcr\.io|quay\.io|gcr\.io|public\.ecr\.aws|docker\.io|registry\.hub\.docker\.com)/
+      [a-z0-9._\-]+/[a-z0-9._\-]+(?::[A-Za-z0-9._\-]+)?
+    )\b
+    """
+)
+SKIP_BASE_IMAGES = frozenset({
+    "python", "node", "nodejs", "nginx", "alpine", "ubuntu", "debian", "golang",
+    "busybox", "redis", "postgres", "postgresql", "mysql", "mariadb", "httpd",
+    "maven", "gradle", "openjdk", "eclipse-temurin", "amazonlinux", "centos",
+    "fedora", "scratch", "distroless", "php", "ruby", "rust", "amazoncorretto",
+})
+LAYER_KEEP_NAMES = frozenset({
+    ".env", ".env.local", ".env.production", ".env.development", ".env.staging",
+    ".env.bak", "mcp.json", "mcp_config.json", "claude_desktop_config.json",
+    ".mcp.json", ".claude.json", "application_default_credentials.json",
+    "credentials.json", "credentials", "id_rsa", ".npmrc", ".pypirc", ".netrc",
+    "secrets.yml", "secrets.yaml", "service-account.json", "google-services.json",
+    "adc.json", "gcp-credentials.json", "config.json",
+})
+LAYER_PATH_HINTS = (
+    ".cursor/", ".anthropic/", ".claude/", ".config/gcloud/", ".aws/",
+    ".continue/", "mcpservers", ".huggingface/", ".cache/huggingface/",
+)
+AI_PROVIDER_TYPES = frozenset({
+    "openai_key", "anthropic_key", "huggingface_token", "mcp_credential",
+    "google_api",
+})
+MCP_SOURCE_RE = re.compile(
+    r"mcp\.json|mcp_config|claude_desktop_config|\.cursor[/\\]|\.anthropic[/\\]|"
+    r"mcpServers|\.mcp\.json|\.continue[/\\]|image_layers",
+    re.I,
+)
+TRIVY_TYPE_HINTS = (
+    ("openai", "openai_key"),
+    ("anthropic", "anthropic_key"),
+    ("huggingface", "huggingface_token"),
+    ("hugging-face", "huggingface_token"),
+    ("aws-access", "aws_access_key"),
+    ("github", "github_pat"),
+    ("stripe", "stripe_live"),
+    ("gcp", "gcp_service_acct"),
+    ("google", "google_api"),
+    ("slack", "slack_token"),
+    ("private-key", "private_key_pem"),
+)
+
+
+def docker_hub_queries(domain: str) -> List[str]:
+    host = (domain or "").strip().lower().lstrip(".")
+    if not host:
+        return []
+    slug = host.split(".")[0]
+    out = [host]
+    if slug and slug != host and len(slug) >= 3:
+        out.append(slug)
+    return out[:3]
+
+
+def parse_docker_hub_search(data: Any) -> List[Dict[str, str]]:
+    items = data.get("results") if isinstance(data, dict) else data
+    if not isinstance(items, list):
+        return []
+    rows: List[Dict[str, str]] = []
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        name = str(it.get("repo_name") or it.get("name") or "").strip()
+        if not name:
+            continue
+        rows.append({
+            "repo_name": name,
+            "star_count": str(it.get("star_count") or it.get("star_count") or "0"),
+            "pull_count": str(it.get("pull_count") or "0"),
+            "is_official": "1" if it.get("is_official") else "0",
+            "description": str(it.get("short_description") or "")[:240],
+        })
+    return rows
+
+
+def collect_docker_hub_images(
+    domain: str,
+    *,
+    extra_hosts: Optional[Iterable[str]] = None,
+    fetch_json: Optional[Callable[..., Any]] = None,
+    limit: int = MAX_HUB_IMAGES,
+) -> List[str]:
+    """Public Docker Hub repos matching the target. fetch_json is injectable."""
+    do_fetch = fetch_json or _http_json
+    seen: Set[str] = set()
+    out: List[str] = []
+    queries = docker_hub_queries(domain)
+    for extra in list(extra_hosts or [])[:6]:
+        host = (extra or "").strip().lower()
+        if "://" in host:
+            host = urlparse(host).hostname or ""
+        else:
+            host = host.split("/")[0].split(":")[0]
+        if host and host not in queries:
+            queries.extend(docker_hub_queries(host)[:1])
+    for query in queries:
+        url = DOCKER_HUB_SEARCH + "?" + urlencode({
+            "query": query, "page_size": "25",
+        })
+        try:
+            payload = do_fetch(url, headers={"Accept": "application/json"}, timeout=20)
+        except TypeError:
+            try:
+                payload = do_fetch(url)
+            except Exception:
+                continue
+        except Exception:
+            continue
+        for row in parse_docker_hub_search(payload):
+            name = row["repo_name"]
+            if name in seen:
+                continue
+            seen.add(name)
+            out.append(name)
+            if len(out) >= limit:
+                return out
+    return out
+
+
+def extract_image_refs(text: str) -> List[str]:
+    blob = text or ""
+    found: List[str] = []
+    seen: Set[str] = set()
+    for rx in (IMAGE_FROM_RE, IMAGE_REF_RE):
+        for m in rx.finditer(blob):
+            ref = (m.group(1) or "").strip().strip("'\"")
+            if not ref or ref in seen or ref.lower() in {"scratch"}:
+                continue
+            seen.add(ref)
+            found.append(ref)
+    return found
+
+
+def normalize_image_ref(ref: str) -> str:
+    text = (ref or "").strip().strip("'\"")
+    if text.startswith("docker.io/"):
+        text = text[len("docker.io/"):]
+    if text.startswith("library/") and "/" in text[8:]:
+        pass
+    return text
+
+
+def image_belongs_to_target(ref: str, domain: str) -> bool:
+    host = (domain or "").strip().lower().lstrip(".")
+    if not host:
+        return False
+    slug = host.split(".")[0]
+    r = (ref or "").lower()
+    if host and host.replace(".", "") in r.replace(".", "").replace("/", ""):
+        return True
+    if host and host in r:
+        return True
+    if slug and len(slug) >= 3:
+        ns = r.split("/", 1)[0]
+        name = r.split("/")[-1].split(":")[0]
+        if slug == ns or slug == name or slug in ns:
+            return True
+    return False
+
+
+def select_images_for_target(
+    refs: Iterable[str],
+    domain: str,
+    *,
+    hub_hits: Optional[Iterable[str]] = None,
+    limit: int = MAX_IMAGE_SCAN,
+) -> List[str]:
+    out: List[str] = []
+    seen: Set[str] = set()
+    forced = {normalize_image_ref(x) for x in (hub_hits or []) if x}
+    for raw in list(refs or []) + list(hub_hits or []):
+        ref = normalize_image_ref(raw)
+        if not ref or ref in seen:
+            continue
+        name = ref.split("/")[-1].split(":")[0].lower()
+        ns = ref.split("/")[0].split(":")[0].lower()
+        if ref not in forced and name in SKIP_BASE_IMAGES and (
+            "/" not in ref or ns in {"library", "docker.io"}
+        ):
+            continue
+        if ref not in forced and not image_belongs_to_target(ref, domain):
+            continue
+        seen.add(ref)
+        out.append(ref)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def keep_layer_member(name: str) -> bool:
+    n = (name or "").replace("\\", "/")
+    while n.startswith("./"):
+        n = n[2:]
+    n = n.lstrip("/")
+    base = n.rsplit("/", 1)[-1].lower()
+    if base in LAYER_KEEP_NAMES or base.startswith(".env"):
+        return True
+    low = n.lower()
+    if any(h in low for h in LAYER_PATH_HINTS) and base.endswith(
+        (".json", ".yml", ".yaml", ".toml", ".env", ".txt", ".jsonl")
+    ):
+        return True
+    return False
+
+
+def _safe_layer_dest(dest: Path, member_name: str) -> Optional[Path]:
+    rel = (member_name or "").replace("\\", "/")
+    while rel.startswith("./"):
+        rel = rel[2:]
+    rel = rel.lstrip("/")
+    if not rel or ".." in rel.split("/"):
+        return None
+    path = dest / rel
+    try:
+        path.resolve().relative_to(dest.resolve())
+    except (OSError, ValueError):
+        return None
+    return path
+
+
+def _extract_cred_from_layer_bytes(data: bytes, dest: Path, remaining: int) -> List[Path]:
+    written: List[Path] = []
+    if remaining <= 0 or not data:
+        return written
+    try:
+        bio = io.BytesIO(data)
+        with tarfile.open(fileobj=bio, mode="r:*") as inner:
+            for member in inner.getmembers():
+                if remaining - len(written) <= 0:
+                    break
+                if not member.isfile() or member.size > 2_000_000:
+                    continue
+                if not keep_layer_member(member.name):
+                    continue
+                target = _safe_layer_dest(dest, member.name)
+                if target is None:
+                    continue
+                src = inner.extractfile(member)
+                if src is None:
+                    continue
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(src.read() or b"")
+                written.append(target)
+    except Exception:
+        return written
+    return written
+
+
+def extract_docker_save_credentials(
+    archive: Path,
+    dest: Path,
+    limit: int = 200,
+) -> List[Path]:
+    """Pull credential-like files out of a `docker save` tarball (all layers)."""
+    dest.mkdir(parents=True, exist_ok=True)
+    written: List[Path] = []
+    if not archive.is_file():
+        return written
+    try:
+        with tarfile.open(archive, "r:*") as outer:
+            for member in outer.getmembers():
+                if len(written) >= limit or not member.isfile():
+                    continue
+                name = (member.name or "").replace("\\", "/")
+                handle = outer.extractfile(member)
+                if handle is None:
+                    continue
+                payload = handle.read() or b""
+                if name.endswith("/layer.tar") or name.endswith("layer.tar"):
+                    written.extend(
+                        _extract_cred_from_layer_bytes(
+                            payload, dest, limit - len(written)
+                        )
+                    )
+                    continue
+                if keep_layer_member(name) and member.size <= 2_000_000:
+                    target = _safe_layer_dest(dest, name)
+                    if target is None:
+                        continue
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_bytes(payload)
+                    written.append(target)
+    except Exception:
+        return written
+    return written[:limit]
+
+
+def docker_save_image(ref: str, tar_path: Path, timeout: int = 120) -> Optional[Path]:
+    """docker pull + docker save. Returns tar path or None."""
+    image = (ref or "").strip()
+    if not image:
+        return None
+    tar_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        pull = subprocess.run(
+            ["docker", "pull", image],
+            capture_output=True,
+            timeout=timeout,
+        )
+        if pull.returncode != 0:
+            return None
+        save = subprocess.run(
+            ["docker", "save", image, "-o", str(tar_path)],
+            capture_output=True,
+            timeout=timeout,
+        )
+        if save.returncode != 0 or not tar_path.is_file():
+            return None
+        return tar_path
+    except Exception:
+        return None
+
+
+def trivy_type_for(rule_id: str, match: str = "") -> str:
+    rid = re.sub(r"[^a-z0-9-]", "", (rule_id or "").lower())
+    for needle, mapped in TRIVY_TYPE_HINTS:
+        if needle in rid:
+            if mapped == "github_pat" and (match or "").startswith("github_pat_"):
+                return "github_fine_pat"
+            if mapped == "stripe_live" and (match or "").startswith("sk_test_"):
+                return "stripe_test"
+            return mapped
+    return "generic_secret"
+
+
+def findings_from_trivy_secrets(data: Any, image: str = "") -> List[Dict[str, Any]]:
+    results = data.get("Results") if isinstance(data, dict) else None
+    if not isinstance(results, list):
+        return []
+    out: List[Dict[str, Any]] = []
+    for block in results:
+        if not isinstance(block, dict):
+            continue
+        target = str(block.get("Target") or image or "")
+        for sec in block.get("Secrets") or []:
+            if not isinstance(sec, dict):
+                continue
+            match = str(sec.get("Match") or sec.get("Title") or "").strip()
+            if not match:
+                continue
+            rule = str(sec.get("RuleID") or sec.get("Category") or "")
+            out.append({
+                "type": trivy_type_for(rule, match),
+                "key": match,
+                "source_url": target,
+                "scanner": "trivy_image",
+                "detector": rule,
+                "image": image,
+                "verified": False,
+            })
+    return out
+
+
+def parse_trivy_json(blob: str) -> Any:
+    text = (blob or "").strip()
+    if not text:
+        return {}
+    try:
+        return json.loads(text)
+    except Exception:
+        return {}
+
+
+def trivy_image_secrets(ref: str, timeout: int = 180) -> List[Dict[str, Any]]:
+    image = (ref or "").strip()
+    if not image:
+        return []
+    try:
+        proc = subprocess.run(
+            [
+                "trivy", "image", "--scanners", "secret",
+                "--format", "json", "--quiet", image,
+            ],
+            capture_output=True,
+            timeout=timeout,
+        )
+        data = parse_trivy_json((proc.stdout or b"").decode("utf-8", errors="replace"))
+        return findings_from_trivy_secrets(data, image=image)
+    except Exception:
+        return []
+
+
+def scan_public_image_layers(
+    refs: List[str],
+    dest: Path,
+    *,
+    pull_and_save: Optional[Callable[[str, Path], Optional[Path]]] = None,
+    trivy_scan: Optional[Callable[[str], List[Dict[str, Any]]]] = None,
+    max_images: int = MAX_IMAGE_SCAN,
+) -> Tuple[List[Path], List[Dict[str, Any]]]:
+    """Extract baked-in credential files and optional Trivy secret hits."""
+    dest.mkdir(parents=True, exist_ok=True)
+    files: List[Path] = []
+    findings: List[Dict[str, Any]] = []
+    saver = pull_and_save if pull_and_save is not None else docker_save_image
+    trivy = trivy_scan
+    for i, ref in enumerate(list(refs or [])[: max(0, int(max_images))]):
+        slug = re.sub(r"[^a-zA-Z0-9._-]", "_", ref)[:80] or f"image{i}"
+        img_dir = dest / slug
+        tar_path = dest / f"{slug}.tar"
+        saved = None
+        try:
+            saved = saver(ref, tar_path)
+        except Exception:
+            saved = None
+        if saved:
+            files.extend(extract_docker_save_credentials(Path(saved), img_dir))
+            try:
+                Path(saved).unlink(missing_ok=True)
+            except Exception:
+                pass
+        if trivy is not None:
+            try:
+                findings.extend(trivy(ref) or [])
+            except Exception:
+                pass
+    return files, findings
+
+
+#  AI / MCP verdict scoring 
+
+def mcp_source(finding: Dict[str, Any]) -> bool:
+    if finding.get("mcp_config"):
+        return True
+    src = str(finding.get("source_url") or finding.get("file") or "")
+    return bool(MCP_SOURCE_RE.search(src))
+
+
+def ai_verdict_for(finding: Dict[str, Any]) -> Tuple[int, str, List[str]]:
+    """
+    Prioritize AI-provider and MCP-config leaks.
+    GitGuardian 2026: 8.8% of MCP-config secrets were still live — high validate value.
+    """
+    score = 40
+    try:
+        score = int(finding.get("confidence") or score)
+    except Exception:
+        score = 40
+    reasons: List[str] = []
+    typ = str(finding.get("type") or "")
+    if typ in AI_PROVIDER_TYPES:
+        score += 12
+        reasons.append("ai_provider")
+    if mcp_source(finding):
+        score += 18
+        reasons.append("mcp_config")
+    if finding.get("valid"):
+        score += 25
+        reasons.append("live")
+    elif finding.get("validated") and not finding.get("valid"):
+        score -= 8
+        reasons.append("dead")
+    sev = str(finding.get("severity") or "").lower()
+    if sev == "critical":
+        score += 8
+    elif sev == "high":
+        score += 4
+    if finding.get("image") or str(finding.get("scanner") or "").startswith("trivy"):
+        score += 6
+        reasons.append("image_layer")
+    score = max(0, min(100, score))
+    if score >= 80 or (finding.get("valid") and (typ in AI_PROVIDER_TYPES or mcp_source(finding))):
+        verdict = "P1"
+    elif score >= 60 or typ in AI_PROVIDER_TYPES or mcp_source(finding):
+        verdict = "P2"
+    else:
+        verdict = "P3"
+    return score, verdict, reasons
+
+
+def apply_ai_verdict(findings: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    for f in findings or []:
+        score, verdict, reasons = ai_verdict_for(f)
+        f["ai_score"] = score
+        f["ai_verdict"] = verdict
+        f["ai_reasons"] = reasons
+    return sorted(
+        findings or [],
+        key=lambda x: (
+            0 if x.get("valid") else 1,
+            -int(x.get("ai_score") or 0),
+            str(x.get("type") or ""),
+        ),
+    )
+
+
+#  Proximity / extra pairing  
 
 def pair_generic_findings(findings: List[Dict]) -> List[Dict]:
     """Attach partner values for PayPal / Woo / Mixpanel / Algolia halves."""
@@ -953,7 +1458,8 @@ CI_SKIP_FLAGS = (
     "skip_crtsh", "skip_amass", "skip_assetfinder", "skip_findomain",
     "skip_dnsx", "skip_naabu", "skip_whatweb", "skip_gowitness",
     "skip_hakrawler", "skip_paramspider", "skip_sensitive_paths",
-    "skip_wayback_bodies", "skip_jsleak", "skip_code_search", "skip_buckets",
+    "skip_wayback_bodies", "skip_js_history", "skip_jsleak", "skip_code_search",
+    "skip_docker_hub", "skip_image_layers", "skip_buckets",
     "no_notify",
 )
 

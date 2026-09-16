@@ -14,8 +14,8 @@ patterns:
   stripe_test: sk_test_[0-9a-zA-Z]{24,}
   stripe_restricted: rk_(?:live|test)_[0-9a-zA-Z]{24,}
   stripe_publishable: pk_(?:live|test)_[0-9a-zA-Z]{24,}
-  openai_key: sk-proj-[A-Za-z0-9_-]{20,}-[A-Za-z0-9_-]{20,}
-  anthropic_key: sk-ant-api03-[A-Za-z0-9_-]{20,}
+  openai_key: \bsk-(?:proj|svcacct|service)-[A-Za-z0-9_-]{20,}(?:-[A-Za-z0-9_-]{8,})*\b|\bsk-[A-Za-z0-9]+T3BlbkFJ[A-Za-z0-9_-]+\b
+  anthropic_key: sk-ant-(?:admin01|api03)-[A-Za-z0-9_-]{20,}
   sendgrid: SG\.[a-zA-Z0-9\-_]{22}\.[a-zA-Z0-9\-_]{43}
   mailgun: key-[0-9a-zA-Z]{32}
   twilio_sid: AC[a-z0-9]{32}
@@ -212,6 +212,7 @@ confidence:
   cloudflare_api: 88
   azure_sas: 90
   huggingface_token: 92
+  mcp_credential: 90
   notion_token: 90
   grafana_token: 88
   hashicorp_vault: 90
@@ -495,9 +496,12 @@ validators:
     - 200
     invalid_codes:
     - 401
+    - 404
+    restricted_codes:
     - 403
     notes:
       200: 'VALID: Anthropic API key authenticated'
+      403: 'VALID (restricted): Anthropic key accepted but models list forbidden'
   digitalocean_pat:
     url: https://api.digitalocean.com/v2/account
     method: GET
@@ -715,6 +719,8 @@ validators:
     - 401
     notes:
       200: 'VALID: Hugging Face token'
+  mcp_credential:
+    skip_reason: MCP env/header secret — live-check via the typed OpenAI/Anthropic/HF validators when the value matches those formats
   notion_token:
     url: https://api.notion.com/v1/users/me
     method: GET
@@ -1766,6 +1772,10 @@ severity:
   private_key_pem: critical
   stripe_live: critical
   hashicorp_vault: critical
+  openai_key: high
+  anthropic_key: high
+  huggingface_token: high
+  mcp_credential: high
   public_api_key: medium
 revocation:
   vercel_token: https://vercel.com/account/tokens
@@ -1775,6 +1785,8 @@ revocation:
   gitlab_pat: https://gitlab.com/-/user_settings/personal_access_tokens
   stripe_live: https://dashboard.stripe.com/apikeys
   openai_key: https://platform.openai.com/api-keys
+  anthropic_key: https://console.anthropic.com/settings/keys
+  huggingface_token: https://huggingface.co/settings/tokens
   slack_token: https://api.slack.com/authentication/token-types
   aws_access_key: https://us-east-1.console.aws.amazon.com/iam/home#/security_credentials
   doppler_token: https://dashboard.doppler.com/workplace/tokens

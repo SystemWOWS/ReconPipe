@@ -497,9 +497,9 @@ ReconPipe stacks several engines. Hits are de-duplicated (SHA-256 of the secret)
 | Built-in JS parser                                        | Endpoints + assignments in downloaded JS                                                                                    |
 
 
-Covered families include cloud (AWS, GCP, Azure, OCI), git forges, payments, email/SMS, Slack/Discord/Telegram, AI vendors, PaaS (Vercel, Railway, Render, Fly, Heroku), data stores (Mongo, Postgres, Redis URIs), CI, observability, and generic `api_key=` assignments. Informational hits (publishable keys, client SDK IDs) are stored separately and are not treated as secrets.
+Covered families include cloud (AWS, GCP, Azure, OCI), git forges, payments, email/SMS, Slack/Discord/Telegram, AI vendors (OpenAI `sk-` / `sk-proj-` / `sk-svcacct-`, Anthropic `sk-ant-api03-` / `sk-ant-admin01-`, Hugging Face `hf_`), PaaS (Vercel, Railway, Render, Fly, Heroku), data stores (Mongo, Postgres, Redis URIs), CI, observability, and generic `api_key=` assignments. Informational hits (publishable keys, client SDK IDs) are stored separately and are not treated as secrets.
 
-Validators send `Referer: https://<target>/` so domain-restricted keys are more likely to exercise than fail as 403 from your IP. AWS access keys pair with nearby secrets for STS. PayPal, WooCommerce, Mixpanel, and Algolia halves are paired the same way when they share a source. Database URIs are inspected locally — ReconPipe does not connect to leaked database hosts.
+Validators send `Referer: https://<target>/` so domain-restricted keys are more likely to exercise than fail as 403 from your IP. AWS access keys pair with nearby secrets for STS. OpenAI keys are checked with `GET https://api.openai.com/v1/models`, Anthropic with `GET https://api.anthropic.com/v1/models` (`x-api-key` + `anthropic-version: 2023-06-01`), Hugging Face with `GET https://huggingface.co/api/whoami-v2`. PayPal, WooCommerce, Mixpanel, and Algolia halves are paired the same way when they share a source. Database URIs are inspected locally — ReconPipe does not connect to leaked database hosts.
 
 Low-confidence or noisy matches can land in `quarantine.json` instead of the main findings list.
 
@@ -509,9 +509,17 @@ Low-confidence or noisy matches can land in `quarantine.json` instead of the mai
 
 These run during discovery unless you skip them.
 
-**Public code search** — GitHub (and GitLab with a token) for the target domain, then the same regex/validators on the raw files. Set `GITHUB_TOKEN` (or `--github-token`) to raise the search rate limit. `--github-org acme` scopes to an org. `--skip-code-search` disables it.
+**Public code search** — GitHub (and GitLab with a token) for the target domain, then the same regex/validators on the raw files. Queries also look for MCP client configs (`mcp.json`, `claude_desktop_config.json`) and AI key prefixes (`sk-proj-`, `sk-ant-`, `hf_`). Set `GITHUB_TOKEN` (or `--github-token`) to raise the search rate limit. `--github-org acme` scopes to an org. `--skip-code-search` disables it.
+
+**Docker Hub / image layers** — Paired with GitHub as a second primary source. ReconPipe searches Docker Hub for the target name, plus any `FROM` / `image:` refs found in Dockerfiles, Compose, and K8s/Terraform during `--iac-scan` / `--repo`. Public images are pulled (docker or Trivy) and **every layer** is scanned for baked-in `.env`, MCP configs, and gcloud ADC files — the same idea as git-repo scanning, different artifact. `--skip-docker-hub` / `--skip-image-layers` disable the two halves.
+
+**AI / MCP configs** — The sensitive-path probe now hits 2026 leak surfaces: `.cursor/mcp.json`, `.anthropic/config.json`, `.vscode/mcp.json`, `.mcp.json`, `claude_desktop_config.json`, Windsurf/Continue/Codex paths, and web-root equivalents of `~/.config/gcloud/application_default_credentials.json`. JSON `mcpServers` / `env` / `headers` / `--api-key=` args are parsed specifically. GitGuardian's *State of Secrets Sprawl 2026* found **24,008** unique secrets in public MCP configs, **2,117** still live (~9%) — so these hits are live-validated and ranked by **AI-verdict** (`P1`/`P2`/`P3` in `ai_verdict.json` and the HTML report).
 
 **Mobile apps** — GUI **Apps** tab, or CLI `--apk app.apk` / `--ipa app.ipa` (repeatable; `.xapk` / `.apkm` too). Unzips the archive, keeps JS/JSON/XML/plist, strings-dumps binaries (Firebase, Maps keys, `.env`), and scans those files. In Docker, upload the package on the Apps tab (host `/home/.../Downloads` paths are not visible in the container).
+
+**JS source maps** — After download, every `.js` file is checked for `//# sourceMappingURL=` and for `same-url.js.map`. A public map is parsed (`sourcesContent`, or HTTP fetch of listed `sources`) and the original files are written to `reconstructed_sources/`. TruffleHog, Gitleaks, and `config.yaml` regex scan that tree like downloaded JS, then the same live validators run. `--skip-sourcemaps` disables it. Public maps still also appear in `source_map_exposures.json`.
+
+**Historical live JS** — For every discovered `.js` URL, ReconPipe queries Wayback CDX for the **full timestamp list** (`output=text&fl=original,timestamp`), not only the newest snapshot. Each body is downloaded and **deduped by content hash** (many timestamps are byte-identical). Unique versions land in `reconstructed_sources/_wayback/` so TruffleHog, Gitleaks, regex, and validators treat them like current / map-reconstructed code. Consecutive unique versions are diffed; lines that disappeared — a key the developer “cleaned up” that still sits in an old copy — are flagged in `js_history_removed.json` and as `js_history_diff` findings. `--skip-js-history` disables it. `--skip-wayback-bodies` only skips snapshots for URLs that fail to download.
 
 **Cloud buckets** — Guess S3/GCS/Azure names from the domain, probe listing, and queue readable objects that look like configs. `--skip-buckets` disables it. Only names derived from the target are tried.
 
@@ -521,7 +529,7 @@ These run during discovery unless you skip them.
 
 **`--watch SECONDS`** — CLI loop: run the full scan, sleep, repeat. Combine with the store to spot newly valid keys.
 
-**`--ci`** — Shift-left: skip live recon (including GitHub/GitLab code search and bucket probes), clone/scan `--repo` (default: current directory), write SARIF, still exit 1 on live keys.
+**`--ci`** — Shift-left: skip live recon (including GitHub/GitLab code search, Docker Hub, and bucket probes), clone/scan `--repo` (default: current directory), write SARIF, still exit 1 on live keys.
 
 ```bash
 python3 reconpipe.py --ci --repo .
@@ -556,12 +564,16 @@ Start here:
 | `valid_keys.json`                        | Confirmed live keys only                     |
 | `informational.json`                     | Public-by-design hits                        |
 | `source_map_exposures.json`              | Public `.map` files                          |
+| `reconstructed_sources/`                 | Original files from maps + unique archived JS |
+| `js_history.json` / `js_history_removed.json` | Wayback JS index and removed-line diffs   |
+| `ai_verdict.json`                        | P1/P2/P3 ranking for AI/MCP findings     |
+| `docker_hub_images.json` / `image_refs.json` | Public images queued for layer scan   |
 | `results.sarif`                          | SARIF 2.1.0 for CI                           |
 | `export_hackerone.md` / `export_jira.md` | Draft write-ups                              |
 | `.reconpipe_ignore.json`                 | Baseline (type + source, or `--ignore-hash`) |
 
 
-Useful intermediates: `subdomains.txt`, `live_hosts.txt`, `files_to_scan.txt`, `downloaded_files/`, `js_endpoints.json`, `js_secrets.json`, `gitleaks.json`, `jsleak.txt`, `sensitive_paths.txt`, `wayback_sources.json`, `code_search_urls.txt`, `buckets.json`, `openapi_urls.txt`, `download_etag.json`, `pipeline_metrics.json`, `checkpoint.json`.
+Useful intermediates: `subdomains.txt`, `live_hosts.txt`, `files_to_scan.txt`, `downloaded_files/`, `reconstructed_sources/`, `image_layers/`, `js_history.json`, `js_history_removed.json`, `js_endpoints.json`, `js_secrets.json`, `gitleaks.json`, `jsleak.txt`, `sensitive_paths.txt`, `wayback_sources.json`, `code_search_urls.txt`, `docker_hub_images.json`, `image_refs.json`, `ai_verdict.json`, `buckets.json`, `openapi_urls.txt`, `download_etag.json`, `pipeline_metrics.json`, `checkpoint.json`.
 
 Keep the output directory private. `valid_keys.json` is the highest-risk file.
 
@@ -602,7 +614,9 @@ Run `python3 reconpipe.py -h` for the full list. Grouped below.
 | `--skip-hakrawler` `--skip-paramspider` `--skip-naabu` `--skip-whatweb` `--skip-gowitness` | Optional recon                               |
 | `--nuclei` `--nuclei-templates PATH` `--nuclei-import FILE`                                | Nuclei                                       |
 | `--skip-wayback-bodies`                                                                    | Do not fetch Wayback snapshots for dead URLs |
-| `--skip-sensitive-paths`                                                                   | Skip `.env` / `.git` / swagger probes        |
+| `--skip-js-history`                                                                        | Do not fetch older copies of still-live JS   |
+| `--skip-sourcemaps`                                                                        | Do not reconstruct original files from maps  |
+| `--skip-sensitive-paths`                                                                   | Skip `.env` / `.git` / swagger / MCP probes |
 | `--spray`                                                                                  | Opt-in extra leak-path brute                 |
 | `--no-trufflehog` `--skip-gitleaks` `--skip-jsleak`                                        | Secret engines                               |
 | `--no-validate`                                                                            | Detection only                               |
@@ -621,6 +635,8 @@ Run `python3 reconpipe.py -h` for the full list. Grouped below.
 | `--secrets-db-medium`                          | Also keep medium-confidence rules     |
 | `--skip-public-apis` / `--refresh-public-apis` | Query-string vendor key catalog       |
 | `--skip-code-search`                           | Skip GitHub/GitLab public code search |
+| `--skip-docker-hub`                            | Skip Docker Hub public image search   |
+| `--skip-image-layers`                          | Skip pull/scan of public image layers |
 | `--github-token` / `--gitlab-token`            | Tokens for code search                |
 | `--github-org ORG`                             | Scope GitHub search to an org         |
 | `--apk FILE` / `--ipa FILE`                    | Unzip and scan a mobile app           |

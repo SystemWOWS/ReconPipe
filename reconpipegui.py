@@ -91,7 +91,13 @@ ARTIFACT_FILES = [
     "export_jira.md",
     "findings_stream.jsonl",
     "wayback_sources.json",
+    "reconstructed_sources.json",
+    "js_history.json",
+    "js_history_removed.json",
     "sensitive_paths.txt",
+    "docker_hub_images.json",
+    "image_refs.json",
+    "ai_verdict.json",
     "gitleaks.json",
     "gitleaks_git.json",
     "spray_urls.txt",
@@ -1504,6 +1510,12 @@ def build_ui() -> None:
                                 skip_wayback = ui.checkbox(
                                     "Skip Wayback bodies (--skip-wayback-bodies)"
                                 )
+                                skip_js_history = ui.checkbox(
+                                    "Skip historical live JS (--skip-js-history)"
+                                )
+                                skip_sourcemaps = ui.checkbox(
+                                    "Skip source map reconstruct (--skip-sourcemaps)"
+                                )
                                 headless = ui.checkbox("Katana headless Chrome (--headless)")
                             with ui.row().classes("w-full gap-4 mt-2"):
                                 gau_in = ui.number(
@@ -1541,6 +1553,12 @@ def build_ui() -> None:
                             with ui.element("div").classes("rp-opt-grid"):
                                 skip_code_search = ui.checkbox(
                                     "Skip GitHub/GitLab code search (--skip-code-search)"
+                                )
+                                skip_docker_hub = ui.checkbox(
+                                    "Skip Docker Hub image search (--skip-docker-hub)"
+                                )
+                                skip_image_layers = ui.checkbox(
+                                    "Skip public image layer scan (--skip-image-layers)"
                                 )
                                 skip_buckets = ui.checkbox(
                                     "Skip cloud bucket probe (--skip-buckets)"
@@ -1705,6 +1723,8 @@ def build_ui() -> None:
                             "docker_fallback": bool(docker_fb.value),
                             "resume": bool(resume_on.value),
                             "skip_wayback_bodies": bool(skip_wayback.value),
+                            "skip_js_history": bool(skip_js_history.value),
+                            "skip_sourcemaps": bool(skip_sourcemaps.value),
                             "skip_sensitive_paths": bool(skip_sens.value),
                             "skip_gitleaks": bool(skip_gitleaks.value),
                             "spray": bool(spray_on.value),
@@ -1712,6 +1732,8 @@ def build_ui() -> None:
                             "skip_secrets_db": bool(skip_secrets_db.value),
                             "skip_jsleak": bool(skip_jsleak.value),
                             "skip_code_search": bool(skip_code_search.value),
+                            "skip_docker_hub": bool(skip_docker_hub.value),
+                            "skip_image_layers": bool(skip_image_layers.value),
                             "skip_buckets": bool(skip_buckets.value),
                             "skip_openapi": bool(skip_openapi.value),
                             "ci": bool(ci_on.value),
@@ -2147,6 +2169,8 @@ def build_ui() -> None:
                                 opts["skip_amass"] = True
                                 opts["skip_buckets"] = True
                                 opts["skip_code_search"] = True
+                                opts["skip_docker_hub"] = True
+                                opts["skip_image_layers"] = True
                                 opts["skip_openapi"] = True
                                 opts["skip_sensitive_paths"] = True
                                 opts["spray"] = False
