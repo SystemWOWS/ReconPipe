@@ -6,6 +6,7 @@ import io
 import json
 import os
 import re
+import shutil
 import sqlite3
 import subprocess
 import tarfile
@@ -13,7 +14,7 @@ import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
-from urllib.parse import urlencode, urljoin, urlparse
+from urllib.parse import quote, urlencode, urljoin, urlparse
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 
@@ -29,6 +30,14 @@ CODE_SEARCH_PER_PAGE = 30
 MAX_CODE_URLS = 80
 MAX_BUCKET_OBJECTS = 40
 MAX_OPENAPI_PATHS = 200
+MAX_CI_REPOS = 8
+MAX_CI_RUNS = 5
+MAX_CI_JOBS = 8
+MAX_CI_ARTIFACTS = 6
+MAX_CI_BYTES = 2_000_000
+MAX_CI_ZIP_BYTES = 8_000_000
+MAX_PASTE_HITS = 40
+MAX_PASTE_FETCH = 25
 PRINTABLE_RE = re.compile(rb"[\x20-\x7e]{8,}")
 OPENAPI_HINT_RE = re.compile(r'"(?:swagger|openapi)"\s*:')
 POSTMAN_HINT_RE = re.compile(r'"_postman_id"|info"\s*:\s*\{[^}]{0,200}"schema".*postman', re.I | re.S)
@@ -80,6 +89,31 @@ def _http_text(url: str, headers: Optional[Dict[str, str]] = None, timeout: int 
         return int(exc.code), body, meta
     except (URLError, OSError, TimeoutError):
         return 0, "", {}
+
+
+def _http_bytes(
+    url: str,
+    headers: Optional[Dict[str, str]] = None,
+    timeout: int = 25,
+    max_bytes: int = MAX_CI_ZIP_BYTES,
+) -> Tuple[int, bytes, Dict[str, str]]:
+    hdrs = {"User-Agent": UA, **(headers or {})}
+    req = Request(url, headers=hdrs)
+    try:
+        with urlopen(req, timeout=timeout) as resp:
+            body = resp.read(max(1, int(max_bytes)) + 1)
+            meta = {k.lower(): v for k, v in (resp.headers.items() if resp.headers else [])}
+            return int(resp.status), body[:max_bytes], meta
+    except HTTPError as exc:
+        body = b""
+        try:
+            body = exc.read(max_bytes) or b""
+        except Exception:
+            pass
+        meta = {k.lower(): v for k, v in (exc.headers.items() if exc.headers else [])}
+        return int(exc.code), body, meta
+    except (URLError, OSError, TimeoutError):
+        return 0, b"", {}
 
 
 #  GitHub / GitLab code search 
@@ -238,6 +272,688 @@ def collect_code_search_urls(
                 seen.add(raw)
                 urls.append(raw)
     return urls[:MAX_CODE_URLS]
+
+
+#  CI logs / build artifacts (GitHub Actions + GitLab jobs) 
+
+GITHUB_API = "https://api.github.com"
+GITLAB_API = "https://gitlab.com/api/v4"
+PASTEBIN_SCRAPE = "https://scrape.pastebin.com/api_scraping.php"
+PASTEBIN_SCRAPE_ITEM = "https://scrape.pastebin.com/api_scrape_item.php"
+PASTEBIN_RAW = "https://pastebin.com/raw/"
+PSBDMP_SEARCH = "https://psbdmp.ws/api/v3/search/"
+GIST_PUBLIC = "https://api.github.com/gists/public"
+GIST_SEARCH = "https://gist.github.com/search"
+GHOSTBIN_SEARCH = (
+    "https://ghostbin.com/search",
+    "https://ghostbin.co/search",
+)
+PASTE_PREFIXES = (
+    "AKIA", "ASIA", "sk-", "sk-ant-", "sk-proj-", "sk-svcacct-", "sk_live_",
+    "sk_test_", "ghp_", "github_pat_", "glpat-", "hf_", "xoxb-", "xoxp-",
+    "xoxa-", "AIza", "SG.", "npm_",
+)
+CI_LOG_SUFFIX = {
+    ".log", ".txt", ".env", ".json", ".yml", ".yaml", ".xml", ".properties",
+    ".toml", ".ini", ".cfg", ".conf", ".pem", ".out",
+}
+GIST_HREF_RE = re.compile(
+    r'href="(?:https://gist\.github\.com)?/([A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)/([a-fA-F0-9]{20,40})"',
+)
+GHOSTBIN_HREF_RE = re.compile(
+    r'href="(?:https://ghostbin\.(?:com|co))?/(?:paste/)?([A-Za-z0-9]{4,16})"',
+)
+FORGE_GITHUB_RE = re.compile(
+    r"(?:github\.com[:/]|raw\.githubusercontent\.com/)(?P<owner>[^/\s]+)(?:/(?P<repo>[^/\s.#?]+))?",
+    re.I,
+)
+
+
+def _safe_rel_write(dest: Path, rel: str, data: bytes) -> Optional[Path]:
+    name = re.sub(r"[^a-zA-Z0-9._/-]", "_", (rel or "file").replace("\\", "/"))
+    name = name.replace("..", "_").lstrip("/")
+    if not name:
+        return None
+    path = dest / name
+    try:
+        path.resolve().relative_to(dest.resolve())
+    except (OSError, ValueError):
+        return None
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(data)
+    return path
+
+
+def keep_ci_member(name: str) -> bool:
+    n = (name or "").replace("\\", "/")
+    while n.startswith("./"):
+        n = n[2:]
+    base = n.rsplit("/", 1)[-1].lower()
+    if base.startswith(".env") or base in {"credentials", "id_rsa", "mcp.json"}:
+        return True
+    suffix = Path(base).suffix
+    if suffix in CI_LOG_SUFFIX or base.endswith(".log"):
+        return True
+    # GitHub Actions log ZIPs often use "1_Build" with no extension
+    return not suffix
+
+
+def extract_zip_scan_files(blob: bytes, dest: Path, limit: int = 80) -> List[Path]:
+    dest.mkdir(parents=True, exist_ok=True)
+    written: List[Path] = []
+    if not blob:
+        return written
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(blob))
+    except zipfile.BadZipFile:
+        text_path = dest / "artifact.bin.txt"
+        try:
+            text_path.write_bytes(blob[:MAX_CI_BYTES])
+            written.append(text_path)
+        except Exception:
+            pass
+        return written
+    with zf:
+        for info in zf.infolist()[:400]:
+            if info.is_dir() or info.file_size > MAX_CI_BYTES:
+                continue
+            if not keep_ci_member(info.filename):
+                continue
+            try:
+                data = zf.read(info.filename)
+            except Exception:
+                continue
+            path = _safe_rel_write(dest, info.filename, data)
+            if path:
+                written.append(path)
+            if len(written) >= limit:
+                break
+    return written
+
+
+def parse_forge_repo(url: str) -> Optional[Dict[str, str]]:
+    text = (url or "").strip()
+    if not text:
+        return None
+    if text.startswith("git@"):
+        text = text.replace(":", "/", 1).replace("git@", "https://", 1)
+    if text.endswith(".git"):
+        text = text[:-4]
+    gh = FORGE_GITHUB_RE.search(text)
+    if gh:
+        owner = (gh.group("owner") or "").strip()
+        repo = (gh.group("repo") or "").strip().rstrip(".git")
+        if owner and owner.lower() not in {"http:", "https:"}:
+            return {"forge": "github", "owner": owner, "repo": repo}
+    gl = re.search(r"gitlab\.com[:/](?P<rest>.+)", text, re.I)
+    if gl:
+        rest = (gl.group("rest") or "").split("?", 1)[0].split("#", 1)[0]
+        rest = rest.replace("\\", "/")
+        if rest.endswith(".git"):
+            rest = rest[:-4]
+        if "/-/" in rest:
+            rest = rest.split("/-/", 1)[0]
+        rest = rest.strip("/")
+        parts = [p for p in rest.split("/") if p]
+        if len(parts) >= 2:
+            return {
+                "forge": "gitlab",
+                "owner": parts[0],
+                "repo": "/".join(parts[1:]),
+                "project": "/".join(parts),
+            }
+    return None
+
+
+def repos_from_code_urls(urls: Iterable[str]) -> List[Dict[str, str]]:
+    out: List[Dict[str, str]] = []
+    seen: Set[str] = set()
+    for raw in urls or []:
+        parsed = parse_forge_repo(raw)
+        if not parsed:
+            continue
+        key = f"{parsed.get('forge')}:{parsed.get('owner')}:{parsed.get('repo')}"
+        if key in seen or not parsed.get("repo"):
+            continue
+        seen.add(key)
+        out.append(parsed)
+    return out[:MAX_CI_REPOS]
+
+
+def parse_github_org_repos(data: Any) -> List[Dict[str, str]]:
+    items = data if isinstance(data, list) else []
+    rows: List[Dict[str, str]] = []
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        full = str(it.get("full_name") or "")
+        if "/" not in full:
+            continue
+        owner, repo = full.split("/", 1)
+        if it.get("private"):
+            continue
+        rows.append({"forge": "github", "owner": owner, "repo": repo})
+    return rows
+
+
+def parse_github_workflow_runs(data: Any) -> List[Dict[str, str]]:
+    items = data.get("workflow_runs") if isinstance(data, dict) else data
+    if not isinstance(items, list):
+        return []
+    rows: List[Dict[str, str]] = []
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        rid = str(it.get("id") or "")
+        if not rid:
+            continue
+        rows.append({
+            "id": rid,
+            "name": str(it.get("name") or it.get("display_title") or ""),
+            "status": str(it.get("status") or ""),
+            "conclusion": str(it.get("conclusion") or ""),
+            "html_url": str(it.get("html_url") or ""),
+        })
+    return rows
+
+
+def parse_github_artifacts(data: Any) -> List[Dict[str, str]]:
+    items = data.get("artifacts") if isinstance(data, dict) else data
+    if not isinstance(items, list):
+        return []
+    rows: List[Dict[str, str]] = []
+    for it in items:
+        if not isinstance(it, dict) or it.get("expired"):
+            continue
+        aid = str(it.get("id") or "")
+        if not aid:
+            continue
+        size = int(it.get("size_in_bytes") or 0)
+        if size > MAX_CI_ZIP_BYTES:
+            continue
+        rows.append({
+            "id": aid,
+            "name": str(it.get("name") or "artifact"),
+            "size": str(size),
+        })
+    return rows
+
+
+def parse_gitlab_jobs(data: Any) -> List[Dict[str, str]]:
+    items = data if isinstance(data, list) else []
+    rows: List[Dict[str, str]] = []
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        jid = str(it.get("id") or "")
+        if not jid:
+            continue
+        art = it.get("artifacts_file") if isinstance(it.get("artifacts_file"), dict) else {}
+        rows.append({
+            "id": jid,
+            "name": str(it.get("name") or it.get("stage") or "job"),
+            "status": str(it.get("status") or ""),
+            "has_artifacts": "1" if art or it.get("artifacts") else "0",
+        })
+    return rows
+
+
+def collect_ci_targets(
+    *,
+    repo_url: str = "",
+    github_org: str = "",
+    code_urls: Optional[Iterable[str]] = None,
+    fetch_json: Optional[Callable[..., Any]] = None,
+    github_token: str = "",
+) -> List[Dict[str, str]]:
+    """Repos to pull CI logs from: --repo, --github-org, and code-search hits."""
+    do_fetch = fetch_json or _http_json
+    targets: List[Dict[str, str]] = []
+    seen: Set[str] = set()
+
+    def _add(row: Optional[Dict[str, str]]) -> None:
+        if not row or not row.get("repo"):
+            return
+        key = f"{row.get('forge')}:{row.get('owner')}:{row.get('repo')}"
+        if key in seen:
+            return
+        seen.add(key)
+        targets.append(row)
+
+    _add(parse_forge_repo(repo_url))
+    for row in repos_from_code_urls(code_urls or []):
+        _add(row)
+
+    org = (github_org or "").strip()
+    owners: List[str] = []
+    if org:
+        owners.append(org)
+    for row in targets:
+        if row.get("forge") == "github":
+            own = str(row.get("owner") or "")
+            if own and own not in owners:
+                owners.append(own)
+    headers = {"Accept": "application/vnd.github+json"}
+    if github_token:
+        headers["Authorization"] = f"Bearer {github_token}"
+
+    def _list_public_repos(name: str) -> List[Dict[str, str]]:
+        listed: List[Dict[str, str]] = []
+        for url in (
+            f"{GITHUB_API}/orgs/{quote(name)}/repos?type=public&per_page=20",
+            f"{GITHUB_API}/users/{quote(name)}/repos?type=owner&per_page=20",
+        ):
+            try:
+                payload = do_fetch(url, headers=headers, timeout=20)
+            except TypeError:
+                try:
+                    payload = do_fetch(url)
+                except Exception:
+                    payload = []
+            except Exception:
+                payload = []
+            listed = parse_github_org_repos(payload)
+            if listed:
+                return listed
+        return listed
+
+    for org_name in owners[:3]:
+        if len(targets) >= MAX_CI_REPOS:
+            break
+        for row in _list_public_repos(org_name):
+            _add(row)
+            if len(targets) >= MAX_CI_REPOS:
+                break
+    return targets[:MAX_CI_REPOS]
+
+
+def collect_ci_log_files(
+    targets: List[Dict[str, str]],
+    dest: Path,
+    *,
+    fetch_json: Optional[Callable[..., Any]] = None,
+    fetch_bytes: Optional[Callable[..., Any]] = None,
+    github_token: str = "",
+    gitlab_token: str = "",
+) -> List[Path]:
+    """Download recent public Actions/GitLab job logs and artifacts into dest."""
+    do_fetch = fetch_json or _http_json
+    do_bytes = fetch_bytes or _http_bytes
+    dest.mkdir(parents=True, exist_ok=True)
+    written: List[Path] = []
+    gh_headers = {"Accept": "application/vnd.github+json"}
+    if github_token:
+        gh_headers["Authorization"] = f"Bearer {github_token}"
+    gl_headers = {"Accept": "application/json"}
+    if gitlab_token:
+        gl_headers["PRIVATE-TOKEN"] = gitlab_token
+
+    def _pull_zip(url: str, headers: Dict[str, str], subdir: Path) -> None:
+        try:
+            status, blob, _meta = do_bytes(url, headers=headers, timeout=25, max_bytes=MAX_CI_ZIP_BYTES)
+        except TypeError:
+            try:
+                got = do_bytes(url)
+                if isinstance(got, tuple) and len(got) >= 2:
+                    status, blob = int(got[0] or 0), got[1] or b""
+                else:
+                    return
+            except Exception:
+                return
+        except Exception:
+            return
+        if status not in (200, 302) or not blob:
+            return
+        if blob[:2] == b"PK":
+            written.extend(extract_zip_scan_files(blob, subdir))
+        else:
+            path = _safe_rel_write(subdir, "log.txt", blob[:MAX_CI_BYTES])
+            if path:
+                written.append(path)
+
+    for target in (targets or [])[:MAX_CI_REPOS]:
+        forge = target.get("forge")
+        owner = target.get("owner") or ""
+        repo = target.get("repo") or ""
+        if not owner or not repo:
+            continue
+        slug = re.sub(r"[^a-zA-Z0-9._-]", "_", f"{owner}_{repo.replace('/', '_')}")[:80]
+        sub = dest / slug
+        sub.mkdir(parents=True, exist_ok=True)
+        if forge == "github":
+            runs_url = (
+                f"{GITHUB_API}/repos/{quote(owner)}/{quote(repo)}/actions/runs"
+                f"?per_page={MAX_CI_RUNS}&status=completed"
+            )
+            try:
+                payload = do_fetch(runs_url, headers=gh_headers, timeout=20)
+            except TypeError:
+                try:
+                    payload = do_fetch(runs_url)
+                except Exception:
+                    payload = {}
+            except Exception:
+                payload = {}
+            for run in parse_github_workflow_runs(payload)[:MAX_CI_RUNS]:
+                rid = run["id"]
+                log_url = f"{GITHUB_API}/repos/{quote(owner)}/{quote(repo)}/actions/runs/{rid}/logs"
+                _pull_zip(log_url, {**gh_headers, "Accept": "*/*"}, sub / f"run_{rid}")
+                art_url = f"{GITHUB_API}/repos/{quote(owner)}/{quote(repo)}/actions/runs/{rid}/artifacts"
+                try:
+                    arts = do_fetch(art_url, headers=gh_headers, timeout=20)
+                except TypeError:
+                    try:
+                        arts = do_fetch(art_url)
+                    except Exception:
+                        arts = {}
+                except Exception:
+                    arts = {}
+                for art in parse_github_artifacts(arts)[:MAX_CI_ARTIFACTS]:
+                    zip_url = (
+                        f"{GITHUB_API}/repos/{quote(owner)}/{quote(repo)}"
+                        f"/actions/artifacts/{art['id']}/zip"
+                    )
+                    _pull_zip(zip_url, {**gh_headers, "Accept": "*/*"}, sub / f"art_{art['id']}")
+        elif forge == "gitlab":
+            project = target.get("project") or f"{owner}/{repo}"
+            pid = quote(project, safe="")
+            jobs_url = f"{GITLAB_API}/projects/{pid}/jobs?per_page={MAX_CI_JOBS}"
+            try:
+                payload = do_fetch(jobs_url, headers=gl_headers, timeout=20)
+            except TypeError:
+                try:
+                    payload = do_fetch(jobs_url)
+                except Exception:
+                    payload = []
+            except Exception:
+                payload = []
+            for job in parse_gitlab_jobs(payload)[:MAX_CI_JOBS]:
+                jid = job["id"]
+                trace_url = f"{GITLAB_API}/projects/{pid}/jobs/{jid}/trace"
+                try:
+                    status, blob, _meta = do_bytes(
+                        trace_url, headers=gl_headers, timeout=20, max_bytes=MAX_CI_BYTES
+                    )
+                except TypeError:
+                    try:
+                        got = do_bytes(trace_url)
+                        status, blob = int(got[0] or 0), got[1] or b""
+                    except Exception:
+                        continue
+                except Exception:
+                    continue
+                if status == 200 and blob:
+                    path = _safe_rel_write(sub, f"job_{jid}.log", blob[:MAX_CI_BYTES])
+                    if path:
+                        written.append(path)
+                if job.get("has_artifacts") == "1":
+                    art_url = f"{GITLAB_API}/projects/{pid}/jobs/{jid}/artifacts"
+                    _pull_zip(art_url, gl_headers, sub / f"job_{jid}_artifacts")
+    return written
+
+
+#  Paste sites (Pastebin / Gists / Ghostbin) 
+
+def paste_search_terms(domain: str) -> List[str]:
+    host = (domain or "").strip().lower().lstrip(".")
+    if not host:
+        return []
+    terms = [host]
+    slug = host.split(".")[0]
+    if slug and slug != host and len(slug) >= 3:
+        terms.append(slug)
+    for prefix in ("AKIA", "sk-proj-", "sk-ant-", "ghp_", "hf_"):
+        terms.append(f"{host} {prefix}")
+    return terms[:8]
+
+
+def paste_blob_matches(text: str, domain: str) -> bool:
+    blob = text or ""
+    host = (domain or "").strip().lower().lstrip(".")
+    if host and host.lower() in blob.lower():
+        return True
+    return any(p in blob for p in PASTE_PREFIXES)
+
+
+def parse_pastebin_scrape(data: Any) -> List[Dict[str, str]]:
+    items = data if isinstance(data, list) else []
+    rows: List[Dict[str, str]] = []
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        key = str(it.get("key") or it.get("paste_key") or "").strip()
+        if not key:
+            continue
+        rows.append({
+            "id": key,
+            "title": str(it.get("title") or ""),
+            "raw_url": str(it.get("scrape_url") or (PASTEBIN_RAW + key)),
+        })
+    return rows
+
+
+def parse_psbdmp_search(data: Any) -> List[Dict[str, str]]:
+    if isinstance(data, dict):
+        items = data.get("data") or data.get("result") or data.get("dumps") or []
+    else:
+        items = data
+    if not isinstance(items, list):
+        return []
+    rows: List[Dict[str, str]] = []
+    for it in items:
+        if isinstance(it, str):
+            pid = it.strip()
+            snippet = ""
+        elif isinstance(it, dict):
+            pid = str(it.get("id") or it.get("key") or "").strip()
+            snippet = str(it.get("text") or it.get("tags") or "")
+        else:
+            continue
+        if not pid:
+            continue
+        rows.append({
+            "id": pid,
+            "title": snippet[:200],
+            "raw_url": PASTEBIN_RAW + pid,
+            "dump_url": f"https://psbdmp.ws/dump/{pid}",
+        })
+    return rows
+
+
+def parse_gist_list(data: Any) -> List[Dict[str, str]]:
+    items = data if isinstance(data, list) else []
+    rows: List[Dict[str, str]] = []
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        gid = str(it.get("id") or "").strip()
+        if not gid:
+            continue
+        files = it.get("files") if isinstance(it.get("files"), dict) else {}
+        names = " ".join(str(n) for n in files.keys())
+        desc = str(it.get("description") or "")
+        raws = []
+        for meta in files.values():
+            if isinstance(meta, dict) and meta.get("raw_url"):
+                raws.append(str(meta["raw_url"]))
+        rows.append({
+            "id": gid,
+            "title": f"{desc} {names}".strip(),
+            "html_url": str(it.get("html_url") or f"https://gist.github.com/{gid}"),
+            "raw_url": raws[0] if raws else "",
+            "api_url": str(it.get("url") or f"{GITHUB_API}/gists/{gid}"),
+        })
+    return rows
+
+
+def parse_gist_detail(data: Any) -> List[Dict[str, str]]:
+    if not isinstance(data, dict):
+        return []
+    files = data.get("files") if isinstance(data.get("files"), dict) else {}
+    out: List[Dict[str, str]] = []
+    for name, meta in files.items():
+        if not isinstance(meta, dict):
+            continue
+        content = str(meta.get("content") or "")
+        raw = str(meta.get("raw_url") or "")
+        out.append({
+            "filename": str(name),
+            "content": content,
+            "raw_url": raw,
+            "truncated": "1" if meta.get("truncated") else "0",
+        })
+    return out
+
+
+def parse_gist_search_html(html: str) -> List[str]:
+    ids: List[str] = []
+    seen: Set[str] = set()
+    for _user, gid in GIST_HREF_RE.findall(html or ""):
+        if gid not in seen:
+            seen.add(gid)
+            ids.append(gid)
+    return ids[:MAX_PASTE_HITS]
+
+
+def parse_ghostbin_search_html(html: str) -> List[str]:
+    ids: List[str] = []
+    seen: Set[str] = set()
+    for gid in GHOSTBIN_HREF_RE.findall(html or ""):
+        if gid.lower() in {"search", "paste", "login", "static"}:
+            continue
+        if gid not in seen:
+            seen.add(gid)
+            ids.append(gid)
+    return ids[:20]
+
+
+def collect_paste_files(
+    domain: str,
+    dest: Path,
+    *,
+    fetch_json: Optional[Callable[..., Any]] = None,
+    fetch_text: Optional[Callable[..., Any]] = None,
+    fetch_bytes: Optional[Callable[..., Any]] = None,
+    github_token: str = "",
+    use_pastebin_scrape: bool = True,
+) -> List[Path]:
+    """Keyword-search paste sites for the target domain and known key prefixes."""
+    do_fetch = fetch_json or _http_json
+    do_text = fetch_text or _http_text
+    do_bytes = fetch_bytes or _http_bytes
+    dest.mkdir(parents=True, exist_ok=True)
+    written: List[Path] = []
+    host = (domain or "").strip().lower().lstrip(".")
+    if not host:
+        return written
+    gh_headers = {"Accept": "application/vnd.github+json"}
+    if github_token:
+        gh_headers["Authorization"] = f"Bearer {github_token}"
+
+    def _write(rel: str, blob: str) -> None:
+        if not paste_blob_matches(blob, host):
+            return
+        path = _safe_rel_write(dest, rel, blob.encode("utf-8", errors="replace")[:MAX_CI_BYTES])
+        if path:
+            written.append(path)
+
+    def _get_json(url: str, headers: Optional[Dict[str, str]] = None) -> Any:
+        try:
+            return do_fetch(url, headers=headers or {}, timeout=20)
+        except TypeError:
+            try:
+                return do_fetch(url)
+            except Exception:
+                return None
+        except Exception:
+            return None
+
+    def _get_text(url: str, headers: Optional[Dict[str, str]] = None) -> str:
+        try:
+            got = do_text(url, headers=headers or {}, timeout=15)
+            if isinstance(got, tuple) and len(got) >= 2:
+                return str(got[1] or "")
+            return str(got or "")
+        except TypeError:
+            try:
+                got = do_text(url)
+                return str(got[1] if isinstance(got, tuple) else got or "")
+            except Exception:
+                return ""
+        except Exception:
+            return ""
+
+    def _get_bytes(url: str) -> bytes:
+        try:
+            got = do_bytes(url, headers={}, timeout=15, max_bytes=MAX_CI_BYTES)
+            if isinstance(got, tuple) and len(got) >= 2:
+                return got[1] or b""
+            return b""
+        except TypeError:
+            try:
+                got = do_bytes(url)
+                return got[1] if isinstance(got, tuple) else b""
+            except Exception:
+                return b""
+        except Exception:
+            return b""
+
+    # Pastebin scraping API (Pro + linked IP) — recent pastes, then prefix/domain filter
+    if use_pastebin_scrape:
+        scrape = _get_json(PASTEBIN_SCRAPE + "?limit=100")
+        for row in parse_pastebin_scrape(scrape)[:MAX_PASTE_FETCH]:
+            raw = _get_text(row["raw_url"])
+            if not raw:
+                item_url = f"{PASTEBIN_SCRAPE_ITEM}?i={quote(row['id'])}"
+                raw = _get_text(item_url)
+            if raw:
+                _write(f"pastebin_{row['id']}.txt", raw)
+            if len(written) >= MAX_PASTE_HITS:
+                return written
+
+    # psbdmp.ws — keyword search of Pastebin dumps (no Pro account)
+    for term in paste_search_terms(host):
+        payload = _get_json(PSBDMP_SEARCH + quote(term, safe=""))
+        for row in parse_psbdmp_search(payload)[:12]:
+            body = _get_text(row["raw_url"]) or _get_text(row.get("dump_url") or "")
+            if not body and row.get("title"):
+                body = row["title"]
+            if body:
+                _write(f"psbdmp_{row['id']}.txt", body)
+            if len(written) >= MAX_PASTE_HITS:
+                return written
+
+    # GitHub Gists — public timeline + gist.github.com search (code search skips gists)
+    gists = parse_gist_list(_get_json(GIST_PUBLIC + "?per_page=50", gh_headers) or [])
+    gist_ids = [g["id"] for g in gists if paste_blob_matches(g.get("title") or "", host)]
+    for term in paste_search_terms(host)[:2]:
+        html = _get_text(GIST_SEARCH + "?" + urlencode({"q": f"{term} (AKIA OR sk- OR ghp_ OR hf_)"}))
+        gist_ids.extend(parse_gist_search_html(html))
+    seen_g: Set[str] = set()
+    for gid in gist_ids:
+        if gid in seen_g or len(written) >= MAX_PASTE_HITS:
+            break
+        seen_g.add(gid)
+        detail = _get_json(f"{GITHUB_API}/gists/{gid}", gh_headers) or {}
+        for file_row in parse_gist_detail(detail):
+            content = file_row.get("content") or ""
+            if file_row.get("truncated") == "1" and file_row.get("raw_url"):
+                content = _get_text(file_row["raw_url"]) or content
+            if content:
+                _write(f"gist_{gid}_{file_row.get('filename') or 'file'}.txt", content)
+
+    # Ghostbin — often offline in 2026; probe search HTML and ignore empty/dead hosts
+    for base in GHOSTBIN_SEARCH:
+        html = _get_text(base + "?" + urlencode({"q": host}))
+        if not html or "not found" in html.lower()[:400]:
+            continue
+        for gid in parse_ghostbin_search_html(html)[:8]:
+            raw = _get_text(f"https://ghostbin.com/paste/{gid}/raw") or _get_text(
+                f"https://ghostbin.co/paste/{gid}/raw"
+            )
+            if raw:
+                _write(f"ghostbin_{gid}.txt", raw)
+    return written[:MAX_PASTE_HITS]
 
 
 #  OpenAPI / Swagger / Postman 
@@ -553,6 +1269,123 @@ def extract_mobile_archive(
         dump = dest / "_apk_strings.txt"
         dump.write_text("\n\n".join(strings_buf)[:2_000_000], encoding="utf-8")
         written.append(dump)
+    return written
+
+
+PACKAGE_ID_RE = re.compile(
+    r"^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)+(?:@[\w.+-]+)?$"
+)
+MAX_PLAY_PACKAGES = 8
+
+
+def parse_package_id(value: str) -> str:
+    """Android application id, optional apkeep `@version` suffix."""
+    text = (value or "").strip()
+    if not text or not PACKAGE_ID_RE.match(text):
+        return ""
+    return text
+
+
+def parse_package_ids(values: Iterable[str]) -> List[str]:
+    out: List[str] = []
+    seen: Set[str] = set()
+    for raw in values or []:
+        for part in re.split(r"[\s,;]+", str(raw or "")):
+            pkg = parse_package_id(part)
+            if not pkg or pkg.lower() in seen:
+                continue
+            seen.add(pkg.lower())
+            out.append(pkg)
+            if len(out) >= MAX_PLAY_PACKAGES:
+                return out
+    return out
+
+
+def list_downloaded_apks(directory: Path) -> List[Path]:
+    root = Path(directory)
+    if not root.is_dir():
+        return []
+    found: List[Path] = []
+    for path in sorted(root.rglob("*")):
+        if path.is_file() and path.suffix.lower() in MOBILE_PKG_SUFFIX:
+            found.append(path)
+    return found
+
+
+def apkeep_cmd(package: str, dest: Path) -> List[str]:
+    return ["apkeep", "-a", package, str(dest)]
+
+
+def gplaycli_cmd(package: str, dest: Path) -> List[str]:
+    app_id = package.split("@", 1)[0]
+    return ["gplaycli", "-d", app_id, "-y", "-f", str(dest)]
+
+
+def fetch_android_packages(
+    packages: Iterable[str],
+    dest: Path,
+    *,
+    run: Optional[Callable[..., Tuple[int, bytes]]] = None,
+    which: Optional[Callable[[str], Optional[str]]] = None,
+    docker_fallback: bool = False,
+    timeout: int = 180,
+) -> List[Path]:
+    """
+    Download Play-store package ids with apkeep (preferred) or gplaycli.
+    Does not hit the network when `run` / `which` are injected in tests.
+    """
+    dest = Path(dest)
+    dest.mkdir(parents=True, exist_ok=True)
+    ids = parse_package_ids(packages)
+    if not ids:
+        return []
+    do_which = which or shutil.which
+    do_run = run
+    have_apkeep = bool(do_which("apkeep"))
+    have_gplay = bool(do_which("gplaycli"))
+    have_docker = bool(docker_fallback and do_which("docker"))
+    if not have_apkeep and not have_gplay and not have_docker:
+        return []
+    written: List[Path] = []
+    before = {str(p.resolve()) for p in list_downloaded_apks(dest)}
+
+    def _exec(cmd: List[str]) -> int:
+        if do_run is not None:
+            try:
+                rc, _out = do_run(cmd, timeout=timeout)
+            except TypeError:
+                rc, _out = do_run(cmd)
+            return int(rc or 0)
+        try:
+            proc = subprocess.run(cmd, capture_output=True, timeout=timeout)
+            return int(proc.returncode or 0)
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+            return 1
+
+    for pkg in ids:
+        slug = re.sub(r"[^a-zA-Z0-9._-]", "_", pkg)[:80]
+        out_dir = dest / slug
+        out_dir.mkdir(parents=True, exist_ok=True)
+        cmds: List[List[str]] = []
+        if have_apkeep:
+            cmds.append(apkeep_cmd(pkg, out_dir))
+        if have_gplay:
+            cmds.append(gplaycli_cmd(pkg, out_dir))
+        if have_docker:
+            cmds.append([
+                "docker", "run", "--rm",
+                "-v", f"{out_dir.resolve()}:/out",
+                "ghcr.io/efforg/apkeep:latest",
+                "-a", pkg, "/out",
+            ])
+        for cmd in cmds:
+            if _exec(cmd) == 0 and list_downloaded_apks(out_dir):
+                break
+        for path in list_downloaded_apks(out_dir):
+            key = str(path.resolve())
+            if key not in before:
+                written.append(path)
+                before.add(key)
     return written
 
 
@@ -1347,8 +2180,10 @@ def mcp_source(finding: Dict[str, Any]) -> bool:
 
 def ai_verdict_for(finding: Dict[str, Any]) -> Tuple[int, str, List[str]]:
     """
-    Prioritize AI-provider and MCP-config leaks.
-    GitGuardian 2026: 8.8% of MCP-config secrets were still live — high validate value.
+    Rule-based priority for AI-vendor keys and MCP-config leaks. Not an LLM call.
+    P1: live AI/MCP credential, or score >= 80.
+    P2: AI/MCP hit (unverified/dead) or score >= 60.
+    P3: everything else.
     """
     score = 40
     try:
@@ -1392,6 +2227,7 @@ def apply_ai_verdict(findings: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         score, verdict, reasons = ai_verdict_for(f)
         f["ai_score"] = score
         f["ai_verdict"] = verdict
+        f["priority"] = verdict
         f["ai_reasons"] = reasons
     return sorted(
         findings or [],
@@ -1460,6 +2296,7 @@ CI_SKIP_FLAGS = (
     "skip_hakrawler", "skip_paramspider", "skip_sensitive_paths",
     "skip_wayback_bodies", "skip_js_history", "skip_jsleak", "skip_code_search",
     "skip_docker_hub", "skip_image_layers", "skip_buckets",
+    "skip_ci_logs", "skip_pastes",
     "no_notify",
 )
 

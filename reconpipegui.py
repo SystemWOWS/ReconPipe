@@ -104,9 +104,13 @@ ARTIFACT_FILES = [
     "jsleak.txt",
     "jsleak_secrets.json",
     "code_search_urls.txt",
+    "ci_logs.json",
+    "paste_urls.json",
     "buckets.json",
     "openapi_urls.txt",
     "download_etag.json",
+    "remediation.md",
+    "llm_report.json",
 ]
 ARTIFACT_ZIP_NAME = "reconpipe_artifacts.zip"
 
@@ -934,15 +938,77 @@ class GuiState:
         self.mobile_paths: List[str] = []
         self.dark_on: bool = True
         self.preview_artifact: str = ""
+        self.llm_widgets: Dict[str, Any] = {}
 
 
 STATE = GuiState()
 
 
+def _widget_text(widget: Any) -> str:
+    if widget is None:
+        return ""
+    return str(getattr(widget, "value", "") or "").strip()
+
+
+def llm_scan_opts() -> Dict[str, Any]:
+    """Flags for the next scan, from the Settings widgets or saved disk config."""
+    w = STATE.llm_widgets
+    if w:
+        enabled = bool(w["enabled"].value)
+        auto = bool(w["auto"].value)
+        provider = str(w["provider"].value or "ollama")
+        return {
+            "llm": enabled and auto,
+            "skip_llm": not (enabled and auto),
+            "llm_provider": provider,
+            "llm_model": _widget_text(w.get("model")),
+            "llm_base_url": _widget_text(w.get("base_url")),
+            "llm_key": _widget_text(w.get("api_key")),
+            "llm_timeout": int(w["timeout"].value or 120),
+            "llm_max_findings": int(w["max_findings"].value or 40),
+        }
+    saved = rp.rp_llm.load_app_settings()
+    on = bool(saved.get("enabled") and saved.get("auto"))
+    return {
+        "llm": on,
+        "skip_llm": not on,
+        "llm_provider": saved.get("provider"),
+        "llm_model": saved.get("model"),
+        "llm_base_url": saved.get("base_url"),
+        "llm_key": rp.rp_llm.load_llm_key() or None,
+        "llm_timeout": saved.get("timeout"),
+        "llm_max_findings": saved.get("max_findings"),
+    }
+
+
+def llm_args_from_opts(opts: Optional[Dict[str, Any]] = None) -> Any:
+    opts = opts or llm_scan_opts()
+
+    class _Args:
+        pass
+
+    args = _Args()
+    args.llm = True
+    args.skip_llm = False
+    args.ci = False
+    args.llm_provider = opts.get("llm_provider") or "ollama"
+    args.llm_model = opts.get("llm_model") or ""
+    args.llm_base_url = opts.get("llm_base_url") or ""
+    args.llm_key = opts.get("llm_key") or rp.rp_llm.load_llm_key()
+    args.llm_timeout = opts.get("llm_timeout") or 120
+    args.llm_max_findings = opts.get("llm_max_findings") or 40
+    return rp.rp_llm.apply_llm_settings(args)
+
+
 # Build UI
 def build_ui() -> None:
+    saved_ui = rp.rp_llm.load_app_settings()
+    STATE.dark_on = bool(saved_ui.get("dark", True))
     dark_mode = ui.dark_mode()
-    dark_mode.enable()
+    if STATE.dark_on:
+        dark_mode.enable()
+    else:
+        dark_mode.disable()
     ui.colors(
         primary="#e8620a",
         secondary="#5b6673",
@@ -1222,8 +1288,10 @@ def build_ui() -> None:
         tab_tester = ui.tab("Key Tester")
         tab_artifacts = ui.tab("Artifacts")
         tab_history = ui.tab("History")
+        tab_settings = ui.tab("Settings")
 
     scan_actions: Dict[str, Any] = {}
+    mobile_package_fields: List[Any] = []
 
     with ui.tab_panels(tabs, value=tab_scan).classes("w-full px-4 pt-4 pb-12"):
         # Scan 
@@ -1521,6 +1589,12 @@ def build_ui() -> None:
                                 gau_in = ui.number(
                                     "gau threads", value=5, min=1, max=100
                                 ).classes("w-40")
+                                js_history_max_in = ui.number(
+                                    "JS history versions / URL (--js-history-max)",
+                                    value=15,
+                                    min=1,
+                                    max=200,
+                                ).classes("w-64")
 
                         with ui.expansion("Secret engines", icon="vpn_key").classes("rp-expansion"):
                             ui.label("How secrets are detected after files are collected.").classes(
@@ -1554,6 +1628,12 @@ def build_ui() -> None:
                                 skip_code_search = ui.checkbox(
                                     "Skip GitHub/GitLab code search (--skip-code-search)"
                                 )
+                                skip_ci_logs = ui.checkbox(
+                                    "Skip public Actions / GitLab logs (--skip-ci-logs)"
+                                )
+                                skip_pastes = ui.checkbox(
+                                    "Skip Pastebin / Gist / Ghostbin (--skip-pastes)"
+                                )
                                 skip_docker_hub = ui.checkbox(
                                     "Skip Docker Hub image search (--skip-docker-hub)"
                                 )
@@ -1572,7 +1652,7 @@ def build_ui() -> None:
                                 spray_on = ui.checkbox("Run spray leak paths (--spray)")
                                 nuclei_on = ui.checkbox("Run nuclei (--nuclei)")
                             github_org_in = ui.input(
-                                "GitHub org for code search (--github-org)"
+                                "GitHub org for code search and CI logs (--github-org)"
                             ).classes("w-full").props("outlined dense")
                             burp_in = ui.input(
                                 "Burp XML (--burp-import)"
@@ -1580,6 +1660,11 @@ def build_ui() -> None:
                             repo_in = ui.input(
                                 "Git repo to clone (--repo)"
                             ).classes("w-full").props("outlined dense")
+                            package_in = ui.input(
+                                "Android package ids (--package)",
+                                placeholder="com.example.app  (needs apkeep or gplaycli)",
+                            ).classes("w-full").props("outlined dense")
+                            mobile_package_fields.append(package_in)
                             creds_in = ui.input(
                                 "Scan credentials YAML (--credentials)"
                             ).classes("w-full").props("outlined dense")
@@ -1724,6 +1809,7 @@ def build_ui() -> None:
                             "resume": bool(resume_on.value),
                             "skip_wayback_bodies": bool(skip_wayback.value),
                             "skip_js_history": bool(skip_js_history.value),
+                            "js_history_max": int(js_history_max_in.value or 15),
                             "skip_sourcemaps": bool(skip_sourcemaps.value),
                             "skip_sensitive_paths": bool(skip_sens.value),
                             "skip_gitleaks": bool(skip_gitleaks.value),
@@ -1732,6 +1818,8 @@ def build_ui() -> None:
                             "skip_secrets_db": bool(skip_secrets_db.value),
                             "skip_jsleak": bool(skip_jsleak.value),
                             "skip_code_search": bool(skip_code_search.value),
+                            "skip_ci_logs": bool(skip_ci_logs.value),
+                            "skip_pastes": bool(skip_pastes.value),
                             "skip_docker_hub": bool(skip_docker_hub.value),
                             "skip_image_layers": bool(skip_image_layers.value),
                             "skip_buckets": bool(skip_buckets.value),
@@ -1746,6 +1834,9 @@ def build_ui() -> None:
                             "proxy_auth": (proxy_auth_in.value or "").strip() or None,
                             "burp_import": (burp_in.value or "").strip() or None,
                             "repo": (repo_in.value or "").strip() or None,
+                            "package": rp.parse_package_ids(
+                                [w.value or "" for w in mobile_package_fields]
+                            ),
                             "apk": split_mobile_file_list(STATE.mobile_paths)[0],
                             "ipa": split_mobile_file_list(STATE.mobile_paths)[1],
                             "credentials": (creds_in.value or "").strip() or None,
@@ -1758,6 +1849,7 @@ def build_ui() -> None:
                             "skip_crtsh": bool(skip_crtsh.value),
                             "concurrency": int(conc_in.value or 10),
                             "gau_threads": int(gau_in.value or 5),
+                            **llm_scan_opts(),
                         }
 
                     def preview_cmd() -> None:
@@ -1874,7 +1966,11 @@ def build_ui() -> None:
                         def refresh_tools() -> None:
                             tools_box.clear()
                             status = rp.probe_tools()
-                            extras = {"jsluice": rp.check_tool("jsluice")}
+                            extras = {
+                                "jsluice": rp.check_tool("jsluice"),
+                                "apkeep": rp.check_tool("apkeep"),
+                                "gplaycli": rp.check_tool("gplaycli"),
+                            }
                             intel = rp.osint_source_status(
                                 shodan_key=shodan_in.value or "",
                                 censys_id=censys_id_in.value or "",
@@ -2001,8 +2097,9 @@ def build_ui() -> None:
                         ui.label("APK / IPA scanner").classes("rp-section")
                         ui.label(
                             "Unzip the app, keep JS/JSON/XML/plist/.env, strings-dump binaries, "
-                            "then run the same secret scanners. In Docker, upload the file here "
-                            "instead of a host path like /home/.../Downloads."
+                            "then run the same secret scanners. Fetch by Play package id "
+                            "(--package, needs apkeep or gplaycli) or upload a file. In Docker, "
+                            "upload here instead of a host path like /home/.../Downloads."
                         ).classes("text-sm text-slate-500 mb-2")
                         app_domain_in = ui.input(
                             "App / backend domain (-d)",
@@ -2012,6 +2109,11 @@ def build_ui() -> None:
                             "Add a file path",
                             placeholder="/work/app.apk  or  C:\\Users\\...\\app.apk",
                         ).classes("w-full").props("outlined dense")
+                        app_package_in = ui.input(
+                            "Or fetch by package id (--package)",
+                            placeholder="com.example.app",
+                        ).classes("w-full").props("outlined dense")
+                        mobile_package_fields.append(app_package_in)
                         app_files_box = ui.column().classes("w-full gap-1")
 
                         def render_app_files() -> None:
@@ -2143,8 +2245,13 @@ def build_ui() -> None:
                                 ui.notify("Scan form is not ready", type="negative")
                                 return
                             apk, ipa = split_mobile_file_list(STATE.mobile_paths)
-                            if not apk and not ipa:
-                                app_error.text = "Add or upload an APK/IPA first."
+                            packages = rp.parse_package_ids(
+                                [w.value or "" for w in mobile_package_fields]
+                            )
+                            if not apk and not ipa and not packages:
+                                app_error.text = (
+                                    "Add an APK/IPA or a Play package id (--package)."
+                                )
                                 ui.notify(app_error.text, type="warning")
                                 return
                             domain = (app_domain_in.value or "").strip()
@@ -2159,6 +2266,7 @@ def build_ui() -> None:
                                 opts["domain"] = domain
                             opts["apk"] = apk
                             opts["ipa"] = ipa
+                            opts["package"] = packages
                             if bool(app_only.value):
                                 opts["skip_chaos"] = True
                                 opts["skip_subfinder"] = True
@@ -2169,6 +2277,8 @@ def build_ui() -> None:
                                 opts["skip_amass"] = True
                                 opts["skip_buckets"] = True
                                 opts["skip_code_search"] = True
+                                opts["skip_ci_logs"] = True
+                                opts["skip_pastes"] = True
                                 opts["skip_docker_hub"] = True
                                 opts["skip_image_layers"] = True
                                 opts["skip_openapi"] = True
@@ -2848,7 +2958,8 @@ def build_ui() -> None:
                 ui.label("Artifacts").classes("rp-section")
                 ui.label(
                     "These files may contain live secrets. Handle according to your "
-                    "engagement rules; do not share them casually."
+                    "engagement rules; do not share them casually. After a scan, "
+                    "remediation.md is the verify-and-fix writeup (Settings → LLM)."
                 ).classes("text-xs text-amber-400 mb-2")
 
                 def current_workspace() -> Optional[Path]:
@@ -3039,6 +3150,206 @@ def build_ui() -> None:
 
                 build_ui.render_history = render_history  # type: ignore[attr-defined]
                 render_history()
+
+        with ui.tab_panel(tab_settings):
+            saved_llm = rp.rp_llm.load_app_settings()
+            with ui.card().classes("w-full rp-card"):
+                ui.label("Settings").classes("rp-section")
+                ui.label(
+                    "Saved under ~/.reconpipe (or RECONPIPE_HOME). LLM reports run after a "
+                    "scan when enabled + auto, or from the button below on a finished workspace. "
+                    "Only redacted fingerprints are sent to the model."
+                ).classes("text-xs text-gray-500 mb-3")
+                ui.label(
+                    f"Data directory: {rp.user_data_dir()}"
+                ).classes("text-xs text-slate-500 mb-3")
+
+                ui.label("Appearance").classes("rp-section")
+                dark_default = ui.checkbox(
+                    "Start in dark mode",
+                    value=bool(saved_llm.get("dark", True)),
+                )
+
+                ui.label("LLM remediation").classes("rp-section")
+                llm_enabled = ui.checkbox(
+                    "Enable LLM reports",
+                    value=bool(saved_llm.get("enabled")),
+                )
+                llm_auto = ui.checkbox(
+                    "Run automatically when a scan finishes",
+                    value=bool(saved_llm.get("auto", True)),
+                )
+                llm_provider = ui.select(
+                    {
+                        "ollama": "Local — Ollama",
+                        "openai_compat": "Local — OpenAI-compatible (LM Studio / vLLM / llama.cpp)",
+                        "openai": "Cloud — OpenAI",
+                        "anthropic": "Cloud — Anthropic",
+                    },
+                    value=saved_llm.get("provider") or "ollama",
+                    label="Provider",
+                ).classes("w-full").props("dense outlined")
+                llm_model = ui.input(
+                    "Model",
+                    value=str(saved_llm.get("model") or ""),
+                    placeholder="llama3.1  ·  gpt-4o-mini  ·  claude-3-5-haiku-latest",
+                ).classes("w-full").props("outlined dense")
+                llm_base = ui.input(
+                    "Base URL (Ollama / local OpenAI-compatible)",
+                    value=str(saved_llm.get("base_url") or ""),
+                    placeholder="http://127.0.0.1:11434",
+                ).classes("w-full").props("outlined dense")
+                llm_key_in = ui.input(
+                    "API key (cloud providers; stored in keys.yaml)",
+                    value=rp.rp_llm.load_llm_key(),
+                    password=True,
+                    password_toggle_button=True,
+                    placeholder="or RECONPIPE_LLM_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY",
+                ).classes("w-full").props("outlined dense")
+                with ui.row().classes("w-full gap-2"):
+                    llm_timeout = ui.number(
+                        "Timeout (sec)",
+                        value=int(saved_llm.get("timeout") or 120),
+                        min=10,
+                        max=600,
+                    ).classes("flex-1").props("dense outlined")
+                    llm_max = ui.number(
+                        "Max findings sent to the model",
+                        value=int(saved_llm.get("max_findings") or 40),
+                        min=1,
+                        max=200,
+                    ).classes("flex-1").props("dense outlined")
+                llm_status = ui.label("").classes("text-sm text-slate-400 mt-1")
+
+                STATE.llm_widgets = {
+                    "enabled": llm_enabled,
+                    "auto": llm_auto,
+                    "provider": llm_provider,
+                    "model": llm_model,
+                    "base_url": llm_base,
+                    "api_key": llm_key_in,
+                    "timeout": llm_timeout,
+                    "max_findings": llm_max,
+                    "dark": dark_default,
+                }
+
+                def _provider_defaults() -> None:
+                    name = str(llm_provider.value or "ollama")
+                    if not (llm_model.value or "").strip():
+                        llm_model.set_value(rp.rp_llm.DEFAULT_MODELS.get(name, ""))
+                    cur = (llm_base.value or "").strip()
+                    if not cur or cur in rp.rp_llm.DEFAULT_BASE_URLS.values():
+                        llm_base.set_value(rp.rp_llm.DEFAULT_BASE_URLS.get(name, ""))
+
+                llm_provider.on("update:model-value", lambda *_: _provider_defaults())
+
+                def save_settings() -> None:
+                    path = rp.rp_llm.save_app_settings(
+                        {
+                            "enabled": bool(llm_enabled.value),
+                            "auto": bool(llm_auto.value),
+                            "provider": str(llm_provider.value or "ollama"),
+                            "model": (llm_model.value or "").strip(),
+                            "base_url": (llm_base.value or "").strip(),
+                            "timeout": int(llm_timeout.value or 120),
+                            "max_findings": int(llm_max.value or 40),
+                            "dark": bool(dark_default.value),
+                        },
+                        llm_key=(llm_key_in.value or "").strip(),
+                    )
+                    STATE.dark_on = bool(dark_default.value)
+                    if STATE.dark_on:
+                        dark_mode.enable()
+                    else:
+                        dark_mode.disable()
+                    ui.notify(f"Saved {path}", type="positive")
+
+                async def test_llm() -> None:
+                    llm_status.set_text("Checking…")
+                    ok, msg = await run_io_bound(
+                        rp.rp_llm.ping_llm,
+                        provider=str(llm_provider.value or "ollama"),
+                        model=(llm_model.value or "").strip(),
+                        base_url=(llm_base.value or "").strip(),
+                        api_key=(llm_key_in.value or "").strip() or rp.rp_llm.load_llm_key(),
+                    )
+                    llm_status.set_text(("OK — " if ok else "Failed — ") + msg)
+                    ui.notify(msg, type="positive" if ok else "negative")
+
+                def _load_scan_findings(ws: Path) -> Tuple[List[Dict], List[Dict]]:
+                    findings: List[Dict] = []
+                    exposures: List[Dict] = []
+                    fj = ws / "findings.json"
+                    if fj.is_file():
+                        try:
+                            data = json.loads(fj.read_text(encoding="utf-8"))
+                            if isinstance(data, list):
+                                findings = data
+                        except Exception:
+                            findings = []
+                    ex = ws / "source_map_exposures.json"
+                    if ex.is_file():
+                        try:
+                            data = json.loads(ex.read_text(encoding="utf-8"))
+                            if isinstance(data, list):
+                                exposures = data
+                        except Exception:
+                            exposures = []
+                    return findings, exposures
+
+                async def generate_llm_now() -> None:
+                    ws = Path(STATE.workspace or STATE.runner.output_dir or "")
+                    if not ws or not ws.is_dir():
+                        ui.notify("Load a finished scan workspace first (Artifacts / History)", type="warning")
+                        return
+                    findings, exposures = _load_scan_findings(ws)
+                    domain = STATE.domain or ws.name
+                    llm_status.set_text("Writing remediation.md…")
+                    args = llm_args_from_opts()
+                    try:
+                        dest = await run_io_bound(
+                            rp.rp_llm.maybe_write_llm_report,
+                            ws,
+                            domain,
+                            findings,
+                            exposures,
+                            [],
+                            args,
+                            force=True,
+                        )
+                    except Exception as exc:
+                        llm_status.set_text(f"Failed — {exc}")
+                        ui.notify(str(exc), type="negative")
+                        return
+                    if dest:
+                        llm_status.set_text(f"Wrote {dest}")
+                        ui.notify(f"Wrote {dest.name}", type="positive")
+                        try:
+                            build_ui.refresh_artifacts()  # type: ignore[attr-defined]
+                        except Exception:
+                            pass
+                    else:
+                        llm_status.set_text("No report written")
+                        ui.notify("No report written", type="warning")
+
+                with ui.row().classes("w-full gap-2 flex-wrap mt-2"):
+                    ui.button("Save settings", on_click=save_settings, color="primary").props(
+                        "unelevated dense"
+                    )
+                    ui.button("Test LLM", on_click=test_llm, color="secondary").props(
+                        "outline dense"
+                    )
+                    ui.button(
+                        "Generate report from finished scan",
+                        on_click=generate_llm_now,
+                        color="secondary",
+                    ).props("outline dense")
+
+                ui.label(
+                    "Local: install Ollama, run `ollama pull llama3.1`, leave Base URL as "
+                    "http://127.0.0.1:11434. LM Studio uses openai_compat and usually "
+                    "http://127.0.0.1:1234/v1. Cloud: pick OpenAI or Anthropic and paste a key."
+                ).classes("text-xs text-gray-500 mt-3")
 
     footer_status = ui.label("IDLE").classes("font-mono")
     footer_usage = ui.label("CPU —  ·  RAM —").classes("font-mono")
@@ -3264,7 +3575,7 @@ def build_ui() -> None:
                     pass
                 try:
                     ui.notify(
-                        "Scan finished — download reports from Artifacts or the zip button",
+                        "Scan finished — reports are in Artifacts (including remediation.md if LLM is on)",
                         type="positive",
                     )
                 except Exception:

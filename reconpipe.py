@@ -38,6 +38,7 @@ except ImportError:
 
 import reconpipe_addons as addons
 import reconpipe_wave3 as wave3
+import reconpipe_llm as rp_llm
 
 try:
     import aiohttp
@@ -141,6 +142,7 @@ _POLITE_LOCK = threading.Lock()
 _POLITE_LAST = 0.0
 SCAN_WAYBACK_BODIES = True
 SCAN_JS_HISTORY = True
+SCAN_JS_HISTORY_MAX = 15
 SCAN_SOURCEMAPS = True
 SCAN_PUBLIC_APIS = True
 WAYBACK_BY_FILE: Dict[str, Dict[str, str]] = {}
@@ -375,6 +377,7 @@ CONTEXT_WORDS = {
     "authorization", "client_secret", "access_token", "private_key",
     "maps", "google", "firebase", "stripe", "slack", "twilio",
     "sendgrid", "mailgun", "heroku", "herokuapp", "platform-api", "shopify", "discord",
+    "hubspot", "hapikey",
     "openai", "anthropic", "gitlab", "mapbox", "npm", "pypi", "digitalocean",
     "aws_session", "session_token",
     "cloudflare", "huggingface", "notion", "grafana", "vault", "datadog",
@@ -425,6 +428,7 @@ source_fetch_urls = addons.source_fetch_urls
 looks_like_js_url = addons.looks_like_js_url
 parse_cdx_rows = addons.parse_cdx_rows
 parse_cdx_text = addons.parse_cdx_text
+select_oldest_snapshots = addons.select_oldest_snapshots
 diff_removed_lines = addons.diff_removed_lines
 list_cdx_snapshots = addons.list_cdx_snapshots
 normalize_url = addons.normalize_url
@@ -526,6 +530,15 @@ github_raw_url = wave3.github_raw_url
 parse_github_search_payload = wave3.parse_github_search_payload
 parse_gitlab_search_payload = wave3.parse_gitlab_search_payload
 collect_code_search_urls = wave3.collect_code_search_urls
+parse_forge_repo = wave3.parse_forge_repo
+repos_from_code_urls = wave3.repos_from_code_urls
+collect_ci_targets = wave3.collect_ci_targets
+collect_ci_log_files = wave3.collect_ci_log_files
+collect_paste_files = wave3.collect_paste_files
+parse_github_workflow_runs = wave3.parse_github_workflow_runs
+parse_pastebin_scrape = wave3.parse_pastebin_scrape
+parse_psbdmp_search = wave3.parse_psbdmp_search
+parse_gist_search_html = wave3.parse_gist_search_html
 docker_hub_queries = wave3.docker_hub_queries
 parse_docker_hub_search = wave3.parse_docker_hub_search
 collect_docker_hub_images = wave3.collect_docker_hub_images
@@ -545,6 +558,11 @@ harvest_spec_urls = wave3.harvest_spec_urls
 harvest_spec_secret_findings = wave3.harvest_spec_secret_findings
 extract_printable_strings = wave3.extract_printable_strings
 extract_mobile_archive = wave3.extract_mobile_archive
+parse_package_id = wave3.parse_package_id
+parse_package_ids = wave3.parse_package_ids
+fetch_android_packages = wave3.fetch_android_packages
+apkeep_cmd = wave3.apkeep_cmd
+gplaycli_cmd = wave3.gplaycli_cmd
 bucket_name_candidates = wave3.bucket_name_candidates
 parse_s3_listing = wave3.parse_s3_listing
 classify_bucket_response = wave3.classify_bucket_response
@@ -919,6 +937,7 @@ USER_KEY_FIELDS = (
     ("opsgenie", "opsgenie_key", ("OPSGENIE_API_KEY",)),
     ("github", "github_token", ("GITHUB_TOKEN", "GH_TOKEN")),
     ("gitlab", "gitlab_token", ("GITLAB_TOKEN", "GITLAB_PRIVATE_TOKEN")),
+    ("llm", "llm_key", ("RECONPIPE_LLM_KEY",)),
 )
 HIT_SOURCE_EXT = {".js", ".jsx", ".ts", ".tsx", ".map", ".json", ".html", ".htm", ".env"}
 
@@ -1362,6 +1381,7 @@ SEVERITY_HIGH = frozenset({
     "github_pat", "github_fine_pat", "github_oauth", "github_app", "gitlab_pat",
     "openai_key", "anthropic_key", "sendgrid", "heroku_api", "cloudflare_api",
     "huggingface_token", "notion_token", "linear_api_key", "supabase_service",
+    "hubspot_api",
     "digitalocean_pat", "npm_token", "pypi_token", "shopify_token", "shopify_secret",
     "slack_token", "twilio_sid", "twilio_token", "azure_sas", "mcp_credential",
 })
@@ -1610,7 +1630,7 @@ def write_html_report(
             "<article class='hit'>"
             f"<div class='sev' style='background:{color}'>{html.escape(sev)}</div>"
             f"<div class='meta'><strong>{typ}</strong> · {valid}"
-            + (f" · {verdict}" if verdict else "")
+            + (f" · priority {verdict} (rules)" if verdict else "")
             + f" · CVSS {cvss}{tag_html}</div>"
             f"<div class='key'>{key}</div>"
             f"<div class='src'><a href='{src}'>{src}</a></div>"
@@ -2213,10 +2233,11 @@ def fetch_live_js_history(
     urls: List[str],
     dl_dir: Path,
     dest_dir: Path,
+    max_versions: Optional[int] = None,
 ) -> Tuple[int, List[Dict]]:
     """
-    Full CDX timestamp history for live JS. Distinct bodies (content-hash
-    deduped) land under dest_dir/_wayback so scanners treat them like maps.
+    Wayback CDX history for live JS. Oldest unique bodies first (hash-deduped),
+    capped per URL by max_versions / --js-history-max (default 15).
     Consecutive unique versions are diffed; removed secret-like lines become findings.
     """
     dest_dir = Path(dest_dir)
@@ -2226,6 +2247,14 @@ def fetch_live_js_history(
     index: List[Dict[str, str]] = []
     removed_rows: List[Dict[str, str]] = []
     diff_findings: List[Dict] = []
+    if max_versions is None:
+        max_versions = SCAN_JS_HISTORY_MAX or addons.JS_HISTORY_MAX_VERSIONS
+    try:
+        per_url = max(1, min(int(max_versions), 200))
+    except (TypeError, ValueError):
+        per_url = addons.JS_HISTORY_MAX_VERSIONS
+    fetch_budget = min(addons.JS_HISTORY_MAX_FETCH, max(per_url * 3, per_url))
+    cdx_limit = min(addons.JS_HISTORY_CDX_LIMIT, max(per_url * 6, 24))
     js_urls = [u for u in urls if looks_like_js_url(u)][: addons.JS_HISTORY_MAX_URLS]
     ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
     for url in js_urls:
@@ -2240,14 +2269,18 @@ def fetch_live_js_history(
                 live_text = live_bytes.decode("utf-8", errors="replace")
             except OSError:
                 live_hash = ""
-        snaps = list_cdx_snapshots(url, timeout=20, limit=addons.JS_HISTORY_CDX_LIMIT)
+        snaps = select_oldest_snapshots(
+            list_cdx_snapshots(url, timeout=20, limit=cdx_limit),
+            fetch_budget,
+        )
         seen_hash: Set[str] = set()
         if live_hash:
             seen_hash.add(live_hash)
         versions: List[Tuple[str, str, str]] = []  # ts, hash, text
         fetched = 0
+        unique_kept = 0
         for snap in snaps:
-            if fetched >= addons.JS_HISTORY_MAX_FETCH:
+            if unique_kept >= per_url or fetched >= fetch_budget:
                 break
             archive = snap.get("archive_url") or ""
             if not archive:
@@ -2297,6 +2330,7 @@ def fetch_live_js_history(
                 }
             )
             written_n += 1
+            unique_kept += 1
         if live_text:
             versions.append(("live", live_hash or "live", live_text))
         for i in range(len(versions) - 1):
@@ -2449,6 +2483,8 @@ def pack_hit_bundle(
         "report.md",
         "findings.csv",
         "findings_diff.json",
+        "remediation.md",
+        "llm_report.json",
     ):
         src = Path(output_dir) / name
         if src.is_file():
@@ -4580,6 +4616,7 @@ def parse_trufflehog(output: bytes) -> List[Dict]:
         "openai":       "openai_key",
         "anthropic":    "anthropic_key",
         "sendgrid":     "sendgrid",
+        "hubspot":      "hubspot_api",
         "twilio":       "twilio_sid",
         "mailgun":      "mailgun",
         "jwt":          "jwt",
@@ -4732,6 +4769,8 @@ GITLEAKS_RULE_MAP = {
     "npm-access-token": "npm_token",
     "pypi-upload-token": "pypi_token",
     "sendgrid-api-token": "sendgrid",
+    "hubspot-api-key": "hubspot_api",
+    "hubspot-api-token": "hubspot_api",
     "twilio-api-key": "twilio_token",
     "openai": "openai_key",
     "anthropic": "anthropic_key",
@@ -6161,7 +6200,7 @@ def _metrics_finish(name: str, items_out: int = 0, errors: int = 0) -> None:
 def configure_scan_runtime(args: Any, output_dir: Path) -> None:
     global SCAN_PROXY, SCAN_PROXY_AUTH, SCAN_EXTRA_HEADERS, SCAN_POLITE_DELAY
     global SCAN_RPS, SCAN_CREDENTIALS, DOCKER_FALLBACK, FINDINGS_STREAM, PIPELINE_METRICS
-    global SCAN_WAYBACK_BODIES, SCAN_PUBLIC_APIS, SCAN_JS_HISTORY, SCAN_SOURCEMAPS
+    global SCAN_WAYBACK_BODIES, SCAN_PUBLIC_APIS, SCAN_JS_HISTORY, SCAN_JS_HISTORY_MAX, SCAN_SOURCEMAPS
     SCAN_PROXY = (getattr(args, "proxy", None) or "").strip()
     SCAN_PROXY_AUTH = (getattr(args, "proxy_auth", None) or "").strip()
     SCAN_EXTRA_HEADERS = parse_header_list(getattr(args, "header", None) or [])
@@ -6170,6 +6209,11 @@ def configure_scan_runtime(args: Any, output_dir: Path) -> None:
     DOCKER_FALLBACK = bool(getattr(args, "docker_fallback", False))
     SCAN_WAYBACK_BODIES = not bool(getattr(args, "skip_wayback_bodies", False))
     SCAN_JS_HISTORY = not bool(getattr(args, "skip_js_history", False))
+    try:
+        SCAN_JS_HISTORY_MAX = int(getattr(args, "js_history_max", None) or addons.JS_HISTORY_MAX_VERSIONS)
+    except (TypeError, ValueError):
+        SCAN_JS_HISTORY_MAX = addons.JS_HISTORY_MAX_VERSIONS
+    SCAN_JS_HISTORY_MAX = max(1, min(SCAN_JS_HISTORY_MAX, 200))
     SCAN_SOURCEMAPS = not bool(getattr(args, "skip_sourcemaps", False))
     SCAN_PUBLIC_APIS = not bool(getattr(args, "skip_public_apis", False))
     WAYBACK_BY_FILE.clear()
@@ -6423,6 +6467,8 @@ Examples:
                         help="Do not fetch Wayback snapshots when a discovered URL is dead")
     parser.add_argument("--skip-js-history", action="store_true",
                         help="Do not fetch older Wayback copies of JavaScript that is still live")
+    parser.add_argument("--js-history-max", metavar="N", type=int, default=15,
+                        help="Max unique Wayback JS versions per URL, oldest-first (default 15)")
     parser.add_argument("--skip-sourcemaps", action="store_true",
                         help="Do not fetch public JS source maps or reconstruct original sources")
     parser.add_argument("--skip-sensitive-paths", action="store_true",
@@ -6453,6 +6499,10 @@ Examples:
                         help="GitHub org to scope public code search")
     parser.add_argument("--skip-code-search", action="store_true",
                         help="Skip GitHub/GitLab public code search")
+    parser.add_argument("--skip-ci-logs", action="store_true",
+                        help="Skip public GitHub Actions / GitLab job logs and artifacts")
+    parser.add_argument("--skip-pastes", action="store_true",
+                        help="Skip Pastebin / Gist / Ghostbin paste-site search")
     parser.add_argument("--skip-docker-hub", action="store_true",
                         help="Skip Docker Hub public image search")
     parser.add_argument("--skip-image-layers", action="store_true",
@@ -6461,6 +6511,8 @@ Examples:
                         help="Unzip and scan an APK/XAPK/APKM (repeatable)")
     parser.add_argument("--ipa", metavar="FILE", action="append", default=[],
                         help="Unzip and scan an IPA (repeatable)")
+    parser.add_argument("--package", metavar="ID", action="append", default=[],
+                        help="Download an Android package (apkeep, else gplaycli) then scan it")
     parser.add_argument("--skip-buckets", action="store_true",
                         help="Do not guess/probe S3/GCS/Azure bucket names")
     parser.add_argument("--skip-openapi", action="store_true",
@@ -6484,6 +6536,36 @@ Examples:
     parser.add_argument("--smtp-to", metavar="EMAIL", help="Alert recipient")
     parser.add_argument("--pagerduty-key", metavar="KEY", help="PagerDuty Events v2 routing key")
     parser.add_argument("--opsgenie-key", metavar="KEY", help="Opsgenie API key")
+    parser.add_argument(
+        "--llm",
+        action="store_true",
+        help="After the scan, ask a local or cloud LLM to write remediation.md",
+    )
+    parser.add_argument(
+        "--skip-llm",
+        action="store_true",
+        help="Do not write an LLM remediation report (overrides Settings)",
+    )
+    parser.add_argument(
+        "--llm-provider",
+        metavar="NAME",
+        choices=["ollama", "openai", "anthropic", "openai_compat"],
+        help="LLM provider: ollama, openai, anthropic, openai_compat",
+    )
+    parser.add_argument("--llm-model", metavar="NAME", help="Model name (llama3.1, gpt-4o-mini, …)")
+    parser.add_argument(
+        "--llm-base-url",
+        metavar="URL",
+        help="Ollama or OpenAI-compatible base URL (default http://127.0.0.1:11434)",
+    )
+    parser.add_argument("--llm-key", metavar="KEY", help="Cloud LLM API key (or env RECONPIPE_LLM_KEY)")
+    parser.add_argument("--llm-timeout", metavar="SEC", type=int, help="LLM HTTP timeout (default 120)")
+    parser.add_argument(
+        "--llm-max-findings",
+        metavar="N",
+        type=int,
+        help="Cap findings sent to the LLM (default 40)",
+    )
     return parser
 
 
@@ -6543,6 +6625,8 @@ def argv_from_options(opts: Dict[str, Any]) -> List[str]:
         "secrets_db_medium": "--secrets-db-medium",
         "skip_jsleak": "--skip-jsleak",
         "skip_code_search": "--skip-code-search",
+        "skip_ci_logs": "--skip-ci-logs",
+        "skip_pastes": "--skip-pastes",
         "skip_docker_hub": "--skip-docker-hub",
         "skip_image_layers": "--skip-image-layers",
         "skip_buckets": "--skip-buckets",
@@ -6551,6 +6635,8 @@ def argv_from_options(opts: Dict[str, Any]) -> List[str]:
         "no_validation_cache": "--no-validation-cache",
         "ci": "--ci",
         "no_default_scope": "--no-default-scope",
+        "llm": "--llm",
+        "skip_llm": "--skip-llm",
     }
     for key, flag in mapping_flags.items():
         if opts.get(key):
@@ -6593,6 +6679,12 @@ def argv_from_options(opts: Dict[str, Any]) -> List[str]:
         "github_org": "--github-org",
         "watch": "--watch",
         "certstream_seconds": "--certstream-seconds",
+        "llm_provider": "--llm-provider",
+        "llm_model": "--llm-model",
+        "llm_base_url": "--llm-base-url",
+        "llm_key": "--llm-key",
+        "llm_timeout": "--llm-timeout",
+        "llm_max_findings": "--llm-max-findings",
     }
     for key, flag in value_flags.items():
         val = opts.get(key)
@@ -6628,6 +6720,11 @@ def argv_from_options(opts: Dict[str, Any]) -> List[str]:
     for ipa in opts.get("ipa") or []:
         if str(ipa).strip():
             argv += ["--ipa", str(ipa).strip()]
+    for pkg in opts.get("package") or []:
+        if str(pkg).strip():
+            argv += ["--package", str(pkg).strip()]
+    if opts.get("js_history_max") not in (None, ""):
+        argv += ["--js-history-max", str(int(opts["js_history_max"]))]
     for h in opts.get("ignore_hash") or []:
         if str(h).strip():
             argv += ["--ignore-hash", str(h).strip()]
@@ -6692,6 +6789,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     apply_saved_keys(args)
     if getattr(args, "ci", False):
         apply_ci_defaults(args)
+    rp_llm.apply_llm_settings(args)
     if getattr(args, "rescan", False):
         apply_rescan_defaults(args)
         log(
@@ -7453,6 +7551,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             files_to_scan.write_text("\n".join(url_list))
     extra_urls: List[str] = []
     hub_images: List[str] = []
+    code_urls: List[str] = []
     repo_dir_scanned: Optional[Path] = None
     env_hits = env_like_urls(harvest_discovery_url_pool(output_dir, url_list))
     if env_hits:
@@ -7507,6 +7606,36 @@ def main(argv: Optional[List[str]] = None) -> int:
             log("git clone failed — skipping --repo", "warn")
 
     apk_inputs = list(getattr(args, "apk", None) or []) + list(getattr(args, "ipa", None) or [])
+    pkg_ids = parse_package_ids(getattr(args, "package", None) or [])
+    if pkg_ids:
+        fetch_dir = output_dir / "mobile_fetch"
+        try:
+            fetched = fetch_android_packages(
+                pkg_ids,
+                fetch_dir,
+                run=run_cmd,
+                docker_fallback=bool(DOCKER_FALLBACK),
+            )
+        except Exception as exc:
+            fetched = []
+            log(f"package fetch: {str(exc)[:120]}", "warn")
+        if fetched:
+            apk_inputs.extend(str(p) for p in fetched)
+            log(f"Package fetch: {len(fetched)} archive(s) via apkeep/gplaycli", "success")
+        else:
+            have = []
+            if shutil.which("apkeep"):
+                have.append("apkeep")
+            if shutil.which("gplaycli"):
+                have.append("gplaycli")
+            if have:
+                log("Package fetch: apkeep/gplaycli ran but produced no APK", "warn")
+            else:
+                log(
+                    "Package fetch: install apkeep (preferred) or gplaycli "
+                    "to download --package ids, or pass --apk with a local file",
+                    "warn",
+                )
     if apk_inputs:
         apk_dir = output_dir / "mobile_extract"
         apk_dir.mkdir(exist_ok=True)
@@ -7544,7 +7673,55 @@ def main(argv: Optional[List[str]] = None) -> int:
         else:
             log("Code search: no extra URLs (set GITHUB_TOKEN for higher limits)", "info")
 
-    hub_images: List[str] = []
+    if not getattr(args, "skip_ci_logs", False):
+        gh_tok = (getattr(args, "github_token", None) or "").strip()
+        gl_tok = (getattr(args, "gitlab_token", None) or "").strip()
+        try:
+            ci_targets = collect_ci_targets(
+                repo_url=str(getattr(args, "repo", None) or ""),
+                github_org=(getattr(args, "github_org", None) or "").strip(),
+                code_urls=code_urls,
+                github_token=gh_tok,
+            )
+            ci_dir = output_dir / "ci_logs"
+            ci_files = collect_ci_log_files(
+                ci_targets,
+                ci_dir,
+                github_token=gh_tok,
+                gitlab_token=gl_tok,
+            )
+        except Exception as exc:
+            ci_files = []
+            log(f"CI logs: {str(exc)[:120]}", "warn")
+        if ci_files:
+            extra_urls.extend(str(p) for p in ci_files)
+            (output_dir / "ci_logs.json").write_text(
+                json.dumps([str(p) for p in ci_files], indent=2), encoding="utf-8"
+            )
+            log(f"CI logs/artifacts: {len(ci_files)} file(s) from public workflows", "success")
+        else:
+            log("CI logs: no public workflow logs or artifacts", "info")
+
+    if not getattr(args, "skip_pastes", False):
+        try:
+            paste_dir = output_dir / "paste_sources"
+            paste_files = collect_paste_files(
+                args.domain,
+                paste_dir,
+                github_token=(getattr(args, "github_token", None) or "").strip(),
+            )
+        except Exception as exc:
+            paste_files = []
+            log(f"paste search: {str(exc)[:120]}", "warn")
+        if paste_files:
+            extra_urls.extend(str(p) for p in paste_files)
+            (output_dir / "paste_urls.json").write_text(
+                json.dumps([str(p) for p in paste_files], indent=2), encoding="utf-8"
+            )
+            log(f"Paste sites: {len(paste_files)} Pastebin/Gist/Ghostbin hit(s)", "success")
+        else:
+            log("Paste sites: no matching public pastes", "info")
+
     if not getattr(args, "skip_docker_hub", False):
         try:
             hub_images = collect_docker_hub_images(
@@ -7753,7 +7930,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             n_hist, history_diff = fetch_live_js_history(to_fetch, dl_dir, recon_dir)
             if n_hist:
                 log(
-                    f"JS history: {n_hist} distinct archived version(s) → "
+                    f"JS history: {n_hist} distinct archived version(s) "
+                    f"(≤{SCAN_JS_HISTORY_MAX}/URL, oldest first) → "
                     f"{recon_dir / '_wayback'}",
                     "success",
                 )
@@ -7769,6 +7947,12 @@ def main(argv: Optional[List[str]] = None) -> int:
             scan_roots.append(recon_dir)
         if repo_dir_scanned and Path(repo_dir_scanned).is_dir():
             scan_roots.append(Path(repo_dir_scanned))
+        ci_scan = output_dir / "ci_logs"
+        if ci_scan.is_dir() and any(p.is_file() for p in ci_scan.rglob("*")):
+            scan_roots.append(ci_scan)
+        paste_scan = output_dir / "paste_sources"
+        if paste_scan.is_dir() and any(p.is_file() for p in paste_scan.rglob("*")):
+            scan_roots.append(paste_scan)
 
         image_layer_findings: List[Dict] = []
         if not getattr(args, "skip_image_layers", False):
@@ -8410,6 +8594,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     log(f"findings.csv   → {csv_path}", "success")
     jsonld_path = write_jsonld_report(output_dir / "report.jsonld", args.domain, validated)
     log(f"report.jsonld  → {jsonld_path}", "success")
+    try:
+        rem_path = rp_llm.maybe_write_llm_report(
+            output_dir, args.domain, validated, exposures, informational, args,
+        )
+        if rem_path:
+            log(f"remediation.md → {rem_path}", "success")
+    except Exception as exc:
+        log(f"LLM remediation skipped: {exc}", "warn")
     n_tpl = write_nuclei_templates(output_dir, valid_only)
     if n_tpl:
         log(f"nuclei templates: {n_tpl}", "success")

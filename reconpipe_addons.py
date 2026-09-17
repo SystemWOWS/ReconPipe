@@ -96,6 +96,7 @@ DOCKER_IMAGES = {
     "dnsx": "projectdiscovery/dnsx",
     "naabu": "projectdiscovery/naabu",
     "gitleaks": "zricethezav/gitleaks",
+    "apkeep": "ghcr.io/efforg/apkeep",
 }
 CVSS_BY_SEVERITY = {
     "critical": 9.8,
@@ -247,8 +248,9 @@ SOURCE_MAPPING_URL_RE = re.compile(
 )
 JS_URL_SUFFIXES = (".js", ".mjs", ".cjs", ".jsx")
 JS_HISTORY_MAX_URLS = 40
-JS_HISTORY_MAX_FETCH = 80
-JS_HISTORY_CDX_LIMIT = 500
+JS_HISTORY_MAX_VERSIONS = 15
+JS_HISTORY_MAX_FETCH = 60
+JS_HISTORY_CDX_LIMIT = 120
 SOURCEMAP_MAX_MAPS = 80
 RECONSTRUCT_MAX_FILES = 400
 
@@ -393,25 +395,58 @@ def source_fetch_urls(map_content: str, map_url: str = "") -> List[str]:
 
 
 def parse_cdx_text(text: str) -> List[Dict[str, str]]:
-    """Parse CDX `output=text&fl=original,timestamp` (all snapshots, oldest-first)."""
+    """Parse CDX `output=text&fl=original,timestamp[,digest]` (oldest-first)."""
     rows: List[Dict[str, str]] = []
     seen_ts: set = set()
     for line in (text or "").splitlines():
         line = line.strip()
         if not line or line.lower().startswith("original"):
             continue
-        parts = line.rsplit(None, 1)
-        if len(parts) != 2:
+        tokens = line.split()
+        digest = ""
+        if len(tokens) >= 3 and tokens[-2].isdigit() and not tokens[-1].isdigit():
+            ts = tokens[-2].strip()
+            digest = tokens[-1].strip()
+            original = " ".join(tokens[:-2]).strip()
+        elif len(tokens) >= 2 and tokens[-1].isdigit():
+            ts = tokens[-1].strip()
+            original = " ".join(tokens[:-1]).strip()
+        else:
             continue
-        original, ts = parts[0].strip(), parts[1].strip()
         if not ts.isdigit() or not original:
             continue
         if ts in seen_ts:
             continue
         seen_ts.add(ts)
-        rows.append({"original": original, "timestamp": ts})
+        row = {"original": original, "timestamp": ts}
+        if digest:
+            row["digest"] = digest
+        rows.append(row)
     rows.sort(key=lambda r: r["timestamp"])
     return rows
+
+
+def select_oldest_snapshots(
+    snaps: List[Dict[str, str]],
+    limit: int,
+) -> List[Dict[str, str]]:
+    """Oldest-first, digest-unique when CDX provided a digest, capped at `limit`."""
+    cap = max(1, int(limit or 1))
+    ordered = sorted(
+        snaps or [],
+        key=lambda r: (str(r.get("timestamp") or ""), str(r.get("digest") or "")),
+    )
+    out: List[Dict[str, str]] = []
+    seen: set = set()
+    for snap in ordered:
+        marker = (snap.get("digest") or "").strip() or (snap.get("timestamp") or "")
+        if not marker or marker in seen:
+            continue
+        seen.add(marker)
+        out.append(snap)
+        if len(out) >= cap:
+            break
+    return out
 
 
 def diff_removed_lines(old_text: str, new_text: str) -> List[str]:
@@ -1391,7 +1426,7 @@ def list_cdx_snapshots(
     timeout: int = 12,
     limit: int = JS_HISTORY_CDX_LIMIT,
 ) -> List[Dict[str, str]]:
-    """Full timestamp history for an exact URL via CDX text output. Network call."""
+    """CDX snapshots for an exact URL (oldest-first, digest-collapsed). Network call."""
     target = (url or "").strip()
     if not target or is_archive_org_url(target):
         return []
@@ -1400,8 +1435,9 @@ def list_cdx_snapshots(
         {
             "url": target,
             "output": "text",
-            "fl": "original,timestamp",
+            "fl": "original,timestamp,digest",
             "filter": "statuscode:200",
+            "collapse": "digest",
             "limit": str(cap),
         }
     )

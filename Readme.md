@@ -5,7 +5,7 @@ ReconPipe finds leaked API keys and secrets on a target you are authorized to te
 It enumerates hosts, crawls and archives URLs, downloads likely leak surfaces (JavaScript, `.env`, source maps, configs), scans them with several engines, then **live-validates** matches against provider APIs so you can tell a dead string from a working credential.
 
 ```
-subdomains → live hosts → URL discovery → download → secret scan → validate → reports
+subdomains → live hosts → URL discovery → extra surfaces → download → secret scan → validate → reports
 ```
 
 Patterns, confidence scores, and validators load from `[config.yaml](config.yaml)`. Overlay extra rules with `--config`. Missing tools are skipped; the pipeline keeps going.
@@ -25,8 +25,10 @@ Use this only on assets you own or have written permission to test. Validated ke
 - [API keys](#api-keys)
 - [Usage](#usage)
 - [Desktop GUI](#desktop-gui)
+- [LLM remediation](#llm-remediation)
 - [Configuration](#configuration)
 - [Secret detection](#secret-detection)
+- [Extra leak surfaces](#extra-leak-surfaces)
 - [Output](#output)
 - [CLI reference](#cli-reference)
 - [Troubleshooting](#troubleshooting)
@@ -128,7 +130,7 @@ RECONPIPE_IMAGE=ghcr.io/systemwows/reconpipe:v1.3 docker compose pull
 | Path on host     | Path in container        | What it is                                      |
 | ---------------- | ------------------------ | ----------------------------------------------- |
 | `scans/`         | `/work`                  | Output folders (`recon_example_com/`, …)        |
-| `docker-home/`   | `/root/.reconpipe`       | `keys.yaml`, `targets.yaml`, `history.yaml`     |
+| `docker-home/`   | `/root/.reconpipe`       | `keys.yaml`, `settings.yaml`, `targets.yaml`, `history.yaml` |
 
 Pass API keys as env vars (`CHAOS_KEY`, `GITHUB_TOKEN`, …) or save them from the GUI into `docker-home/keys.yaml`.
 
@@ -153,15 +155,15 @@ Every stage is optional. If a binary is missing, ReconPipe logs it and continues
 
 | Stage          | What runs                                                                                                                        | Purpose                          |
 | -------------- | -------------------------------------------------------------------------------------------------------------------------------- | -------------------------------- |
-| Subdomains     | Chaos, subfinder, amass, assetfinder, findomain, crt.sh, optional Shodan / Censys / ZoomEye                                      | Build a host list                |
+| Subdomains     | Chaos, subfinder, amass, assetfinder, findomain, crt.sh, optional Shodan / Censys / ZoomEye / certstream                         | Build a host list                |
 | Resolve / live | dnsx, httpx                                                                                                                      | Keep hosts that actually respond |
 | URL discovery  | Katana, gospider, hakrawler, paramspider, LinkFinder                                                                             | Active crawl and JS endpoints    |
 | Archives       | waymore → gau → waybackurls                                                                                                      | Historical URLs                  |
-| Extra surface  | Sensitive paths (`.env`, `.git/config`, swagger), Wayback bodies for dead URLs, optional Nuclei / naabu / screenshots            | Leak files that crawlers miss    |
+| Extra surfaces | Sensitive paths; GitHub/GitLab code search + CI logs; Pastebin/Gists; Docker Hub/layers; buckets; OpenAPI; `--repo` / `--apk` / `--package`; JS maps + history; optional Nuclei / naabu / screenshots | Leak files crawlers miss. Detail: [Extra leak surfaces](#extra-leak-surfaces) |
 | Download       | Parallel fetch of JS, maps, JSON, HTML, env-like URLs                                                                            | Local copies for scanners        |
 | Secret scan    | TruffleHog, Gitleaks, jsleak, `config.yaml` regex, [secrets-patterns-db](https://github.com/mazen160/secrets-patterns-db) extras | Extract candidates               |
 | Validate       | Async HTTP checks (aiohttp) against provider APIs                                                                                | Confirm the key still works      |
-| Report         | JSON, SARIF, HTML/Markdown, HackerOne/Jira drafts                                                                                | Review and CI                    |
+| Report         | JSON, SARIF, HTML/Markdown, HackerOne/Jira drafts; rule-based P1/P2/P3 in `ai_verdict.json`; optional LLM `remediation.md`       | Review, CI, verify-and-fix       |
 
 
 `--files urls.txt` skips URL discovery. `--subdomains hosts.txt` skips Chaos. `--no-trufflehog` uses only the built-in regex engine. `--no-validate` stops after detection.
@@ -265,9 +267,10 @@ None of these are required. Missing keys skip that source; a source error never 
 | Censys                 | `CENSYS_API_ID`, `CENSYS_API_SECRET` | Extra hostnames                                                                    |
 | ZoomEye                | `ZOOMEYE_API_KEY`                    | Extra hostnames                                                                    |
 | crt.sh                 | —                                    | Certificate Transparency (no key)                                                  |
+| LLM (optional)         | `RECONPIPE_LLM_KEY` (or `OPENAI_API_KEY` / `ANTHROPIC_API_KEY`) | Cloud LLM for `remediation.md`; local Ollama needs no key        |
 
 
-CLI flags (`--chaos-key`, `--shodan-key`, …) override the environment. The GUI **Save keys** panel writes `~/.reconpipe/keys.yaml` (mode `0600`). Resolution order is **CLI → environment → saved file**.
+CLI flags (`--chaos-key`, `--shodan-key`, `--llm-key`, …) override the environment. The GUI **Save keys** panel and **Settings** tab write `~/.reconpipe/keys.yaml` and `settings.yaml` (mode `0600`). Resolution order is **CLI → environment → saved file**.
 
 Override the config directory with `RECONPIPE_HOME`.
 
@@ -408,6 +411,23 @@ python3 reconpipe.py -d example.com --smtp-host smtp.example.com --smtp-to you@e
 
 PagerDuty and Opsgenie flags are also available. `--no-notify` skips the desktop notification when a scan finishes.
 
+### LLM report after a scan
+
+```bash
+# Local Ollama (default provider). Pull a model first: ollama pull llama3.1
+python3 reconpipe.py -d example.com --llm --llm-provider ollama --llm-model llama3.1
+
+# LM Studio / vLLM / llama.cpp (OpenAI-compatible)
+python3 reconpipe.py -d example.com --llm --llm-provider openai_compat \
+  --llm-base-url http://127.0.0.1:1234/v1 --llm-model local-model
+
+# Cloud
+python3 reconpipe.py -d example.com --llm --llm-provider openai --llm-model gpt-4o-mini
+python3 reconpipe.py -d example.com --skip-llm   # override Settings if LLM is on
+```
+
+`--ci` skips the LLM unless you also pass `--llm`. See [LLM remediation](#llm-remediation).
+
 ---
 
 
@@ -428,18 +448,48 @@ RECONPIPE_GUI_NATIVE=0 python3 reconpipegui.py   # force browser even on a deskt
 
 The window covers the same options as the CLI: domain, skips, concurrency, intel keys, Shopify host, config overlays, SARIF, headless, resume, and the extra scanners.
 
+Tabs:
+
+- **Scan** — target, intel keys, stage skips, start / cancel
+- **Apps** — APK / IPA / package IDs
+- **Console** — live log and stage tracker (`reconpipe.py` as a cancellable subprocess)
+- **Findings** — actionable / informational / exposures, redacted secrets, Reveal, re-test
+- **Key Tester** — paste one or more credentials, pick a type (auto-detected when the prefix is unique), live-check without a full scan. Includes HubSpot private-app tokens (`pat-na1-…` / `pat-eu1-…` / `pat-ap1-…`)
+- **Artifacts** — preview/download reports (including `remediation.md`) plus a zip when the scan finishes
+- **History** — past scans (`~/.reconpipe/history.yaml`) with Open / Rescan
+- **Settings** — dark mode, LLM provider (Ollama / OpenAI-compatible / OpenAI / Anthropic), model, base URL, API key, auto-run after scan, Test LLM, Generate report from a finished workspace
+
 Also included:
 
 - Tool preflight (what is on `PATH`)
 - Live CPU / RAM meters (header + footer) for the GUI and the scan process tree
-- Live console and stage tracker (`reconpipe.py` as a cancellable subprocess)
 - Domain queue, saved targets, and **Rescan** (reuses URL list + output folder)
-- History of past scans (persisted in `~/.reconpipe/history.yaml`) with Open / Rescan
-- Findings browser (actionable / informational / exposures) with redacted secrets and Reveal
-- Re-test a finding with the configured validator
-- Artifact preview and download (`findings.json`, `valid_keys.json`, `summary.txt`, SARIF, …) plus a zip of all reports when the scan finishes
 
 Do not bind `--browser` beyond localhost on an untrusted network. Result files can contain live secrets.
+
+---
+
+
+
+## LLM remediation
+
+Optional. After findings are saved, ReconPipe can write `remediation.md`: how to **verify** each hit is still exposed (re-check the listed source and Key Tester) and how to **fix** it (rotate/revoke, remove it from the leak surface, use a secret manager).
+
+This is separate from `ai_verdict.json`, which is still a **rule-based** P1/P2/P3 rank for AI-vendor / MCP hits and does not call a model.
+
+Only **redacted fingerprints** are sent to the model, not full secrets. If the LLM is unreachable, a local template with the same Verify / Fix sections is written instead.
+
+**GUI:** Settings → enable LLM reports → Save. Leave **Run automatically when a scan finishes** on, or load a finished output folder and click **Generate report from finished scan**.
+
+**Local (no cloud key):**
+
+1. Install [Ollama](https://ollama.com/) and `ollama pull llama3.1`.
+2. Provider `ollama`, base URL `http://127.0.0.1:11434` (default).
+3. LM Studio / llama.cpp: provider `openai_compat`, base URL usually `http://127.0.0.1:1234/v1`.
+
+**Cloud:** provider `openai` or `anthropic`, paste a key (or `RECONPIPE_LLM_KEY` / `OPENAI_API_KEY` / `ANTHROPIC_API_KEY`).
+
+Saved in `~/.reconpipe/settings.yaml` (and the key in `keys.yaml`). Docker: `docker-home/settings.yaml`.
 
 ---
 
@@ -452,7 +502,7 @@ Default rules live in `config.yaml` next to `reconpipe.py`:
 
 | Key                             | Role                                                                       |
 | ------------------------------- | -------------------------------------------------------------------------- |
-| `patterns`                      | Regex detectors (~168 types)                                               |
+| `patterns`                      | Regex detectors (~169 types)                                               |
 | `confidence` / `min_confidence` | Score threshold (default minimum: 30)                                      |
 | `validators`                    | Live checks (URL, auth, AWS STS, Twilio pair, JWT inspect, URI inspect, …) |
 | `informational_types`           | Public-by-design hits (Stripe publishable, Firebase URL, …)                |
@@ -497,7 +547,7 @@ ReconPipe stacks several engines. Hits are de-duplicated (SHA-256 of the secret)
 | Built-in JS parser                                        | Endpoints + assignments in downloaded JS                                                                                    |
 
 
-Covered families include cloud (AWS, GCP, Azure, OCI), git forges, payments, email/SMS, Slack/Discord/Telegram, AI vendors (OpenAI `sk-` / `sk-proj-` / `sk-svcacct-`, Anthropic `sk-ant-api03-` / `sk-ant-admin01-`, Hugging Face `hf_`), PaaS (Vercel, Railway, Render, Fly, Heroku), data stores (Mongo, Postgres, Redis URIs), CI, observability, and generic `api_key=` assignments. Informational hits (publishable keys, client SDK IDs) are stored separately and are not treated as secrets.
+Covered families include cloud (AWS, GCP, Azure, OCI), git forges, payments, email/SMS, Slack/Discord/Telegram, CRM (HubSpot private-app `pat-na1-` / `pat-eu1-` / `pat-ap1-` tokens; live-check `GET https://api.hubapi.com/integrations/v1/me`), AI vendors (OpenAI `sk-` / `sk-proj-` / `sk-svcacct-`, Anthropic `sk-ant-api03-` / `sk-ant-admin01-`, Hugging Face `hf_`), PaaS (Vercel, Railway, Render, Fly, Heroku), data stores (Mongo, Postgres, Redis URIs), CI, observability, and generic `api_key=` assignments. Informational hits (publishable keys, client SDK IDs) are stored separately and are not treated as secrets.
 
 Validators send `Referer: https://<target>/` so domain-restricted keys are more likely to exercise than fail as 403 from your IP. AWS access keys pair with nearby secrets for STS. OpenAI keys are checked with `GET https://api.openai.com/v1/models`, Anthropic with `GET https://api.anthropic.com/v1/models` (`x-api-key` + `anthropic-version: 2023-06-01`), Hugging Face with `GET https://huggingface.co/api/whoami-v2`. PayPal, WooCommerce, Mixpanel, and Algolia halves are paired the same way when they share a source. Database URIs are inspected locally — ReconPipe does not connect to leaked database hosts.
 
@@ -511,15 +561,29 @@ These run during discovery unless you skip them.
 
 **Public code search** — GitHub (and GitLab with a token) for the target domain, then the same regex/validators on the raw files. Queries also look for MCP client configs (`mcp.json`, `claude_desktop_config.json`) and AI key prefixes (`sk-proj-`, `sk-ant-`, `hf_`). Set `GITHUB_TOKEN` (or `--github-token`) to raise the search rate limit. `--github-org acme` scopes to an org. `--skip-code-search` disables it.
 
+**CI logs / build artifacts** — For `--repo`, `--github-org`, and any GitHub/GitLab project found in code search, ReconPipe pulls recent **public** GitHub Actions run logs (ZIP) and lists/downloads build artifacts, plus GitLab job traces and job artifacts. Those files land in `ci_logs/` and go through the same regex / TruffleHog / Gitleaks pass as git history — secrets often appear in a build log even when they were never committed. Artifact ZIP download may 403 without a token; listing and run logs are the unauthenticated path. `--skip-ci-logs` disables it.
+
+**Paste sites** — Separate from git repos: recent Pastebin dumps (scraping API when the Pro/IP allowlist works, plus [psbdmp.ws](https://psbdmp.ws) keyword search), GitHub Gists (public timeline + gist.github.com search — REST code search does not cover gists), and a Ghostbin probe (often offline). Queries use the target domain plus known prefixes (`AKIA`, `sk-`, `ghp_`, …). Matching bodies are written to `paste_sources/`. `--skip-pastes` disables it.
+
 **Docker Hub / image layers** — Paired with GitHub as a second primary source. ReconPipe searches Docker Hub for the target name, plus any `FROM` / `image:` refs found in Dockerfiles, Compose, and K8s/Terraform during `--iac-scan` / `--repo`. Public images are pulled (docker or Trivy) and **every layer** is scanned for baked-in `.env`, MCP configs, and gcloud ADC files — the same idea as git-repo scanning, different artifact. `--skip-docker-hub` / `--skip-image-layers` disable the two halves.
 
-**AI / MCP configs** — The sensitive-path probe now hits 2026 leak surfaces: `.cursor/mcp.json`, `.anthropic/config.json`, `.vscode/mcp.json`, `.mcp.json`, `claude_desktop_config.json`, Windsurf/Continue/Codex paths, and web-root equivalents of `~/.config/gcloud/application_default_credentials.json`. JSON `mcpServers` / `env` / `headers` / `--api-key=` args are parsed specifically. GitGuardian's *State of Secrets Sprawl 2026* found **24,008** unique secrets in public MCP configs, **2,117** still live (~9%) — so these hits are live-validated and ranked by **AI-verdict** (`P1`/`P2`/`P3` in `ai_verdict.json` and the HTML report).
+**AI-vendor / MCP configs** — The sensitive-path probe hits leak surfaces such as `.cursor/mcp.json`, `.anthropic/config.json`, `.vscode/mcp.json`, `.mcp.json`, `claude_desktop_config.json`, Windsurf/Continue/Codex paths, and web-root equivalents of `~/.config/gcloud/application_default_credentials.json`. JSON `mcpServers` / `env` / `headers` / `--api-key=` args are parsed specifically. GitGuardian's *State of Secrets Sprawl 2026* found **24,008** unique secrets in public MCP configs, **2,117** still live (~9%).
 
-**Mobile apps** — GUI **Apps** tab, or CLI `--apk app.apk` / `--ipa app.ipa` (repeatable; `.xapk` / `.apkm` too). Unzips the archive, keeps JS/JSON/XML/plist, strings-dumps binaries (Firebase, Maps keys, `.env`), and scans those files. In Docker, upload the package on the Apps tab (host `/home/.../Downloads` paths are not visible in the container).
+After validation, those hits (and every other finding) get a **rule-based priority**, not a model call. The field is still named `ai_verdict` in `ai_verdict.json` / HTML (`P1` / `P2` / `P3`) because it ranks **AI-vendor keys** (OpenAI / Anthropic / Hugging Face) and MCP-config leaks:
+
+| Priority | Meaning |
+| -------- | ------- |
+| **P1** | Live AI-vendor or MCP credential, or a combined score ≥ 80 |
+| **P2** | Unverified or dead AI/MCP hit, or score ≥ 60 |
+| **P3** | Everything else |
+
+The score starts from regex confidence and adds/subtracts fixed points for: AI-provider type, MCP config source, live vs dead validation, severity, and container-image origin. That ranking does **not** call an LLM. Optional model-written verify/fix text is `remediation.md` — see [LLM remediation](#llm-remediation).
+
+**Mobile apps** — GUI **Apps** tab, or CLI `--apk app.apk` / `--ipa app.ipa` (repeatable; `.xapk` / `.apkm` too). `--package com.example.app` (repeatable) downloads the APK first with [apkeep](https://github.com/EFForg/apkeep) (preferred; default source APKPure, no Play credentials) or `gplaycli`, then runs the same extract/scan. Pin a version with `com.example.app@1.2.3` (apkeep). Unzips the archive, keeps JS/JSON/XML/plist, strings-dumps binaries (Firebase, Maps keys, `.env`), and scans those files. In Docker, upload the package on the Apps tab (host `/home/.../Downloads` paths are not visible in the container), or install `apkeep` in the image / use `--docker-fallback`.
 
 **JS source maps** — After download, every `.js` file is checked for `//# sourceMappingURL=` and for `same-url.js.map`. A public map is parsed (`sourcesContent`, or HTTP fetch of listed `sources`) and the original files are written to `reconstructed_sources/`. TruffleHog, Gitleaks, and `config.yaml` regex scan that tree like downloaded JS, then the same live validators run. `--skip-sourcemaps` disables it. Public maps still also appear in `source_map_exposures.json`.
 
-**Historical live JS** — For every discovered `.js` URL, ReconPipe queries Wayback CDX for the **full timestamp list** (`output=text&fl=original,timestamp`), not only the newest snapshot. Each body is downloaded and **deduped by content hash** (many timestamps are byte-identical). Unique versions land in `reconstructed_sources/_wayback/` so TruffleHog, Gitleaks, regex, and validators treat them like current / map-reconstructed code. Consecutive unique versions are diffed; lines that disappeared — a key the developer “cleaned up” that still sits in an old copy — are flagged in `js_history_removed.json` and as `js_history_diff` findings. `--skip-js-history` disables it. `--skip-wayback-bodies` only skips snapshots for URLs that fail to download.
+**Historical live JS** — For every discovered `.js` URL (capped at 40 URLs), ReconPipe queries Wayback CDX (`collapse=digest`, oldest-first) and downloads **unique** bodies. Default is **15 unique versions per URL** (`--js-history-max N`, range 1–200), oldest first — older copies are the ones most likely to still hold a key that was later removed. Hash-identical timestamps are skipped. Unique versions land in `reconstructed_sources/_wayback/` so TruffleHog, Gitleaks, regex, and validators treat them like current / map-reconstructed code. Consecutive unique versions are diffed; lines that disappeared are flagged in `js_history_removed.json` and as `js_history_diff` findings. `--skip-js-history` turns the stage off. `--skip-wayback-bodies` only skips snapshots for URLs that fail to download.
 
 **Cloud buckets** — Guess S3/GCS/Azure names from the domain, probe listing, and queue readable objects that look like configs. `--skip-buckets` disables it. Only names derived from the target are tried.
 
@@ -529,7 +593,7 @@ These run during discovery unless you skip them.
 
 **`--watch SECONDS`** — CLI loop: run the full scan, sleep, repeat. Combine with the store to spot newly valid keys.
 
-**`--ci`** — Shift-left: skip live recon (including GitHub/GitLab code search, Docker Hub, and bucket probes), clone/scan `--repo` (default: current directory), write SARIF, still exit 1 on live keys.
+**`--ci`** — Shift-left: skip live recon (including GitHub/GitLab code search, CI logs, paste sites, Docker Hub, and bucket probes), clone/scan `--repo` (default: current directory), write SARIF, still exit 1 on live keys. The LLM report is skipped unless you also pass `--llm`.
 
 ```bash
 python3 reconpipe.py --ci --repo .
@@ -566,14 +630,15 @@ Start here:
 | `source_map_exposures.json`              | Public `.map` files                          |
 | `reconstructed_sources/`                 | Original files from maps + unique archived JS |
 | `js_history.json` / `js_history_removed.json` | Wayback JS index and removed-line diffs   |
-| `ai_verdict.json`                        | P1/P2/P3 ranking for AI/MCP findings     |
+| `ai_verdict.json`                        | Rule-based P1/P2/P3 priority (not an LLM) |
+| `remediation.md` / `llm_report.json`     | Verify-and-fix writeup (LLM or local template) |
 | `docker_hub_images.json` / `image_refs.json` | Public images queued for layer scan   |
 | `results.sarif`                          | SARIF 2.1.0 for CI                           |
 | `export_hackerone.md` / `export_jira.md` | Draft write-ups                              |
 | `.reconpipe_ignore.json`                 | Baseline (type + source, or `--ignore-hash`) |
 
 
-Useful intermediates: `subdomains.txt`, `live_hosts.txt`, `files_to_scan.txt`, `downloaded_files/`, `reconstructed_sources/`, `image_layers/`, `js_history.json`, `js_history_removed.json`, `js_endpoints.json`, `js_secrets.json`, `gitleaks.json`, `jsleak.txt`, `sensitive_paths.txt`, `wayback_sources.json`, `code_search_urls.txt`, `docker_hub_images.json`, `image_refs.json`, `ai_verdict.json`, `buckets.json`, `openapi_urls.txt`, `download_etag.json`, `pipeline_metrics.json`, `checkpoint.json`.
+Useful intermediates: `subdomains.txt`, `live_hosts.txt`, `files_to_scan.txt`, `downloaded_files/`, `reconstructed_sources/`, `image_layers/`, `js_history.json`, `js_history_removed.json`, `js_endpoints.json`, `js_secrets.json`, `gitleaks.json`, `jsleak.txt`, `sensitive_paths.txt`, `wayback_sources.json`, `code_search_urls.txt`, `docker_hub_images.json`, `image_refs.json`, `ai_verdict.json`, `remediation.md`, `llm_report.json`, `buckets.json`, `openapi_urls.txt`, `download_etag.json`, `pipeline_metrics.json`, `checkpoint.json`.
 
 Keep the output directory private. `valid_keys.json` is the highest-risk file.
 
@@ -598,6 +663,8 @@ Run `python3 reconpipe.py -h` for the full list. Grouped below.
 | `--include-pattern FILE` / `--exclude-pattern FILE` | Host globs                               |
 | `--repo URL`                                        | Clone and scan a git repo                |
 | `--repo-shallow`                                    | `--depth 1` clone (no history scan)      |
+| `--apk FILE` / `--ipa FILE`                         | Unzip and scan a local mobile app        |
+| `--package ID`                                      | Fetch an Android app (apkeep / gplaycli) then scan |
 | `--iac-scan`                                        | Also walk Docker / K8s / Terraform files |
 
 
@@ -615,6 +682,7 @@ Run `python3 reconpipe.py -h` for the full list. Grouped below.
 | `--nuclei` `--nuclei-templates PATH` `--nuclei-import FILE`                                | Nuclei                                       |
 | `--skip-wayback-bodies`                                                                    | Do not fetch Wayback snapshots for dead URLs |
 | `--skip-js-history`                                                                        | Do not fetch older copies of still-live JS   |
+| `--js-history-max N`                                                                       | Unique Wayback JS versions per URL (default 15, oldest first) |
 | `--skip-sourcemaps`                                                                        | Do not reconstruct original files from maps  |
 | `--skip-sensitive-paths`                                                                   | Skip `.env` / `.git` / swagger / MCP probes |
 | `--spray`                                                                                  | Opt-in extra leak-path brute                 |
@@ -622,6 +690,9 @@ Run `python3 reconpipe.py -h` for the full list. Grouped below.
 | `--no-validate`                                                                            | Detection only                               |
 | `--headless`                                                                               | Katana Chrome for SPAs                       |
 | `--amass-active`                                                                           | Amass without `-passive`                     |
+| `--llm` / `--skip-llm`                                                                     | Write / skip `remediation.md` after the scan |
+| `--llm-provider` `--llm-model` `--llm-base-url` `--llm-key`                                | Ollama, openai_compat, openai, anthropic     |
+| `--llm-timeout SEC` `--llm-max-findings N`                                                 | LLM HTTP timeout (default 120) and cap       |
 
 
 **Secrets packs**
@@ -635,11 +706,14 @@ Run `python3 reconpipe.py -h` for the full list. Grouped below.
 | `--secrets-db-medium`                          | Also keep medium-confidence rules     |
 | `--skip-public-apis` / `--refresh-public-apis` | Query-string vendor key catalog       |
 | `--skip-code-search`                           | Skip GitHub/GitLab public code search |
+| `--skip-ci-logs`                               | Skip public Actions / GitLab job logs |
+| `--skip-pastes`                                | Skip Pastebin / Gist / Ghostbin       |
 | `--skip-docker-hub`                            | Skip Docker Hub public image search   |
 | `--skip-image-layers`                          | Skip pull/scan of public image layers |
 | `--github-token` / `--gitlab-token`            | Tokens for code search                |
 | `--github-org ORG`                             | Scope GitHub search to an org         |
 | `--apk FILE` / `--ipa FILE`                    | Unzip and scan a mobile app           |
+| `--package ID`                                 | Download via apkeep/gplaycli, then scan |
 | `--skip-buckets`                               | Skip S3/GCS/Azure name guesses        |
 | `--skip-openapi`                               | Skip OpenAPI/Swagger/Postman parse    |
 | `--ci`                                         | Local-repo scan, skip live recon      |
@@ -691,6 +765,14 @@ export HTTPX_BIN="$HOME/go/bin/httpx"
 
 Set `CHAOS_KEY` or `PDCP_API_KEY`, or pass `--chaos-key`. You can always feed `--subdomains`.
 
+**amass: “unable to build the pool of untrusted resolvers”**
+
+Amass could not reach its default public DNS resolvers (common on Windows, VPNs, and filtered networks). ReconPipe continues without Amass results. Point Amass at a resolver you can reach (`amass enum -r 8.8.8.8 …`), skip it with `--skip-amass`, or run from a less filtered network.
+
+**LLM report missing / “LLM unavailable”**
+
+Ollama must be running and the model pulled (`ollama pull llama3.1`). For cloud providers, set a key in Settings or `RECONPIPE_LLM_KEY`. `--ci` skips the LLM unless you also pass `--llm`. A failed model call still writes a local Verify/Fix template in `remediation.md`.
+
 **Scan is slow**
 
 Archives (waymore/gau) and headless Katana dominate runtime. Use `--skip-gau` or `--skip-discovery` with `--files`, lower `--concurrency`, or `--polite` / `--requests-per-second` on fragile targets.
@@ -719,7 +801,7 @@ reconpipe -d example.com
 
 ```bash
 python3 -m unittest tests.test_wave2 tests.test_wave3 tests.test_new_features tests.test_cli_and_keys \
-  tests.test_patterns tests.test_user_settings tests.test_httpx_resolve tests.test_osint tests.test_docker -q
+  tests.test_patterns tests.test_user_settings tests.test_llm tests.test_httpx_resolve tests.test_osint tests.test_docker -q
 
 # GUI wiring (Windows: set PYTHONIOENCODING=utf-8)
 python3 tests/test_gui_integration.py

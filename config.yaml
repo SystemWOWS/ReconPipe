@@ -85,6 +85,7 @@ patterns:
   mailjet_api: (?i)(?:mailjet[_-]?(?:api|key))['\" \t:=]{1,12}([a-f0-9]{32})
   sparkpost_api: (?i)(?:sparkpost[_-]?(?:api|key))['\" \t:=]{1,12}([a-f0-9]{40})
   intercom_token: (?i)(?:intercom[_-]?(?:token|access))['\" \t:=]{1,12}([a-zA-Z0-9_=-]{40,})
+  hubspot_api: 'pat-[a-z]{2}[0-9]-[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'
   zendesk_token: (?i)(?:zendesk[_-]?(?:token|api))['\" \t:=]{1,12}([A-Za-z0-9]{40})
   freshdesk_api: (?i)(?:freshdesk[_-]?(?:api|key))['\" \t:=]{1,12}([A-Za-z0-9]{20})
   square_access: (?:EAAA|sq0atp-)[A-Za-z0-9_-]{22,60}
@@ -258,6 +259,7 @@ confidence:
   mailjet_api: 84
   sparkpost_api: 86
   intercom_token: 88
+  hubspot_api: 94
   zendesk_token: 84
   freshdesk_api: 82
   square_access: 96
@@ -1098,6 +1100,20 @@ validators:
     - 401
     notes:
       200: 'VALID: Intercom token'
+  hubspot_api:
+    url: https://api.hubapi.com/integrations/v1/me
+    method: GET
+    headers:
+      Authorization: Bearer {key}
+    valid_codes:
+    - 200
+    invalid_codes:
+    - 401
+    restricted_codes:
+    - 403
+    notes:
+      200: 'VALID: HubSpot private app / OAuth token'
+      403: 'VALID (restricted): HubSpot token accepted but account info forbidden'
   zendesk_token:
     url: https://{domain}/api/v2/users/me.json
     method: GET
@@ -1683,6 +1699,7 @@ severity:
   mailjet_api: medium
   sparkpost_api: medium
   intercom_token: high
+  hubspot_api: high
   zendesk_token: medium
   freshdesk_api: medium
   square_access: critical
@@ -1792,6 +1809,7 @@ revocation:
   doppler_token: https://dashboard.doppler.com/workplace/tokens
   sentry_auth: https://sentry.io/settings/account/api/auth-tokens/
   cloudflare_api: https://dash.cloudflare.com/profile/api-tokens
+  hubspot_api: https://app.hubspot.com/private-apps
 compliance:
   stripe_live:
   - PCI-DSS
@@ -1828,6 +1846,9 @@ compliance:
   - GDPR
   sendgrid:
   - GDPR
+  hubspot_api:
+  - GDPR
+  - SOC2
   twilio_sid:
   - GDPR
   pagerduty_api:
