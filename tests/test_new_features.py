@@ -118,6 +118,48 @@ class ScopeAndCliTests(unittest.TestCase):
         rp.SCOPE_INCLUDE = []
         rp.SCOPE_EXCLUDE = []
 
+    def test_default_target_scope_drops_other_domains(self):
+        rp.SCOPE_INCLUDE = []
+        rp.SCOPE_EXCLUDE = []
+        added = rp.apply_default_target_scope("google.com")
+        self.assertIn("google.com", added)
+        self.assertIn("*.google.com", added)
+        self.assertTrue(rp.host_in_scope("www.google.com"))
+        self.assertTrue(rp.host_in_scope("mail.google.com"))
+        self.assertFalse(rp.host_in_scope("yahoo.com"))
+        urls = rp.filter_urls_in_scope(
+            [
+                "https://www.google.com/app.js",
+                "https://yahoo.com/ads.js",
+                "https://web.archive.org/web/20200101000000/https://google.com/x.js",
+                "/work/recon_google_com/downloaded_files/local.js",
+            ]
+        )
+        self.assertIn("https://www.google.com/app.js", urls)
+        self.assertNotIn("https://yahoo.com/ads.js", urls)
+        self.assertTrue(any("web.archive.org" in u for u in urls))
+        self.assertTrue(any(u.endswith("local.js") for u in urls))
+        off = {"type": "generic", "source_url": "https://yahoo.com/x.js", "key": "x"}
+        on = {"type": "generic", "source_url": "https://google.com/x.js", "key": "y"}
+        kept = rp.filter_findings_in_scope([off, on])
+        self.assertEqual(len(kept), 1)
+        self.assertEqual(kept[0]["source_url"], "https://google.com/x.js")
+        rp.SCOPE_INCLUDE = []
+        rp.SCOPE_EXCLUDE = []
+
+    def test_default_scope_skips_when_include_already_set(self):
+        rp.SCOPE_INCLUDE = ["*.api.example.com"]
+        rp.SCOPE_EXCLUDE = []
+        self.assertEqual(rp.apply_default_target_scope("example.com"), [])
+        self.assertEqual(rp.SCOPE_INCLUDE, ["*.api.example.com"])
+        rp.SCOPE_INCLUDE = []
+
+    def test_no_default_scope_flag(self):
+        args = rp.build_parser().parse_args(["-d", "example.com", "--no-default-scope"])
+        self.assertTrue(args.no_default_scope)
+        argv = rp.argv_from_options({"domain": "example.com", "no_default_scope": True})
+        self.assertIn("--no-default-scope", argv)
+
     def test_subfinder_and_gospider_delay(self):
         sf = rp.build_subfinder_cmd(
             "example.com", "out.txt", help_blob="-d string\n-o string\n-silent"

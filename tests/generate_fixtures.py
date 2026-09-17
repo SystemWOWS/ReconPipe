@@ -79,12 +79,19 @@ def main() -> None:
         "junk": ["sk_live_" + "a" * 24],
     }
     c["openai_key"] = {
-        "good": ["sk-proj-" + "a" * 20 + "-" + "b" * 20],
-        "junk": ["sk-proj-short", "sk_live_xxx"],
+        "good": [
+            "sk-proj-" + "a" * 20 + "-" + "b" * 20,
+            "sk-svcacct-" + "d" * 24,
+            "sk-" + "e" * 20 + "T3BlbkFJ" + "f" * 20,
+        ],
+        "junk": ["sk-proj-short", "sk_live_xxx", "sk-ant-api03-" + "c" * 24],
     }
     c["anthropic_key"] = {
-        "good": ["sk-ant-api03-" + "c" * 20],
-        "junk": ["sk-ant-api03-short"],
+        "good": [
+            "sk-ant-api03-" + "c" * 20,
+            "sk-ant-admin01-" + "d" * 20,
+        ],
+        "junk": ["sk-ant-api03-short", "sk-proj-" + "a" * 20],
     }
     c["sendgrid"] = {
         "good": ["SG." + "a" * 22 + "." + "b" * 43],
@@ -302,6 +309,13 @@ def main() -> None:
         "mailjet_api": {"good": ["mailjet_api=" + "a" * 32], "junk": ["mailjet_api=x"]},
         "sparkpost_api": {"good": ["sparkpost_api=" + "a" * 40], "junk": ["sparkpost_api=x"]},
         "intercom_token": {"good": ["intercom_token=" + "a" * 40], "junk": ["intercom_token=x"]},
+        "hubspot_api": {
+            "good": [
+                "pat-na1-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+                "pat-eu1-11111111-2222-3333-4444-555555555555",
+            ],
+            "junk": ["pat-na1-short", "pat-n1-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"],
+        },
         "zendesk_token": {"good": ["zendesk_token=" + "a" * 40], "junk": ["zendesk_token=x"]},
         "freshdesk_api": {"good": ["freshdesk_api=" + "a" * 20], "junk": ["freshdesk_api=x"]},
         "square_access": {"good": ["sq0atp-" + "a" * 22], "junk": ["sq0atp-short"]},

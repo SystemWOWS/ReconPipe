@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import unittest
 from pathlib import Path
@@ -270,6 +271,9 @@ class GoogleKeyhacks(unittest.TestCase):
         self.assertIn("{dc}", rp.VALIDATORS["mailchimp"].url)
         self.assertIn("github_app", rp.VALIDATORS)
         self.assertIn("google_oauth", rp.VALIDATORS)
+        self.assertIn("api.hubapi.com/integrations/v1/me", rp.VALIDATORS["hubspot_api"].url)
+        self.assertEqual(rp.VALIDATORS["hubspot_api"].headers.get("Authorization"), "Bearer {key}")
+        self.assertEqual(rp.VALIDATORS["hubspot_api"].restricted_codes, [403])
 
     def test_mailchimp_dc_template(self):
         url = rp._format_tpl(
@@ -287,12 +291,39 @@ class GoogleKeyhacks(unittest.TestCase):
         self.assertIn("cloudflare_api", opts)
         self.assertIn("huggingface_token", opts)
         self.assertIn("linear_api_key", opts)
+        self.assertIn("hubspot_api", opts)
         self.assertIn("vercel_token", opts)
         self.assertIn("doppler_token", opts)
         self.assertIn("postgres_uri", opts)
 
+    def test_hubspot_private_app_token_shape(self):
+        rx = re.compile(rp.PATTERNS["hubspot_api"])
+        self.assertTrue(rx.search("pat-na1-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"))
+        self.assertTrue(rx.search("pat-eu1-11111111-2222-3333-4444-555555555555"))
+        self.assertIsNone(rx.search("pat-na1-short"))
+        self.assertEqual(rp.gitleaks_type_for("hubspot-api-token", "pat-na1-x"), "hubspot_api")
+
     def test_exposure_types_not_every_secret(self):
         self.assertEqual(rp.EXPOSURE_TYPES, frozenset({"source_map_exposure"}))
+
+    def test_trufflehog_maps_gemini_aiza_to_google_api(self):
+        fake = "AIzaSy" + ("A" * 33)
+        line = json.dumps(
+            {
+                "DetectorName": "GoogleGeminiAPIKey",
+                "Raw": fake,
+                "Verified": False,
+                "SourceMetadata": {
+                    "Data": {"Filesystem": {"file": "/tmp/app.js"}}
+                },
+            }
+        )
+        rows = rp.parse_trufflehog((line + "\n").encode())
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["type"], "google_api")
+        self.assertEqual(rows[0]["detector"], "GoogleGeminiAPIKey")
+        self.assertEqual(rows[0]["key"], fake)
+        self.assertFalse(rows[0]["verified"])
 
     def test_jwt_key_tester_still_works(self):
         finding = {

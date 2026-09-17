@@ -141,6 +141,173 @@ class Wave2PipelineTests(unittest.TestCase):
         parsed = rp.parse_source_map(blob)
         self.assertEqual(parsed["app.js"], "const secret='abc'")
 
+    def test_source_mapping_url_and_reconstruct(self):
+        js = "void 0;\n//# sourceMappingURL=app.js.map\n"
+        self.assertEqual(rp.extract_source_mapping_url(js), "app.js.map")
+        cands = rp.source_map_url_candidates("https://cdn.example.com/static/app.js", js)
+        self.assertIn("https://cdn.example.com/static/app.js.map", cands)
+        inline = (
+            "x();\n//# sourceMappingURL=data:application/json;base64,"
+            + b64.b64encode(
+                json.dumps(
+                    {
+                        "version": 3,
+                        "sources": ["src/app.ts"],
+                        "sourcesContent": ["const k='sk_live_abcdefghijklmnopqrstuvwx'"],
+                        "mappings": "AAAA",
+                    }
+                ).encode()
+            ).decode()
+            + "\n"
+        )
+        self.assertTrue(rp.extract_source_mapping_url(inline).startswith("data:"))
+        decoded = rp.decode_source_map_data_url(rp.extract_source_mapping_url(inline))
+        self.assertIn("sk_live_", decoded)
+        with tempfile.TemporaryDirectory() as td:
+            dest = Path(td) / "recon"
+            written = rp.write_reconstructed_sources(decoded, dest, prefix="m1")
+            self.assertTrue(written)
+            self.assertTrue(any("sk_live_" in p.read_text(encoding="utf-8") for p in written))
+            escaped = rp.safe_source_relpath("webpack:///../secret.ts")
+            self.assertNotIn("..", escaped.split("/"))
+
+    def test_reconstruct_downloaded_js_maps_writes_tree(self):
+        mmap = json.dumps(
+            {
+                "version": 3,
+                "file": "app.js",
+                "sources": ["webpack:///src/keys.ts"],
+                "sourcesContent": ["export const k = 'AKIAIOSFODNN7EXAMPLE';"],
+                "mappings": "AAAA",
+            }
+        )
+        js = "console.log(1);\n//# sourceMappingURL=app.js.map\n"
+        url = "https://cdn.example.com/app.js"
+        with tempfile.TemporaryDirectory() as td:
+            dl = Path(td) / "downloaded_files"
+            dest = Path(td) / "reconstructed_sources"
+            dl.mkdir()
+            (dl / rp.download_filename(url)).write_text(js, encoding="utf-8")
+
+            def fake_get(u, timeout=10):
+                self.assertTrue(str(u).endswith(".map"))
+                return mmap.encode()
+
+            with patch.object(rp, "_http_get_bytes", side_effect=fake_get):
+                n_maps, n_files = rp.reconstruct_downloaded_js_maps([url], dl, dest)
+            self.assertEqual(n_maps, 1)
+            self.assertGreaterEqual(n_files, 1)
+            blob = "\n".join(p.read_text(encoding="utf-8") for p in dest.rglob("*") if p.is_file() and p.suffix != ".json")
+            self.assertIn("AKIAIOSFODNN7EXAMPLE", blob)
+
+    def test_parse_cdx_rows_and_history_skip_same_hash(self):
+        data = [
+            ["timestamp", "original", "statuscode", "mimetype", "digest"],
+            ["20200101120000", "https://ex.com/app.js", "200", "application/javascript", "abc"],
+            ["20240101120000", "https://ex.com/app.js", "200", "application/javascript", "def"],
+            ["20240101120000", "https://ex.com/app.js", "200", "application/javascript", "def"],
+        ]
+        rows = rp.parse_cdx_rows(data)
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]["timestamp"], "20200101120000")
+        text_rows = rp.parse_cdx_text(
+            "https://ex.com/app.js 20200101120000\n"
+            "https://ex.com/app.js 20240101120000\n"
+            "https://ex.com/app.js 20240101120000\n"
+        )
+        self.assertEqual(len(text_rows), 2)
+        digested = rp.parse_cdx_text(
+            "https://ex.com/app.js 20180101120000 sha1:aaaa\n"
+            "https://ex.com/app.js 20200101120000 sha1:bbbb\n"
+            "https://ex.com/app.js 20240101120000 sha1:cccc\n"
+        )
+        oldest = rp.select_oldest_snapshots(digested, 1)
+        self.assertEqual(oldest[0]["timestamp"], "20180101120000")
+        self.assertEqual(
+            rp.diff_removed_lines("keep\nsecret=1\n", "keep\n"),
+            ["secret=1"],
+        )
+        live = b"current-bundle"
+        old = b"const k='sk_live_abcdefghijklmnopqrstuvwx';\ncurrent-bundle"
+        url = "https://ex.com/app.js"
+        with tempfile.TemporaryDirectory() as td:
+            dl = Path(td) / "dl"
+            dest = Path(td) / "reconstructed_sources"
+            dl.mkdir()
+            (dl / rp.download_filename(url)).write_bytes(live)
+            snaps = [
+                {
+                    "timestamp": "20200101120000",
+                    "original": url,
+                    "archive_url": "https://web.archive.org/web/20200101120000id_/https://ex.com/app.js",
+                },
+                {
+                    "timestamp": "20240101120000",
+                    "original": url,
+                    "archive_url": "https://web.archive.org/web/20240101120000id_/https://ex.com/app.js",
+                },
+            ]
+
+            class _Resp:
+                def __init__(self, body: bytes):
+                    self._body = body
+                    self.headers = {}
+
+                def read(self):
+                    return self._body
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *args):
+                    return False
+
+            def fake_open(req, timeout=15):
+                url_s = getattr(req, "full_url", None) or str(req)
+                if "20200101" in url_s:
+                    return _Resp(old)
+                return _Resp(live)
+
+            with patch.object(rp, "list_cdx_snapshots", return_value=snaps):
+                with patch("urllib.request.urlopen", side_effect=fake_open):
+                    n, diffs = rp.fetch_live_js_history([url], dl, dest)
+            self.assertEqual(n, 1)
+            wb = dest / "_wayback"
+            bodies = [
+                p for p in wb.iterdir() if p.is_file() and p.name != "index.json"
+            ]
+            self.assertEqual(len(bodies), 1)
+            self.assertEqual(bodies[0].read_bytes(), old)
+            self.assertTrue(any(d.get("scanner") == "js_history_diff" for d in diffs))
+            self.assertTrue((Path(td) / "js_history.json").is_file())
+            self.assertTrue((Path(td) / "js_history_removed.json").is_file())
+
+            many = snaps + [
+                {
+                    "timestamp": "20220101120000",
+                    "original": url,
+                    "digest": "mid",
+                    "archive_url": "https://web.archive.org/web/20220101120000id_/https://ex.com/app.js",
+                }
+            ]
+            opened: list = []
+
+            def fake_open_count(req, timeout=15):
+                opened.append(getattr(req, "full_url", None) or str(req))
+                url_s = opened[-1]
+                if "20200101" in url_s:
+                    return _Resp(old)
+                return _Resp(b"other-unique-body-" + url_s.encode())
+
+            with patch.object(rp, "list_cdx_snapshots", return_value=many):
+                with patch("urllib.request.urlopen", side_effect=fake_open_count):
+                    n_cap, _diffs = rp.fetch_live_js_history(
+                        [url], dl, dest, max_versions=1
+                    )
+            self.assertEqual(n_cap, 1)
+            self.assertEqual(len(opened), 1)
+            self.assertIn("20200101", opened[0])
+
     def test_burp_xml(self):
         xml = (
             "<?xml version='1.0'?><items>"
@@ -249,6 +416,9 @@ class Wave2PipelineTests(unittest.TestCase):
                 "--header", "Cookie: x=1",
                 "--resume-from", "httpx",
                 "--skip-wayback-bodies",
+                "--skip-js-history",
+                "--js-history-max", "8",
+                "--skip-sourcemaps",
                 "--skip-sensitive-paths",
                 "--repo-shallow",
                 "--skip-gitleaks",
@@ -262,6 +432,9 @@ class Wave2PipelineTests(unittest.TestCase):
         self.assertEqual(args.proxy, "http://127.0.0.1:8080")
         self.assertTrue(args.nuclei)
         self.assertTrue(args.skip_wayback_bodies)
+        self.assertTrue(args.skip_js_history)
+        self.assertEqual(args.js_history_max, 8)
+        self.assertTrue(args.skip_sourcemaps)
         self.assertTrue(args.skip_sensitive_paths)
         self.assertTrue(args.repo_shallow)
         self.assertTrue(args.skip_gitleaks)
@@ -276,6 +449,9 @@ class Wave2PipelineTests(unittest.TestCase):
                 "proxy": "http://127.0.0.1:8080",
                 "skip_amass": True,
                 "skip_wayback_bodies": True,
+                "skip_js_history": True,
+                "js_history_max": 8,
+                "skip_sourcemaps": True,
                 "repo_shallow": True,
                 "skip_gitleaks": True,
                 "spray": True,
@@ -288,6 +464,10 @@ class Wave2PipelineTests(unittest.TestCase):
         self.assertIn("--proxy", argv)
         self.assertIn("--skip-amass", argv)
         self.assertIn("--skip-wayback-bodies", argv)
+        self.assertIn("--skip-js-history", argv)
+        self.assertIn("--js-history-max", argv)
+        self.assertIn("8", argv)
+        self.assertIn("--skip-sourcemaps", argv)
         self.assertIn("--repo-shallow", argv)
         self.assertIn("--skip-gitleaks", argv)
         self.assertIn("--spray", argv)
@@ -486,8 +666,11 @@ class Wave2PipelineTests(unittest.TestCase):
         self.assertIn("gitleaks", rp.PIPELINE_TOOLS)
         self.assertIn("spray", rp.PIPELINE_TOOLS)
         self.assertTrue(any(p.endswith(".env.staging") for p in rp.SENSITIVE_PATHS))
+        self.assertTrue(any(p.endswith("/.cursor/mcp.json") for p in rp.SENSITIVE_PATHS))
+        self.assertTrue(any("application_default_credentials.json" in p for p in rp.SENSITIVE_PATHS))
         self.assertTrue(rp.leak_wordlist_path().is_file())
         self.assertTrue(rp.DISCOVERY_KEEP_URL_RE.search("https://ex.com/.env.local"))
+        self.assertTrue(rp.DISCOVERY_KEEP_URL_RE.search("https://ex.com/.cursor/mcp.json"))
         self.assertTrue(rp.DISCOVERY_KEEP_URL_RE.search("https://ex.com/backup.env"))
         self.assertTrue(rp.DISCOVERY_KEEP_URL_RE.search("https://ex.com/app.js"))
         env_hits = rp.env_like_urls(

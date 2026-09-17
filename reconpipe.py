@@ -55,7 +55,7 @@ except ImportError:
     ClientError = Exception  
     BotoCoreError = Exception
 
-# Colors
+# Colors ( Might remove as it looks dumb, it's not 2010)
 class C:
     RED    = "\033[91m"
     GREEN  = "\033[92m"
@@ -353,7 +353,7 @@ def load_default_config() -> None:
 
 
 
-# False-positive filters
+# False-positive filters 
 STOPWORDS = {
     "example", "sample", "dummy", "placeholder", "test", "demo",
     "null", "undefined", "none", "true", "false", "localhost",
@@ -406,6 +406,7 @@ SOURCE_MAP_PATH_RE = re.compile(r"\.map(?:$|\?|#)", re.I)
 
 BASELINE_FILE = ".reconpipe_ignore.json"
 
+# config
 load_default_config()
 addons.bind_config_lookups(REVOCATION_URLS, COMPLIANCE_TAGS)
 

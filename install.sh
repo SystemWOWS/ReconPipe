@@ -40,7 +40,7 @@ EXTRA_TOOLS=(
 
 TOOLS=("${CORE_TOOLS[@]}" "${EXTRA_TOOLS[@]}")
 
-# Banner
+# Banner ( same here, 2010 banner bruh.)
 echo -e "${CYAN}${BOLD}"
 echo "  ██████╗ ███████╗ ██████╗ ██████╗ ███╗   ██╗██████╗ ██╗██████╗ ███████╗"
 echo "  ██╔══██╗██╔════╝██╔════╝██╔═══██╗████╗  ██║██╔══██╗██║██╔══██╗██╔════╝"

@@ -89,6 +89,10 @@ def test_pipeline_subprocess():
                     "skip_gitleaks": True,
                     "skip_jsleak": True,
                     "skip_code_search": True,
+                    "skip_ci_logs": True,
+                    "skip_pastes": True,
+                    "skip_docker_hub": True,
+                    "skip_image_layers": True,
                     "skip_buckets": True,
                     "skip_openapi": True,
                     "skip_store": True,
@@ -137,11 +141,22 @@ def test_gui_module_compiles_and_helpers():
     assert mod.validate_form(
         {"domain": "bad domain", "concurrency": 10, "gau_threads": 5}
     )
+    missing_apk = mod.validate_form(
+        {
+            "domain": "example.com",
+            "concurrency": 10,
+            "gau_threads": 5,
+            "apk": ["/no/such/app.apk"],
+        }
+    )
+    assert any("not found" in e for e in missing_apk)
     redacted = mod.redact_secret("sk_live_1234567890abcdef", reveal=False)
     assert "…" in redacted and "sk_l" in redacted
     assert mod.redact_secret("sk_live_1234567890abcdef", reveal=True).startswith("sk_live")
     hits = mod.guess_key_types("sk_live_abcdefghijklmnopqrstuvwx")
     assert "stripe_live" in hits
+    hub = mod.guess_key_types("pat-na1-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
+    assert "hubspot_api" in hub
     assert "github_pat" in mod.validator_type_options()
     status_path = Path(tempfile.mkdtemp()) / "scan_status.json"
     status_path.write_text(
@@ -154,6 +169,10 @@ def test_gui_module_compiles_and_helpers():
     assert "google_api" in mod.validator_type_options()
     assert "firebase_key" in mod.validator_type_options()
     assert "mailchimp" in mod.validator_type_options()
+    assert "hubspot_api" in mod.validator_type_options()
+    assert 'ui.tab("Settings")' in src
+    assert "Enable LLM reports" in src
+    assert "Generate report from finished scan" in src
     runner = mod.PipelineRunner()
     runner._offer_log("https://cdn.example.com/app.js?x=1")
     runner._offer_log("found endpoint /api/v1/users")
@@ -187,6 +206,10 @@ def test_gui_module_compiles_and_helpers():
         assert mod.count_lines(p) == 1
     src = (ROOT / "reconpipegui.py").read_text(encoding="utf-8")
     assert "Passive intel" in src
+    assert "Queue & profiles" in src
+    assert "Secret engines" in src and "Extra leak surfaces" in src
+    assert "Advanced target" in src
+    assert "rp-opt-grid" in src and "rp-expansion" in src
     assert "--shodan-key" in src and "--zoomeye-key" in src and "--censys-id" in src
     assert "Save API keys" in src and "Save target" in src
     assert "Copy" in src and "Test key(s)" in src
@@ -201,14 +224,63 @@ def test_gui_module_compiles_and_helpers():
     assert "Export HackerOne" in src and "Export Jira" in src
     assert "--proxy" in src and "Add to queue" in src
     assert "--skip-wayback-bodies" in src and "--skip-sensitive-paths" in src
+    assert "--skip-js-history" in src and "--skip-sourcemaps" in src
+    assert "--js-history-max" in src
+    assert "--package" in src
     assert "--repo-shallow" in src
     assert "--skip-gitleaks" in src and "--spray" in src
     assert "--skip-public-apis" in src
     assert "--skip-secrets-db" in src and "--skip-jsleak" in src
     assert "--skip-code-search" in src and "--skip-buckets" in src
+    assert "--skip-ci-logs" in src and "--skip-pastes" in src
+    assert "--skip-docker-hub" in src and "--skip-image-layers" in src
     assert "--no-default-scope" in src
     assert "--ci" in src and "--github-token" in src
     assert "Rescan" in src and "--resume" in src
+    assert 'ui.tab("Apps")' in src
+    assert "APK / IPA scanner" in src
+    assert "Upload APK / IPA" in src
+    assert "Scan apps" in src
+    apk, ipa = mod.parse_mobile_paths(
+        "/work/app.apk\n/tmp/app.ipa\n/tmp/bundle.apkm\nskip.txt\n"
+    )
+    assert apk == ["/work/app.apk", "/tmp/bundle.apkm"]
+    assert ipa == ["/tmp/app.ipa"]
+    assert mod.classify_mobile_path("foo.xapk") == "apk"
+    assert mod.sanitize_upload_name("../evil.apk") == "evil.apk"
+
+    class _V2Up:
+        name = "in.cdac.ners.psa.mobile.android.national.apk"
+
+        def __init__(self) -> None:
+            import io as _io
+            self.content = _io.BytesIO(b"PK\x03\x04fake")
+
+    class _V3File:
+        name = "app.ipa"
+
+        async def read(self) -> bytes:
+            return b"PK\x03\x04ipa"
+
+    class _V3Up:
+        file = _V3File()
+
+    assert mod.upload_event_name(_V2Up()).endswith(".apk")
+    assert mod.upload_event_name(_V3Up()).endswith(".ipa")
+    assert asyncio.run(mod.read_upload_bytes(_V2Up())) == b"PK\x03\x04fake"
+    assert asyncio.run(mod.read_upload_bytes(_V3Up())) == b"PK\x03\x04ipa"
+    with tempfile.TemporaryDirectory() as td:
+        old = os.environ.get("RECONPIPE_WORKDIR")
+        os.environ["RECONPIPE_WORKDIR"] = td
+        try:
+            staged = mod.stage_mobile_bytes("demo.apk", b"PK\x03\x04")
+            assert staged.is_file()
+            assert staged.parent.name == "mobile_uploads"
+        finally:
+            if old is None:
+                os.environ.pop("RECONPIPE_WORKDIR", None)
+            else:
+                os.environ["RECONPIPE_WORKDIR"] = old
     assert "FINDINGS_RENDER_CAP" in src
     assert "Showing first" in src
     assert "rp-usage" in src and "ResourceMonitor" in src

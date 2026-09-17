@@ -89,14 +89,19 @@ patterns:
   openai_key:
     good:
     - sk-proj-aaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbbbbbb
+    - sk-svcacct-dddddddddddddddddddddddd
+    - sk-eeeeeeeeeeeeeeeeeeeeT3BlbkFJffffffffffffffffffff
     junk:
     - sk-proj-short
     - sk_live_xxx
+    - sk-ant-api03-cccccccccccccccccccccccc
   anthropic_key:
     good:
     - sk-ant-api03-cccccccccccccccccccc
+    - sk-ant-admin01-dddddddddddddddddddd
     junk:
     - sk-ant-api03-short
+    - sk-proj-aaaaaaaaaaaaaaaaaaaa
   sendgrid:
     good:
     - SG.aaaaaaaaaaaaaaaaaaaaaa.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
@@ -520,6 +525,13 @@ patterns:
     - intercom_token=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
     junk:
     - intercom_token=x
+  hubspot_api:
+    good:
+    - pat-na1-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee
+    - pat-eu1-11111111-2222-3333-4444-555555555555
+    junk:
+    - pat-na1-short
+    - pat-n1-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee
   zendesk_token:
     good:
     - zendesk_token=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa

@@ -18,19 +18,21 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 PROVIDERS = ("ollama", "openai", "anthropic", "openai_compat")
 
+# models
 DEFAULT_MODELS = {
     "ollama": "llama3.1",
     "openai": "gpt-4o-mini",
     "anthropic": "claude-3-5-haiku-latest",
     "openai_compat": "local-model",
 }
-
+# Base urls ( if it wrong or the url changes, make sure it change it to the correct one.)
 DEFAULT_BASE_URLS = {
     "ollama": "http://127.0.0.1:11434",
     "openai": "https://api.openai.com/v1",
     "anthropic": "https://api.anthropic.com",
     "openai_compat": "http://127.0.0.1:1234/v1",
 }
+# You can add your own system prompt if you like or just leave it how it is :)
 
 SYSTEM_PROMPT = """You are a defensive security assistant for ReconPipe, a secret-leak hunter.
 
@@ -53,7 +55,7 @@ Rules:
   prevention basics (no secrets in frontend JS, rotate on any exposure).
 - Keep the tone operational and concise. Use markdown headings.
 """
-
+# TO DO: Will need to add more here as the keys that are here are not good.
 FINDING_GUIDANCE: Dict[str, Dict[str, str]] = {
     "google_api": {
         "verify": "Key Tester type google_api (Maps JSON / YouTube / Gemini spray). Confirm the key string is still in the listed JS or HTML source.",

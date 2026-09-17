@@ -1,3 +1,4 @@
+# This is the regex config for the tool, can add your own to it if you would like to.
 min_confidence: 30
 patterns:
   google_api: AIza[0-9A-Za-z\-_]{35}
