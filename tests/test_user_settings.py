@@ -98,6 +98,8 @@ class HitBundleTests(unittest.TestCase):
             (dl / "app.js.map").write_text("{}", encoding="utf-8")
             (out / "findings.json").write_text("[]", encoding="utf-8")
             (out / "summary.txt").write_text("summary", encoding="utf-8")
+            (out / "vendors.json").write_text("{}", encoding="utf-8")
+            (out / "report_pentest.md").write_text("# pentest", encoding="utf-8")
             url = "https://cdn.example.com/app.js"
             js2 = dl / rp.download_filename(url)
             js2.write_text("KEY", encoding="utf-8")
@@ -108,6 +110,8 @@ class HitBundleTests(unittest.TestCase):
             )
             self.assertIsNotNone(dest)
             self.assertTrue((dest / "summary.txt").is_file())
+            self.assertTrue((dest / "vendors.json").is_file())
+            self.assertTrue((dest / "report_pentest.md").is_file())
             self.assertTrue((dest / "sources" / js2.name).is_file())
             self.assertTrue((dest / "sources" / "app.js.map").is_file())
             self.assertTrue((dest / "INDEX.txt").is_file())

@@ -274,6 +274,8 @@ class GoogleKeyhacks(unittest.TestCase):
         self.assertIn("api.hubapi.com/integrations/v1/me", rp.VALIDATORS["hubspot_api"].url)
         self.assertEqual(rp.VALIDATORS["hubspot_api"].headers.get("Authorization"), "Bearer {key}")
         self.assertEqual(rp.VALIDATORS["hubspot_api"].restricted_codes, [403])
+        self.assertIn("api.groq.com/openai/v1/models", rp.VALIDATORS["groq_api"].url)
+        self.assertEqual(rp.VALIDATORS["figma_token"].headers.get("X-Figma-Token"), "{key}")
 
     def test_mailchimp_dc_template(self):
         url = rp._format_tpl(
@@ -292,6 +294,9 @@ class GoogleKeyhacks(unittest.TestCase):
         self.assertIn("huggingface_token", opts)
         self.assertIn("linear_api_key", opts)
         self.assertIn("hubspot_api", opts)
+        self.assertIn("groq_api", opts)
+        self.assertIn("figma_token", opts)
+        self.assertIn("postman_api", opts)
         self.assertIn("vercel_token", opts)
         self.assertIn("doppler_token", opts)
         self.assertIn("postgres_uri", opts)

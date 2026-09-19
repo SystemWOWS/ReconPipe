@@ -391,6 +391,21 @@ def main() -> None:
         "split_api": {"good": ["split_api=" + "a" * 50], "junk": ["split_api=x"]},
         "statsig_secret": {"good": ["statsig_secret=secret-" + "a" * 32], "junk": ["secret-" + "a" * 32]},
         "unleash_token": {"good": ["unleash_token=" + "a" * 30], "junk": ["unleash_token=x"]},
+        "groq_api": {"good": ["gsk_" + "A" * 20], "junk": ["gsk_short"]},
+        "xai_api": {"good": ["xai-" + "A" * 20], "junk": ["xai-short"]},
+        "perplexity_api": {"good": ["pplx-" + "A" * 20], "junk": ["pplx-short"]},
+        "fireworks_api": {"good": ["fw_" + "A" * 24], "junk": ["fw_short"]},
+        "slack_app_token": {"good": ["xapp-1-" + "A" * 20], "junk": ["xapp-1-short"]},
+        "figma_token": {"good": ["figd_" + "A" * 40], "junk": ["figd_short"]},
+        "databricks_token": {"good": ["dapi" + "a" * 32], "junk": ["dapi" + "a" * 8]},
+        "postman_api": {"good": ["PMAK-" + "a" * 24 + "-" + "b" * 34], "junk": ["PMAK-short"]},
+        "sonar_token": {"good": ["squ_" + "a" * 40], "junk": ["squ_short"]},
+        "cloudinary_url": {
+            "good": ["cloudinary://abc:secretpass@demo-cloud"],
+            "junk": ["cloudinary://nopath"],
+        },
+        "razorpay_key": {"good": ["rzp_live_" + "A" * 14], "junk": ["rzp_live_short"]},
+        "flutterwave_secret": {"good": ["FLWSECK-" + "A" * 10], "junk": ["FLWSECK-ab"]},
     }
     # uuid-like hex-with-dashes: 8-4-4-4-12 = 36 including dashes
     uuidish = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"

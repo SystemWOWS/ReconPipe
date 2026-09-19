@@ -111,6 +111,11 @@ ARTIFACT_FILES = [
     "download_etag.json",
     "remediation.md",
     "llm_report.json",
+    "vendors.json",
+    "vendors.html",
+    "report_pentest.md",
+    "report_executive.md",
+    "report_executive.html",
 ]
 ARTIFACT_ZIP_NAME = "reconpipe_artifacts.zip"
 
@@ -1285,6 +1290,7 @@ def build_ui() -> None:
         tab_apps = ui.tab("Apps")
         tab_console = ui.tab("Console")
         tab_findings = ui.tab("Findings")
+        tab_vendors = ui.tab("Vendors")
         tab_tester = ui.tab("Key Tester")
         tab_artifacts = ui.tab("Artifacts")
         tab_history = ui.tab("History")
@@ -2405,6 +2411,60 @@ def build_ui() -> None:
                             (Path(preview_path) / "export_jira.md").write_text(text, encoding="utf-8")
                         ui.notify("Jira markdown generated", type="positive")
 
+                    report_tpl = ui.select(
+                        {
+                            "pentest": "Pentest / bug bounty (HackerOne, Bugcrowd, Intigriti)",
+                            "executive": "Executive briefing (CEO / CTO / board)",
+                        },
+                        value="pentest",
+                        label="Report template",
+                    ).classes("w-96").props("dense outlined")
+
+                    def generate_template_report() -> None:
+                        ws = STATE.workspace or STATE.runner.output_dir
+                        if not ws:
+                            ui.notify("Load or finish a scan first", type="warning")
+                            return
+                        ws_path = Path(ws)
+                        findings = list(STATE.findings or [])
+                        exposures = list(STATE.exposures or [])
+                        informational = list(STATE.informational or [])
+                        if not findings and not exposures and not informational:
+                            findings = load_json_list(ws_path / "findings.json")
+                            informational = load_json_list(ws_path / "informational.json")
+                            exposures = load_json_list(ws_path / "source_map_exposures.json")
+                        domain = STATE.domain or "scan"
+                        tid = str(report_tpl.value or "pentest")
+                        written = rp.rp_reports.write_vendor_and_reports(
+                            ws_path,
+                            domain,
+                            findings,
+                            exposures,
+                            informational,
+                            redact=rp.redact_key,
+                        )
+                        dest = written.get(
+                            "report_executive.md" if tid == "executive" else "report_pentest.md"
+                        )
+                        try:
+                            build_ui.render_vendors()  # type: ignore[attr-defined]
+                        except Exception:
+                            pass
+                        try:
+                            build_ui.refresh_artifacts()  # type: ignore[attr-defined]
+                        except Exception:
+                            pass
+                        name = dest.name if dest is not None else "report"
+                        ui.notify(
+                            f"Wrote {name} (and vendor dashboard) — open Artifacts to download",
+                            type="positive",
+                        )
+
+                    ui.button(
+                        "Generate report",
+                        on_click=generate_template_report,
+                        color="primary",
+                    ).props("unelevated dense")
                     ui.button("Export HackerOne", on_click=export_h1, color="secondary").props("flat dense")
                     ui.button("Export Jira", on_click=export_jira, color="secondary").props("flat dense")
 
@@ -2721,6 +2781,10 @@ def build_ui() -> None:
                         STATE.workspace / "source_map_exposures.json"
                     )
                     render_findings()
+                    try:
+                        build_ui.render_vendors()  # type: ignore[attr-defined]
+                    except Exception:
+                        pass
                     update_stats(force=True)
                     ui.notify(
                         f"Loaded {len(STATE.findings)} findings from {STATE.workspace}",
@@ -2730,6 +2794,64 @@ def build_ui() -> None:
                 # bind for outer timers
                 build_ui.reload_findings = reload_findings  # type: ignore[attr-defined]
                 build_ui.render_findings = render_findings  # type: ignore[attr-defined]
+
+        # Vendors
+        with ui.tab_panel(tab_vendors):
+            with ui.card().classes("w-full rp-card"):
+                ui.label("Vendors & API keys").classes("rp-section")
+                ui.label(
+                    "Companies whose credentials showed up in this scan, with a short "
+                    "description of the vendor. Fingerprints only — full secrets stay redacted."
+                ).classes("text-xs text-gray-500 mb-2")
+                vendors_meta = ui.label("No vendors yet").classes("text-sm text-slate-400")
+                vendors_host = ui.column().classes("w-full gap-3 mt-2")
+
+                def render_vendors() -> None:
+                    groups = rp.rp_reports.group_findings_by_vendor(
+                        STATE.findings,
+                        STATE.exposures,
+                        STATE.informational,
+                        redact=rp.redact_key,
+                    )
+                    live_n = sum(int(g.get("live") or 0) for g in groups)
+                    vendors_meta.set_text(
+                        f"{len(groups)} compan{'y' if len(groups) == 1 else 'ies'} · "
+                        f"{live_n} live key(s)"
+                    )
+                    vendors_host.clear()
+                    with vendors_host:
+                        if not groups:
+                            ui.label(
+                                "Run a scan or load a workspace — vendors appear from findings."
+                            ).classes("text-slate-500 text-sm")
+                            return
+                        for g in groups:
+                            with ui.card().classes("w-full rp-subcard"):
+                                with ui.row().classes("w-full items-center justify-between"):
+                                    ui.label(str(g.get("name") or "")).classes("text-base font-semibold")
+                                    ui.label(
+                                        f"LIVE {g.get('live')}/{g.get('total')}"
+                                        if g.get("live")
+                                        else f"{g.get('total')} seen"
+                                    ).classes("text-xs text-slate-400")
+                                ui.label(
+                                    f"{g.get('category') or ''} · {g.get('website') or ''}"
+                                ).classes("text-xs text-slate-500")
+                                ui.label(str(g.get("about") or "")).classes(
+                                    "text-sm text-slate-300 mt-1"
+                                )
+                                for k in g.get("keys") or []:
+                                    live = "LIVE" if k.get("valid") else "—"
+                                    ui.label(
+                                        f"{k.get('product')}  `{k.get('type')}`  {live}  "
+                                        f"{k.get('fingerprint')}  {str(k.get('source_url') or '')[:60]}"
+                                    ).classes("text-xs font-mono text-slate-400 break-all")
+
+                ui.button("Refresh", on_click=render_vendors, color="secondary").props(
+                    "outline dense"
+                )
+                render_vendors()
+                build_ui.render_vendors = render_vendors  # type: ignore[attr-defined]
 
         # Key Tester
         with ui.tab_panel(tab_tester):

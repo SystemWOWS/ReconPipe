@@ -39,6 +39,7 @@ except ImportError:
 import reconpipe_addons as addons
 import reconpipe_wave3 as wave3
 import reconpipe_llm as rp_llm
+import reconpipe_reports as rp_reports
 
 try:
     import aiohttp
@@ -386,6 +387,8 @@ CONTEXT_WORDS = {
     "vercel", "netlify", "railway", "render", "flyio", "planetscale",
     "circleci", "sentry", "doppler", "pagerduty", "atlassian", "clerk",
     "mongodb", "postgres", "redis", "stripe", "algolia",
+    "groq", "xai", "figma", "postman", "databricks", "perplexity", "fireworks",
+    "razorpay", "flutterwave", "cloudinary", "sonar",
 }
 
 IGNORED_PATH_PATTERNS = [
@@ -406,7 +409,7 @@ SOURCE_MAP_PATH_RE = re.compile(r"\.map(?:$|\?|#)", re.I)
 
 BASELINE_FILE = ".reconpipe_ignore.json"
 
-# config
+# config ( might look into fixing or changing it soon.)
 load_default_config()
 addons.bind_config_lookups(REVOCATION_URLS, COMPLIANCE_TAGS)
 
@@ -2486,6 +2489,11 @@ def pack_hit_bundle(
         "findings_diff.json",
         "remediation.md",
         "llm_report.json",
+        "vendors.json",
+        "vendors.html",
+        "report_pentest.md",
+        "report_executive.md",
+        "report_executive.html",
     ):
         src = Path(output_dir) / name
         if src.is_file():
@@ -4618,6 +4626,10 @@ def parse_trufflehog(output: bytes) -> List[Dict]:
         "anthropic":    "anthropic_key",
         "sendgrid":     "sendgrid",
         "hubspot":      "hubspot_api",
+        "groq":         "groq_api",
+        "figma":        "figma_token",
+        "postman":      "postman_api",
+        "databricks":   "databricks_token",
         "twilio":       "twilio_sid",
         "mailgun":      "mailgun",
         "jwt":          "jwt",
@@ -4772,6 +4784,18 @@ GITLEAKS_RULE_MAP = {
     "sendgrid-api-token": "sendgrid",
     "hubspot-api-key": "hubspot_api",
     "hubspot-api-token": "hubspot_api",
+    "slack-app-token": "slack_app_token",
+    "figma": "figma_token",
+    "postman": "postman_api",
+    "groq": "groq_api",
+    "xai": "xai_api",
+    "perplexity": "perplexity_api",
+    "fireworks": "fireworks_api",
+    "databricks": "databricks_token",
+    "sonar": "sonar_token",
+    "cloudinary": "cloudinary_url",
+    "razorpay": "razorpay_key",
+    "flutterwave": "flutterwave_secret",
     "twilio-api-key": "twilio_token",
     "openai": "openai_key",
     "anthropic": "anthropic_key",
@@ -8614,6 +8638,22 @@ def main(argv: Optional[List[str]] = None) -> int:
         )
     (output_dir / "export_hackerone.md").write_text(export_hackerone_markdown(validated), encoding="utf-8")
     (output_dir / "export_jira.md").write_text(export_jira_markdown(validated), encoding="utf-8")
+    try:
+        written = rp_reports.write_vendor_and_reports(
+            output_dir,
+            args.domain,
+            validated,
+            exposures,
+            informational,
+            redact=redact_key,
+        )
+        log(
+            "Vendor dashboard + templates → "
+            + ", ".join(written.keys()),
+            "success",
+        )
+    except Exception as exc:
+        log(f"Vendor/report templates skipped: {exc}", "warn")
     save_checkpoint(output_dir, "validate", {"valid": len(valid_only)})
     _metrics_finish("validate", len(valid_only))
 

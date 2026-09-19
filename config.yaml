@@ -170,6 +170,18 @@ patterns:
   split_api: (?i)(?:split[_-]?(?:api|key))['\" \t:=]{1,12}([A-Za-z0-9]{50,})
   statsig_secret: (?i)(?:statsig[_-]?(?:secret|console))['\" \t:=]{1,12}(secret-[A-Za-z0-9]{32,})
   unleash_token: (?i)(?:unleash[_-]?(?:token|api))['\" \t:=]{1,12}([A-Za-z0-9*:._-]{30,})
+  groq_api: gsk_[A-Za-z0-9]{20,}
+  xai_api: xai-[A-Za-z0-9]{20,}
+  perplexity_api: pplx-[A-Za-z0-9]{20,}
+  fireworks_api: fw_[A-Za-z0-9]{24,}
+  slack_app_token: xapp-[0-9]+-[A-Za-z0-9-]{20,}
+  figma_token: figd_[A-Za-z0-9_-]{40,}
+  databricks_token: dapi[a-f0-9]{32}
+  postman_api: PMAK-[a-f0-9]{24}-[a-f0-9]{34}
+  sonar_token: squ_[a-f0-9]{40}
+  cloudinary_url: cloudinary://[^:\s"']+:[^@\s"']+@[^\s"']+
+  razorpay_key: rzp_(?:live|test)_[A-Za-z0-9]{14,}
+  flutterwave_secret: FLWSECK[_-](?:TEST[_-])?[A-Za-z0-9]{10,}
 confidence:
   google_api: 90
   google_oauth: 85
@@ -344,6 +356,18 @@ confidence:
   split_api: 84
   statsig_secret: 88
   unleash_token: 84
+  groq_api: 94
+  xai_api: 92
+  perplexity_api: 92
+  fireworks_api: 90
+  slack_app_token: 90
+  figma_token: 92
+  databricks_token: 94
+  postman_api: 94
+  sonar_token: 90
+  cloudinary_url: 88
+  razorpay_key: 93
+  flutterwave_secret: 90
 validators:
   google_api:
     url: https://www.googleapis.com/geolocation/v1/geolocate?key={key}
@@ -1650,6 +1674,100 @@ validators:
     needs_domain: true
     notes:
       200: 'VALID: Unleash token'
+  groq_api:
+    url: https://api.groq.com/openai/v1/models
+    method: GET
+    headers:
+      Authorization: Bearer {key}
+    valid_codes:
+    - 200
+    invalid_codes:
+    - 401
+    notes:
+      200: 'VALID: Groq API key'
+  xai_api:
+    url: https://api.x.ai/v1/models
+    method: GET
+    headers:
+      Authorization: Bearer {key}
+    valid_codes:
+    - 200
+    invalid_codes:
+    - 401
+    notes:
+      200: 'VALID: xAI API key'
+  perplexity_api:
+    url: https://api.perplexity.ai/models
+    method: GET
+    headers:
+      Authorization: Bearer {key}
+    valid_codes:
+    - 200
+    invalid_codes:
+    - 401
+    notes:
+      200: 'VALID: Perplexity API key'
+  fireworks_api:
+    url: https://api.fireworks.ai/inference/v1/models
+    method: GET
+    headers:
+      Authorization: Bearer {key}
+    valid_codes:
+    - 200
+    invalid_codes:
+    - 401
+    notes:
+      200: 'VALID: Fireworks API key'
+  slack_app_token:
+    url: https://slack.com/api/auth.test
+    method: POST
+    headers:
+      Authorization: Bearer {key}
+    valid_codes:
+    - 200
+    check_body: true
+    body_ok_field: ok
+  figma_token:
+    url: https://api.figma.com/v1/me
+    method: GET
+    headers:
+      X-Figma-Token: '{key}'
+    valid_codes:
+    - 200
+    invalid_codes:
+    - 403
+    notes:
+      200: 'VALID: Figma personal access token'
+  databricks_token:
+    skip_reason: Databricks PAT needs the workspace host (--grafana-url style not wired)
+  postman_api:
+    url: https://api.getpostman.com/me
+    method: GET
+    headers:
+      X-Api-Key: '{key}'
+    valid_codes:
+    - 200
+    invalid_codes:
+    - 401
+    notes:
+      200: 'VALID: Postman API key'
+  sonar_token:
+    skip_reason: Sonar token needs the SonarQube / SonarCloud host
+  cloudinary_url:
+    uri_inspect: true
+  razorpay_key:
+    skip_reason: Razorpay key id needs the matching key secret
+  flutterwave_secret:
+    url: https://api.flutterwave.com/v3/balances
+    method: GET
+    headers:
+      Authorization: Bearer {key}
+    valid_codes:
+    - 200
+    invalid_codes:
+    - 401
+    notes:
+      200: 'VALID: Flutterwave secret key'
 informational_types:
   stripe_publishable: Public-by-design (Stripe publishable key); not a secret
   firebase_url: Public-by-design (Firebase RTDB URL); not a secret
@@ -1784,6 +1902,18 @@ severity:
   split_api: medium
   statsig_secret: high
   unleash_token: medium
+  groq_api: high
+  xai_api: high
+  perplexity_api: high
+  fireworks_api: high
+  slack_app_token: high
+  figma_token: high
+  databricks_token: critical
+  postman_api: high
+  sonar_token: medium
+  cloudinary_url: high
+  razorpay_key: high
+  flutterwave_secret: critical
   aws_access_key: critical
   aws_secret: critical
   gcp_service_acct: critical
@@ -1811,6 +1941,14 @@ revocation:
   sentry_auth: https://sentry.io/settings/account/api/auth-tokens/
   cloudflare_api: https://dash.cloudflare.com/profile/api-tokens
   hubspot_api: https://app.hubspot.com/private-apps
+  groq_api: https://console.groq.com/keys
+  xai_api: https://console.x.ai/
+  perplexity_api: https://www.perplexity.ai/settings/api
+  fireworks_api: https://fireworks.ai/account/api-keys
+  figma_token: https://www.figma.com/settings
+  postman_api: https://go.postman.co/settings/me/api-keys
+  razorpay_key: https://dashboard.razorpay.com/app/keys
+  flutterwave_secret: https://dashboard.flutterwave.com/dashboard/settings/apis
 compliance:
   stripe_live:
   - PCI-DSS

@@ -907,3 +907,63 @@ patterns:
     - unleash_token=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
     junk:
     - unleash_token=x
+  groq_api:
+    good:
+    - gsk_AAAAAAAAAAAAAAAAAAAA
+    junk:
+    - gsk_short
+  xai_api:
+    good:
+    - xai-AAAAAAAAAAAAAAAAAAAA
+    junk:
+    - xai-short
+  perplexity_api:
+    good:
+    - pplx-AAAAAAAAAAAAAAAAAAAA
+    junk:
+    - pplx-short
+  fireworks_api:
+    good:
+    - fw_AAAAAAAAAAAAAAAAAAAAAAAA
+    junk:
+    - fw_short
+  slack_app_token:
+    good:
+    - xapp-1-AAAAAAAAAAAAAAAAAAAA
+    junk:
+    - xapp-1-short
+  figma_token:
+    good:
+    - figd_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    junk:
+    - figd_short
+  databricks_token:
+    good:
+    - dapiaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    junk:
+    - dapiaaaaaaaa
+  postman_api:
+    good:
+    - PMAK-aaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+    junk:
+    - PMAK-short
+  sonar_token:
+    good:
+    - squ_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    junk:
+    - squ_short
+  cloudinary_url:
+    good:
+    - cloudinary://abc:secretpass@demo-cloud
+    junk:
+    - cloudinary://nopath
+  razorpay_key:
+    good:
+    - rzp_live_AAAAAAAAAAAAAA
+    junk:
+    - rzp_live_short
+  flutterwave_secret:
+    good:
+    - FLWSECK-AAAAAAAAAA
+    junk:
+    - FLWSECK-ab

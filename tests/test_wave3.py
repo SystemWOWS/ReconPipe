@@ -117,6 +117,64 @@ class Wave3HelperTests(unittest.TestCase):
             strings = (out / "_apk_strings.txt").read_text(encoding="utf-8")
             self.assertIn("sk_live_", strings)
 
+    def test_apkm_nested_apk_extract(self):
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
+            inner = td_path / "base.apk"
+            with zipfile.ZipFile(inner, "w") as zf:
+                zf.writestr("assets/google-services.json", '{"api_key":"AIzaSyNestedKey00000000000000000000"}')
+            apkm = td_path / "app.apkm"
+            with zipfile.ZipFile(apkm, "w") as zf:
+                zf.write(inner, arcname="base.apk")
+            out = td_path / "out"
+            files = w3.extract_mobile_archive(apkm, out)
+            names = {p.name for p in files}
+            self.assertIn("google-services.json", names)
+
+    def test_package_id_and_apkeep_fetch(self):
+        self.assertEqual(w3.parse_package_id("com.example.app"), "com.example.app")
+        self.assertEqual(w3.parse_package_id("com.example.app@1.2.3"), "com.example.app@1.2.3")
+        self.assertEqual(w3.parse_package_id("not a package"), "")
+        dest = Path("out")
+        self.assertEqual(
+            w3.apkeep_cmd("com.example.app", dest),
+            ["apkeep", "-a", "com.example.app", str(dest)],
+        )
+        self.assertEqual(
+            w3.gplaycli_cmd("com.example.app@9", dest),
+            ["gplaycli", "-d", "com.example.app", "-y", "-f", str(dest)],
+        )
+        with tempfile.TemporaryDirectory() as td:
+            dest = Path(td)
+
+            def fake_which(name: str):
+                return "/usr/bin/apkeep" if name == "apkeep" else None
+
+            def fake_run(cmd, timeout=180):
+                out = Path(cmd[-1])
+                (out / "com.example.app.apk").write_bytes(b"PK\x03\x04fake")
+                return 0, b""
+
+            files = w3.fetch_android_packages(
+                ["com.example.app", "not valid"],
+                dest,
+                run=fake_run,
+                which=fake_which,
+            )
+            self.assertEqual(len(files), 1)
+            self.assertTrue(files[0].name.endswith(".apk"))
+
+            def none_which(_name: str):
+                return None
+
+            empty = w3.fetch_android_packages(
+                ["com.example.app"],
+                dest / "empty",
+                run=lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("no network")),
+                which=none_which,
+            )
+            self.assertEqual(empty, [])
+
     def test_bucket_candidates_and_listing(self):
         names = w3.bucket_name_candidates("www.example.com")
         self.assertIn("example", names)
@@ -194,15 +252,19 @@ class Wave3HelperTests(unittest.TestCase):
             "--skip-openapi",
             "--ci",
             "--apk", "app.apk",
+            "--package", "com.example.app",
             "--github-org", "acme",
         ])
         self.assertTrue(args.skip_code_search)
         self.assertTrue(args.ci)
         self.assertEqual(args.apk, ["app.apk"])
+        self.assertEqual(args.package, ["com.example.app"])
         args2 = parser.parse_args(["--ci"])
         rp.apply_ci_defaults(args2)
         self.assertTrue(args2.skip_chaos)
         self.assertTrue(args2.skip_code_search)
+        self.assertTrue(args2.skip_ci_logs)
+        self.assertTrue(args2.skip_pastes)
         self.assertTrue(args2.skip_buckets)
         self.assertTrue(args2.no_notify)
         self.assertEqual(args2.domain, "local")
@@ -211,14 +273,21 @@ class Wave3HelperTests(unittest.TestCase):
         argv = rp.argv_from_options({
             "domain": "example.com",
             "skip_code_search": True,
+            "skip_ci_logs": True,
+            "skip_pastes": True,
             "skip_buckets": True,
             "ci": True,
             "apk": ["app.apk"],
+            "package": ["com.example.app"],
             "github_org": "acme",
         })
         self.assertIn("--skip-code-search", argv)
+        self.assertIn("--skip-ci-logs", argv)
+        self.assertIn("--skip-pastes", argv)
         self.assertIn("--ci", argv)
         self.assertIn("--apk", argv)
+        self.assertIn("--package", argv)
+        self.assertIn("com.example.app", argv)
 
     def test_certstream_and_crtsh_parsers(self):
         hosts = w3.crtsh_hosts_from_payload([

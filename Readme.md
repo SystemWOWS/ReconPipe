@@ -163,7 +163,7 @@ Every stage is optional. If a binary is missing, ReconPipe logs it and continues
 | Download       | Parallel fetch of JS, maps, JSON, HTML, env-like URLs                                                                            | Local copies for scanners        |
 | Secret scan    | TruffleHog, Gitleaks, jsleak, `config.yaml` regex, [secrets-patterns-db](https://github.com/mazen160/secrets-patterns-db) extras | Extract candidates               |
 | Validate       | Async HTTP checks (aiohttp) against provider APIs                                                                                | Confirm the key still works      |
-| Report         | JSON, SARIF, HTML/Markdown, HackerOne/Jira drafts; rule-based P1/P2/P3 in `ai_verdict.json`; optional LLM `remediation.md`       | Review, CI, verify-and-fix       |
+| Report         | JSON, SARIF, HTML/Markdown, vendor dashboard, pentest + executive templates, HackerOne/Jira drafts; rule-based P1/P2/P3 in `ai_verdict.json`; optional LLM `remediation.md` | Review, CI, verify-and-fix, leadership brief |
 
 
 `--files urls.txt` skips URL discovery. `--subdomains hosts.txt` skips Chaos. `--no-trufflehog` uses only the built-in regex engine. `--no-validate` stops after detection.
@@ -453,9 +453,10 @@ Tabs:
 - **Scan** — target, intel keys, stage skips, start / cancel
 - **Apps** — APK / IPA / package IDs
 - **Console** — live log and stage tracker (`reconpipe.py` as a cancellable subprocess)
-- **Findings** — actionable / informational / exposures, redacted secrets, Reveal, re-test
+- **Findings** — actionable / informational / exposures, redacted secrets, Reveal, re-test. **Report template** picker + **Generate report**: pentest / bug-bounty write-up (HackerOne, Bugcrowd, Intigriti style) or an executive briefing for a CEO/CTO meeting
+- **Vendors** — companies whose keys showed up, with a short about/website blurb, product type, live vs seen, and redacted fingerprints
 - **Key Tester** — paste one or more credentials, pick a type (auto-detected when the prefix is unique), live-check without a full scan. Includes HubSpot private-app tokens (`pat-na1-…` / `pat-eu1-…` / `pat-ap1-…`)
-- **Artifacts** — preview/download reports (including `remediation.md`) plus a zip when the scan finishes
+- **Artifacts** — preview/download reports (including `vendors.html`, `report_pentest.md`, `report_executive.md` / `.html`, `remediation.md`) plus a zip when the scan finishes
 - **History** — past scans (`~/.reconpipe/history.yaml`) with Open / Rescan
 - **Settings** — dark mode, LLM provider (Ollama / OpenAI-compatible / OpenAI / Anthropic), model, base URL, API key, auto-run after scan, Test LLM, Generate report from a finished workspace
 
@@ -547,7 +548,7 @@ ReconPipe stacks several engines. Hits are de-duplicated (SHA-256 of the secret)
 | Built-in JS parser                                        | Endpoints + assignments in downloaded JS                                                                                    |
 
 
-Covered families include cloud (AWS, GCP, Azure, OCI), git forges, payments, email/SMS, Slack/Discord/Telegram, CRM (HubSpot private-app `pat-na1-` / `pat-eu1-` / `pat-ap1-` tokens; live-check `GET https://api.hubapi.com/integrations/v1/me`), AI vendors (OpenAI `sk-` / `sk-proj-` / `sk-svcacct-`, Anthropic `sk-ant-api03-` / `sk-ant-admin01-`, Hugging Face `hf_`), PaaS (Vercel, Railway, Render, Fly, Heroku), data stores (Mongo, Postgres, Redis URIs), CI, observability, and generic `api_key=` assignments. Informational hits (publishable keys, client SDK IDs) are stored separately and are not treated as secrets.
+Covered families include cloud (AWS, GCP, Azure, OCI), git forges, payments (including Razorpay `rzp_live_` / Flutterwave `FLWSECK-`), email/SMS, Slack/Discord/Telegram (including Slack app tokens `xapp-`), CRM (HubSpot private-app `pat-na1-` / `pat-eu1-` / `pat-ap1-` tokens; live-check `GET https://api.hubapi.com/integrations/v1/me`), AI vendors (OpenAI `sk-` / `sk-proj-` / `sk-svcacct-`, Anthropic `sk-ant-api03-` / `sk-ant-admin01-`, Hugging Face `hf_`, Groq `gsk_`, xAI `xai-`, Perplexity `pplx-`, Fireworks `fw_`), design/data tooling (Figma `figd_`, Databricks `dapi`, Postman `PMAK-`, Sonar `squ_`, Cloudinary `cloudinary://`), PaaS (Vercel, Railway, Render, Fly, Heroku), data stores (Mongo, Postgres, Redis URIs), CI, observability, and generic `api_key=` assignments. Informational hits (publishable keys, client SDK IDs) are stored separately and are not treated as secrets.
 
 Validators send `Referer: https://<target>/` so domain-restricted keys are more likely to exercise than fail as 403 from your IP. AWS access keys pair with nearby secrets for STS. OpenAI keys are checked with `GET https://api.openai.com/v1/models`, Anthropic with `GET https://api.anthropic.com/v1/models` (`x-api-key` + `anthropic-version: 2023-06-01`), Hugging Face with `GET https://huggingface.co/api/whoami-v2`. PayPal, WooCommerce, Mixpanel, and Algolia halves are paired the same way when they share a source. Database URIs are inspected locally — ReconPipe does not connect to leaked database hosts.
 
@@ -635,10 +636,13 @@ Start here:
 | `docker_hub_images.json` / `image_refs.json` | Public images queued for layer scan   |
 | `results.sarif`                          | SARIF 2.1.0 for CI                           |
 | `export_hackerone.md` / `export_jira.md` | Draft write-ups                              |
+| `vendors.json` / `vendors.html`          | Companies + key types, fingerprints only     |
+| `report_pentest.md`                      | Bug-bounty style (CWE, impact, verify steps) |
+| `report_executive.md` / `.html`          | Meeting-room brief for CEO / CTO / board     |
 | `.reconpipe_ignore.json`                 | Baseline (type + source, or `--ignore-hash`) |
 
 
-Useful intermediates: `subdomains.txt`, `live_hosts.txt`, `files_to_scan.txt`, `downloaded_files/`, `reconstructed_sources/`, `image_layers/`, `js_history.json`, `js_history_removed.json`, `js_endpoints.json`, `js_secrets.json`, `gitleaks.json`, `jsleak.txt`, `sensitive_paths.txt`, `wayback_sources.json`, `code_search_urls.txt`, `docker_hub_images.json`, `image_refs.json`, `ai_verdict.json`, `remediation.md`, `llm_report.json`, `buckets.json`, `openapi_urls.txt`, `download_etag.json`, `pipeline_metrics.json`, `checkpoint.json`.
+Useful intermediates: `subdomains.txt`, `live_hosts.txt`, `files_to_scan.txt`, `downloaded_files/`, `reconstructed_sources/`, `image_layers/`, `js_history.json`, `js_history_removed.json`, `js_endpoints.json`, `js_secrets.json`, `gitleaks.json`, `jsleak.txt`, `sensitive_paths.txt`, `wayback_sources.json`, `code_search_urls.txt`, `docker_hub_images.json`, `image_refs.json`, `ai_verdict.json`, `remediation.md`, `llm_report.json`, `vendors.json`, `report_pentest.md`, `report_executive.md`, `buckets.json`, `openapi_urls.txt`, `download_etag.json`, `pipeline_metrics.json`, `checkpoint.json`.
 
 Keep the output directory private. `valid_keys.json` is the highest-risk file.
 
@@ -801,7 +805,7 @@ reconpipe -d example.com
 
 ```bash
 python3 -m unittest tests.test_wave2 tests.test_wave3 tests.test_new_features tests.test_cli_and_keys \
-  tests.test_patterns tests.test_user_settings tests.test_llm tests.test_httpx_resolve tests.test_osint tests.test_docker -q
+  tests.test_patterns tests.test_user_settings tests.test_llm tests.test_reports tests.test_httpx_resolve tests.test_osint tests.test_docker -q
 
 # GUI wiring (Windows: set PYTHONIOENCODING=utf-8)
 python3 tests/test_gui_integration.py

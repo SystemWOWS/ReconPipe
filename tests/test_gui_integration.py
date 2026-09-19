@@ -118,6 +118,18 @@ def test_pipeline_subprocess():
         assert findings_path.is_file()
         data = json.loads(findings_path.read_text(encoding="utf-8"))
         assert isinstance(data, list)
+        for name in (
+            "vendors.json",
+            "vendors.html",
+            "report_pentest.md",
+            "report_executive.md",
+            "report_executive.html",
+        ):
+            assert (fx["out"] / name).is_file(), name
+        pentest = (fx["out"] / "report_pentest.md").read_text(encoding="utf-8")
+        execu = (fx["out"] / "report_executive.md").read_text(encoding="utf-8")
+        assert "Steps to reproduce" in pentest
+        assert "Bottom line" in execu
         print("[ok] GUI-style subprocess pipeline exit", proc.returncode, "findings", len(data))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -171,8 +183,17 @@ def test_gui_module_compiles_and_helpers():
     assert "mailchimp" in mod.validator_type_options()
     assert "hubspot_api" in mod.validator_type_options()
     assert 'ui.tab("Settings")' in src
+    assert 'ui.tab("Vendors")' in src
     assert "Enable LLM reports" in src
     assert "Generate report from finished scan" in src
+    assert "Report template" in src
+    assert "Generate report" in src
+    assert "Pentest / bug bounty" in src
+    assert "Executive briefing" in src
+    assert "groq_api" in mod.validator_type_options()
+    assert "figma_token" in mod.validator_type_options()
+    groq_hits = mod.guess_key_types("gsk_" + "A" * 20)
+    assert "groq_api" in groq_hits
     runner = mod.PipelineRunner()
     runner._offer_log("https://cdn.example.com/app.js?x=1")
     runner._offer_log("found endpoint /api/v1/users")
