@@ -771,9 +771,9 @@ export HTTPX_BIN="$HOME/go/bin/httpx"
 # Kali package: apt install httpx-toolkit   # binary name: httpx-toolkit
 ```
 
-**Chaos returns nothing**
+**Chaos returns nothing / website shows thousands of hosts**
 
-Set `CHAOS_KEY` or `PDCP_API_KEY`, or pass `--chaos-key`. You can always feed `--subdomains`.
+Chaos indexes the **apex** (`optus.com.au`), not `https://www.optus.com.au/` or `www.optus.com.au`. ReconPipe strips those. The website is logged-in; the CLI needs the same ProjectDiscovery Cloud key: `PDCP_API_KEY` or `CHAOS_KEY`, `--chaos-key`, or **Save API keys → Chaos**. Without a key the scan falls back to the single target host. You can always feed `--subdomains`.
 
 **amass: “unable to build the pool of untrusted resolvers”**
 

@@ -1297,7 +1297,107 @@ def _host_from_target(value: str) -> str:
     text = (value or "").strip().lower()
     if "://" in text:
         text = (urlparse(text).hostname or "") or text
+    if "/" in text:
+        text = text.split("/", 1)[0]
+    if ":" in text and not text.count(":") > 1:
+        text = text.split(":", 1)[0]
     return text.strip().rstrip(".")
+
+
+def normalize_scan_domain(value: str) -> str:
+    """Host only. Chaos/subfinder need the apex (optus.com.au), not a URL or www."""
+    host = _host_from_target(value)
+    if host.startswith("www.") and host.count(".") >= 2:
+        rest = host[4:]
+        if "." in rest:
+            host = rest
+    return host
+
+
+def resolve_chaos_key(args: Any = None) -> str:
+    """CLI flag → CHAOS_KEY → PDCP_API_KEY → keys.yaml. Never log the value."""
+    picked = ""
+    if args is not None:
+        picked = str(getattr(args, "chaos_key", None) or "").strip()
+    if not picked:
+        picked = (os.environ.get("CHAOS_KEY") or os.environ.get("PDCP_API_KEY") or "").strip()
+    if not picked:
+        picked = (load_user_keys().get("chaos") or "").strip()
+    return picked
+
+
+def parse_chaos_subdomain_payload(data: Any, domain: str) -> List[str]:
+    """Chaos JSON lists labels (`www`) or FQDNs. Always return FQDNs including the apex."""
+    apex = normalize_scan_domain(domain)
+    raw: Any = []
+    if isinstance(data, dict):
+        raw = data.get("subdomains") or data.get("data") or []
+    elif isinstance(data, list):
+        raw = data
+    hosts: List[str] = [apex] if apex else []
+    for item in raw:
+        if isinstance(item, dict):
+            item = item.get("subdomain") or item.get("host") or item.get("name") or ""
+        label = str(item or "").strip().lower().rstrip(".")
+        if not label:
+            continue
+        if label == apex or (apex and label.endswith("." + apex)):
+            hosts.append(label)
+        elif "." not in label and apex:
+            hosts.append(f"{label}.{apex}")
+        else:
+            hosts.append(label)
+    return merge_host_lists([], hosts)
+
+
+def query_chaos_http(
+    domain: str,
+    api_key: str,
+    timeout: int = 45,
+) -> List[str]:
+    """Official Chaos DNS API (same dataset as chaos.projectdiscovery.io)."""
+    apex = normalize_scan_domain(domain)
+    key = (api_key or "").strip()
+    if not apex or not key:
+        return []
+    url = f"https://dns.projectdiscovery.io/dns/{quote(apex, safe='.-')}/subdomains"
+    req = urllib.request.Request(
+        url,
+        headers={
+            "Authorization": key,
+            "Accept": "application/json",
+            "User-Agent": "ReconPipe",
+        },
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = resp.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        snippet = ""
+        try:
+            snippet = (exc.read() or b"").decode("utf-8", errors="replace")[:180]
+        except Exception:
+            snippet = ""
+        if exc.code in (401, 403):
+            log(
+                "Chaos API rejected the key (HTTP "
+                f"{exc.code}). Use a ProjectDiscovery Cloud key "
+                "(PDCP_API_KEY / CHAOS_KEY / GUI Chaos field).",
+                "warn",
+            )
+        else:
+            log(f"Chaos HTTP {exc.code}: {snippet or exc.reason}", "warn")
+        return []
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        log(f"Chaos HTTP failed: {exc}", "warn")
+        return []
+    try:
+        payload = json.loads(body)
+    except json.JSONDecodeError:
+        log("Chaos HTTP returned non-JSON", "warn")
+        return []
+    return parse_chaos_subdomain_payload(payload, apex)
 
 
 def _glob_match_host(pattern: str, host: str) -> bool:
@@ -2805,6 +2905,7 @@ def build_chaos_cmd(
     api_key: str = "",
     help_blob: Optional[str] = None,
 ) -> List[str]:
+    domain = normalize_scan_domain(domain)
     blob = help_blob if help_blob is not None else _cmd_blob("chaos", "-h")
     cmd = ["chaos"]
     _extend_if(cmd, blob, "-d", domain)
@@ -6962,6 +7063,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         log("Need -d/--domain or --domain-list", "error")
         return 2
 
+    cleaned = normalize_scan_domain(args.domain)
+    if not cleaned:
+        log(f"Need a DNS name, not {args.domain!r}", "error")
+        return 2
+    if cleaned != (args.domain or "").strip():
+        log(f"Normalized target {args.domain} → {cleaned}", "info")
+        args.domain = cleaned
+
     if args.subdomains and not Path(args.subdomains).exists():
         log(f"Subdomains file not found: {args.subdomains}", "error")
         return 1
@@ -7126,20 +7235,51 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.subdomains:
         subdomains_file = Path(args.subdomains)
         log(f"Using existing file: {subdomains_file}", "info")
-    elif args.skip_chaos or not tools_status["chaos"]:
-        if not args.skip_chaos:
-            log("chaos not found — using target domain only", "warn")
-            log("Install: go install -v github.com/projectdiscovery/chaos-client/cmd/chaos@latest", "warn")
+    elif args.skip_chaos:
         subdomains_file.write_text(args.domain + "\n")
         log(f"Wrote single domain as fallback: {args.domain}", "info")
     else:
-        chaos_key = args.chaos_key or os.environ.get("CHAOS_KEY", "")
-        cmd = build_chaos_cmd(args.domain, str(subdomains_file), chaos_key)
-        log("Running chaos...", "info")
-        rc, _ = run_cmd(cmd)
-        if rc != 0 or not subdomains_file.exists() or subdomains_file.stat().st_size == 0:
+        chaos_key = resolve_chaos_key(args)
+        if tools_status["chaos"]:
+            cmd = build_chaos_cmd(args.domain, str(subdomains_file), chaos_key)
+            log(f"Running chaos -d {args.domain}...", "info")
+            chaos_env = os.environ.copy()
+            if chaos_key:
+                chaos_env["PDCP_API_KEY"] = chaos_key
+                chaos_env["CHAOS_KEY"] = chaos_key
+            rc, _ = run_cmd(cmd, env=chaos_env)
+            if rc != 0 and not (
+                subdomains_file.is_file() and subdomains_file.stat().st_size > 0
+            ):
+                log("Chaos CLI exited without a host list", "warn")
+        elif not chaos_key:
+            log("chaos not found — using target domain only", "warn")
+            log("Install: go install -v github.com/projectdiscovery/chaos-client/cmd/chaos@latest", "warn")
+        else:
+            log("chaos binary missing — querying Chaos HTTP API", "info")
+
+        cli_hosts: List[str] = []
+        if subdomains_file.is_file() and subdomains_file.stat().st_size > 0:
+            cli_hosts = [
+                s.strip() for s in subdomains_file.read_text(encoding="utf-8", errors="ignore").splitlines()
+                if s.strip()
+            ]
+        if len(cli_hosts) <= 1 and chaos_key:
+            http_hosts = query_chaos_http(args.domain, chaos_key)
+            if http_hosts:
+                log(f"Chaos HTTP API: {len(http_hosts)} host(s)", "success")
+                cli_hosts = merge_host_lists(cli_hosts, http_hosts)
+        if len(cli_hosts) <= 1 and not chaos_key:
+            log(
+                "Chaos needs a ProjectDiscovery Cloud API key "
+                "(GUI: Save API keys → Chaos, or PDCP_API_KEY / CHAOS_KEY). "
+                "The website is logged-in; the CLI is not.",
+                "warn",
+            )
+        if not cli_hosts:
             log("Chaos returned no results — falling back to target domain", "warn")
-            subdomains_file.write_text(args.domain + "\n")
+            cli_hosts = [args.domain]
+        subdomains_file.write_text("\n".join(cli_hosts) + "\n", encoding="utf-8")
 
     sub_list = [s for s in subdomains_file.read_text().splitlines() if s.strip()]
     sub_count = len(sub_list)

@@ -138,9 +138,33 @@ class ToolCliAdapters(unittest.TestCase):
         )
         self.assertIn("-d", chaos)
         self.assertIn("-silent", chaos)
+        self.assertIn("abc", chaos)
         gau = rp.build_gau_cmd("example.com", 7, help_blob="--threads")
         self.assertEqual(gau[-1], "example.com")
         self.assertIn("--threads", gau)
+        www = rp.build_chaos_cmd(
+            "https://www.optus.com.au/", "out.txt", "", help_blob=CHAOS_HELP
+        )
+        self.assertIn("optus.com.au", www)
+        self.assertNotIn("www.optus.com.au", www)
+
+    def test_normalize_scan_domain_strips_url_and_www(self):
+        self.assertEqual(
+            rp.normalize_scan_domain("https://www.optus.com.au/"),
+            "optus.com.au",
+        )
+        self.assertEqual(rp.normalize_scan_domain("WWW.optus.com.au"), "optus.com.au")
+        self.assertEqual(rp.normalize_scan_domain("optus.com.au."), "optus.com.au")
+        self.assertEqual(rp.normalize_scan_domain("www.com"), "www.com")
+
+    def test_parse_chaos_payload_expands_labels(self):
+        hosts = rp.parse_chaos_subdomain_payload(
+            {"domain": "optus.com.au", "subdomains": ["www", "mail", "optus.com.au"]},
+            "www.optus.com.au",
+        )
+        self.assertIn("optus.com.au", hosts)
+        self.assertIn("www.optus.com.au", hosts)
+        self.assertIn("mail.optus.com.au", hosts)
 
 
 class QuietConsole(unittest.TestCase):

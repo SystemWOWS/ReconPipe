@@ -150,6 +150,9 @@ def test_gui_module_compiles_and_helpers():
     assert not mod.validate_form(
         {"domain": "example.com", "concurrency": 10, "gau_threads": 5}
     )
+    assert not mod.validate_form(
+        {"domain": "https://www.optus.com.au/", "concurrency": 10, "gau_threads": 5}
+    )
     assert mod.validate_form(
         {"domain": "bad domain", "concurrency": 10, "gau_threads": 5}
     )

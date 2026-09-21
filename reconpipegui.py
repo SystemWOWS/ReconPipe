@@ -809,7 +809,7 @@ def validator_type_options() -> List[str]:
 
 def validate_form(opts: Dict[str, Any]) -> List[str]:
     errors: List[str] = []
-    domain = (opts.get("domain") or "").strip()
+    domain = rp.normalize_scan_domain(opts.get("domain") or "")
     domain_list = (opts.get("domain_list") or "").strip()
     if not domain and not domain_list:
         errors.append("Target domain is required.")
@@ -1389,7 +1389,7 @@ def build_ui() -> None:
 
                         domain_in = ui.input(
                             "Target domain (-d)",
-                            placeholder="example.com",
+                            placeholder="optus.com.au  ·  URLs and www. are stripped",
                         ).classes("w-full").props("outlined dense")
                         with ui.row().classes("w-full gap-2"):
                             sub_in = ui.input(
@@ -1845,8 +1845,13 @@ def build_ui() -> None:
                             for ln in (ignore_in.value or "").splitlines()
                             if ln.strip()
                         ]
+                        domain = rp.normalize_scan_domain(domain_in.value or "") or (
+                            domain_in.value or ""
+                        ).strip()
+                        if domain and domain != (domain_in.value or "").strip():
+                            domain_in.set_value(domain)
                         return {
-                            "domain": (domain_in.value or "").strip(),
+                            "domain": domain,
                             "subdomains": (sub_in.value or "").strip() or None,
                             "files": (files_in.value or "").strip() or None,
                             "output": (out_in.value or "").strip() or None,
