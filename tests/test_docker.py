@@ -25,6 +25,7 @@ class DockerPackagingTests(unittest.TestCase):
         self.assertIn("projectdiscovery/httpx", dockerfile)
         self.assertIn("zricethezav/gitleaks/v8", dockerfile)
         self.assertIn("trufflehog", dockerfile)
+        self.assertIn("webanalyze", dockerfile)
         self.assertIn("/opt/pd-bin", dockerfile)
         self.assertIn("HTTPX_BIN=/opt/pd-bin/httpx", dockerfile)
         self.assertIn("CMD [\"gui\"]", dockerfile)

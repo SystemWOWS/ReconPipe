@@ -464,6 +464,8 @@ build_linkfinder_cmd = addons.build_linkfinder_cmd
 build_naabu_cmd = addons.build_naabu_cmd
 build_whatweb_cmd = addons.build_whatweb_cmd
 build_wappalyzer_cmd = addons.build_wappalyzer_cmd
+build_webanalyze_file_cmd = addons.build_webanalyze_file_cmd
+build_httpx_tech_cmd = addons.build_httpx_tech_cmd
 build_gowitness_cmd = addons.build_gowitness_cmd
 build_nuclei_cmd = addons.build_nuclei_cmd
 inspect_connection_uri = addons.inspect_connection_uri
@@ -2526,7 +2528,7 @@ PIPELINE_TOOLS = [
     "chaos", "subfinder", "amass", "assetfinder", "findomain", "dnsx",
     "httpx", "katana", "waymore", "gospider", "gau", "waybackurls",
     "hakrawler", "paramspider", "linkfinder", "naabu", "whatweb",
-    "wappalyzer", "gowitness", "nuclei", "trufflehog", "gitleaks", "spray", "jsleak",
+    "webanalyze", "wappalyzer", "gowitness", "nuclei", "trufflehog", "gitleaks", "spray", "jsleak",
 ]
 DISCOVERY_URL_CAP = 20000
 DISCOVERY_PASSIVE_HOST_CAP = 80
@@ -2557,16 +2559,26 @@ def url_set_full(dest: Set[str], cap: int = DISCOVERY_URL_CAP) -> bool:
     return len(dest) >= cap
 
 
+_CMD_BLOB_CACHE: Dict[Tuple[str, Tuple[str, ...]], str] = {}
+
+
 def _cmd_blob(path: str, *args: str) -> str:
+    key = (str(path), tuple(str(a) for a in args))
+    cached = _CMD_BLOB_CACHE.get(key)
+    if cached is not None:
+        return cached
+    blob = ""
     try:
         proc = subprocess.run(
-            [path, *args], capture_output=True, timeout=6
+            [path, *args], capture_output=True, timeout=2.5
         )
-        return ((proc.stdout or b"") + (proc.stderr or b"")).decode(
+        blob = ((proc.stdout or b"") + (proc.stderr or b"")).decode(
             "utf-8", errors="replace"
         )
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-        return ""
+        blob = ""
+    _CMD_BLOB_CACHE[key] = blob
+    return blob
 
 
 def is_projectdiscovery_httpx(help_or_version: str) -> bool:
@@ -2600,10 +2612,20 @@ def _iter_named_binaries(names: List[str]) -> List[str]:
     seen: set = set()
     extra = [
         str(Path.home() / "go" / "bin"),
+        str(Path.home() / "bin"),
         "/usr/local/bin",
         "/usr/bin",
+        "/opt/pd-bin",
+        "/opt/homebrew/bin",
         str(Path.home() / ".local" / "bin"),
+        str(Path.home() / "scoop" / "shims"),
     ]
+    gobin = (os.environ.get("GOBIN") or "").strip()
+    if gobin:
+        extra.append(gobin)
+    gopath = (os.environ.get("GOPATH") or "").strip()
+    if gopath:
+        extra.append(str(Path(gopath) / "bin"))
     dirs = list(os.environ.get("PATH", "").split(os.pathsep)) + extra
     suffixes = [""]
     if os.name == "nt":
@@ -2618,6 +2640,8 @@ def _iter_named_binaries(names: List[str]) -> List[str]:
                 cand = Path(directory) / f"{name}{suf}"
                 try:
                     if not cand.is_file():
+                        continue
+                    if os.name != "nt" and not os.access(cand, os.X_OK):
                         continue
                     resolved = str(cand.resolve())
                 except OSError:
@@ -2687,23 +2711,44 @@ def log_httpx_missing() -> None:
     log("On Kali: apt install httpx-toolkit  (binary name: httpx-toolkit)", "warn")
 
 
+# Presence checks must not run `--help` (whatweb/gowitness/jsluice can hang past 5s
+# and were reported MISSING even when installed). Look up the file instead.
+TOOL_ALIASES: Dict[str, Tuple[str, ...]] = {
+    "wappalyzer": ("webanalyze", "wappalyzer"),
+    "webanalyze": ("webanalyze", "wappalyzer"),
+    "whatweb": ("whatweb", "WhatWeb"),
+    "gplaycli": ("gplaycli", "gplay-cli"),
+    "linkfinder": ("linkfinder", "LinkFinder"),
+    "paramspider": ("paramspider", "ParamSpider"),
+}
+
+
+def resolve_tool_path(name: str) -> Optional[str]:
+    """First matching executable on PATH plus Go / local bin dirs."""
+    aliases = list(TOOL_ALIASES.get(name, (name,)))
+    if name not in aliases:
+        aliases.append(name)
+    found = _iter_named_binaries(aliases)
+    return found[0] if found else None
+
+
+def httpx_has_tech_detect(httpx_bin: Optional[str] = None) -> bool:
+    path = httpx_bin or resolve_httpx_bin()
+    if not path:
+        return False
+    blob = _httpx_identify(path)
+    return help_has_flag(blob, "tech-detect") or help_has_flag(blob, "td")
+
+
 def check_tool(name: str) -> bool:
-    """True if the binary is on PATH (exit code of --help/--version is ignored)."""
+    """True if the binary is on PATH (or an alias / httpx tech-detect for Wappalyzer)."""
     if name == "httpx":
         return resolve_httpx_bin() is not None
-    try:
-        # --no-update first: `trufflehog --version` otherwise tries to replace its binary
-        argv = (
-            [name, "--no-update", "--version"]
-            if name == "trufflehog"
-            else [name, "version"]
-            if name == "gitleaks"
-            else [name, "--help"]
-        )
-        subprocess.run(argv, capture_output=True, timeout=5)
-        return True
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-        return False
+    if name in ("wappalyzer", "webanalyze"):
+        if resolve_tool_path("webanalyze") or resolve_tool_path("wappalyzer"):
+            return True
+        return httpx_has_tech_detect()
+    return resolve_tool_path(name) is not None
 
 
 def probe_tools(tools: Optional[List[str]] = None) -> Dict[str, bool]:
@@ -6141,18 +6186,26 @@ def osint_source_status(
         shodan = "key"
     elif os.environ.get("SHODAN_API_KEY"):
         shodan = "env"
+    elif (load_user_keys().get("shodan") or "").strip():
+        shodan = "saved"
     else:
         shodan = "off"
     if (censys_id or "").strip() and (censys_secret or "").strip():
         censys = "key"
     elif os.environ.get("CENSYS_API_ID") and os.environ.get("CENSYS_API_SECRET"):
         censys = "env"
+    elif (load_user_keys().get("censys_id") or "").strip() and (
+        load_user_keys().get("censys_secret") or ""
+    ).strip():
+        censys = "saved"
     else:
         censys = "off"
     if (zoomeye_key or "").strip():
         zoomeye = "key"
     elif os.environ.get("ZOOMEYE_API_KEY") or os.environ.get("ZOOMEYE_KEY"):
         zoomeye = "env"
+    elif (load_user_keys().get("zoomeye") or "").strip():
+        zoomeye = "saved"
     else:
         zoomeye = "off"
     return {
@@ -7363,14 +7416,46 @@ def main(argv: Optional[List[str]] = None) -> int:
     if tools_status.get("wappalyzer") and live_list and not skip_completed_stage(resume_from, "httpx"):
         wap_out = output_dir / "wappalyzer.json"
         rows: List[str] = []
-        log("Running wappalyzer...", "info")
-        for host in live_list[:25]:
-            target = host if host.startswith("http") else f"https://{host}"
-            rc, output = run_cmd(build_wappalyzer_cmd(target), timeout=30)
+        webanalyze_bin = addons.resolve_webanalyze_bin()
+        if webanalyze_bin and "webanalyze" in Path(webanalyze_bin).name.lower():
+            log("Running webanalyze (Wappalyzer fingerprints)...", "info")
+            hosts_in = output_dir / "webanalyze_hosts.txt"
+            hosts_in.write_text(
+                "\n".join(
+                    (h if h.startswith("http") else f"https://{h}") for h in live_list[:80]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            rc, output = run_cmd(
+                build_webanalyze_file_cmd(str(hosts_in), str(wap_out)),
+                timeout=180,
+            )
             rows.extend(collect_tool_stdout_lines(output))
+        elif httpx_bin and httpx_has_tech_detect(httpx_bin):
+            log("Running httpx -tech-detect (wappalyzergo)...", "info")
+            tech_in = output_dir / "httpx_tech_input.txt"
+            tech_in.write_text("\n".join(live_list[:80]) + "\n", encoding="utf-8")
+            rc, _output = run_cmd(
+                build_httpx_tech_cmd(httpx_bin, str(tech_in), str(wap_out)),
+                timeout=180,
+                discard_stdout=True,
+            )
+            if wap_out.is_file():
+                rows = [
+                    ln
+                    for ln in wap_out.read_text(encoding="utf-8", errors="ignore").splitlines()
+                    if ln.strip()
+                ]
+        else:
+            log("Running wappalyzer...", "info")
+            for host in live_list[:25]:
+                target = host if host.startswith("http") else f"https://{host}"
+                rc, output = run_cmd(build_wappalyzer_cmd(target), timeout=30)
+                rows.extend(collect_tool_stdout_lines(output))
         if rows:
             wap_out.write_text("\n".join(rows) + "\n", encoding="utf-8")
-            log(f"wappalyzer: {len(rows)} line(s)", "info")
+            log(f"tech detect: {len(rows)} line(s) → {wap_out.name}", "info")
 
     # URL discovery
     step_header(3, "URL Discovery (Katana + waymore + gospider)")

@@ -148,7 +148,7 @@ The GHCR package must be **public** for anonymous `docker compose pull`. If it i
 
 `--docker-fallback` is a different feature: it runs *missing* host binaries via `docker run --rm`. You do not need it inside this image.
 
-Katana `--headless` needs Chrome, which this image does not ship. Leave headless off in Docker. whatweb, gowitness, and wappalyzer are also not in the image (Ruby / Chrome / Node).
+Katana `--headless` needs Chrome, which this image does not ship. Leave headless off in Docker. whatweb and gowitness are also not in the image (Ruby / Chrome). Tech fingerprints use **webanalyze** (or `httpx -td`) instead of the old npm wappalyzer CLI.
 
 ---
 
@@ -213,6 +213,7 @@ go install -v github.com/projectdiscovery/dnsx/cmd/dnsx@latest
 go install github.com/projectdiscovery/katana/cmd/katana@latest
 go install github.com/jaeles-project/gospider@latest
 go install github.com/BishopFox/jsluice/cmd/jsluice@latest   # optional, for Katana -jsl
+go install github.com/rverton/webanalyze/cmd/webanalyze@latest  # Wappalyzer fingerprints (replaces npm wappalyzer)
 
 # Archives
 go install github.com/lc/gau/v2/cmd/gau@latest
@@ -229,7 +230,7 @@ curl -sSfL https://raw.githubusercontent.com/trufflesecurity/trufflehog/main/scr
 
 Put `$HOME/go/bin` **ahead** of `~/.local/bin` on `PATH`. The Python `httpx` package also ships a CLI named `httpx`; ReconPipe ignores that one, but a wrong binary on `PATH` is a common first-run issue. See [Troubleshooting](#troubleshooting).
 
-Optional but useful when present: amass, assetfinder, findomain, hakrawler, paramspider, LinkFinder, naabu, whatweb, wappalyzer, gowitness, nuclei, spray.
+Optional but useful when present: amass, assetfinder, findomain, hakrawler, paramspider, LinkFinder, naabu, whatweb, webanalyze, gowitness, nuclei, spray.
 
 `--docker-fallback` can run a missing tool via `docker run --rm` when an image is known.
 
@@ -456,12 +457,10 @@ The window covers the same options as the CLI: domain, skips, concurrency, intel
 
 Tabs:
 
-- **Scan** — target, intel keys, stage skips, start / cancel
-- **Apps** — APK / IPA / package IDs
+- **Scan** — target, intel keys, stage skips, start / cancel (status next to Start/Stop)
+- **Apps** — APK / IPA / AAB / package IDs (unzip + optional jadx/apktool/plutil)
 - **Console** — live log and stage tracker (`reconpipe.py` as a cancellable subprocess)
-- **Findings** — live Gitleaks-style report (totals, keys-by-company graph, table of rule / where found / company / redacted secret / metadata). Fills in during a scan. Reveal, inspect, re-test. **Report template** picker + **Generate report**: pentest / bug-bounty write-up (HackerOne, Bugcrowd, Intigriti style) or an executive briefing for a CEO/CTO meeting. Also writes `findings_report.html`
-- **Vendors** — companies whose keys showed up, with a short about/website blurb, product type, live vs seen, and redacted fingerprints
-- **Key Tester** — paste one or more credentials, pick a type (auto-detected when the prefix is unique), live-check without a full scan. Includes HubSpot private-app tokens (`pat-na1-…` / `pat-eu1-…` / `pat-ap1-…`) and n8n public API keys (legacy `n8n_api_…` or JWT with `iss=n8n` / `aud=public-api`; live-check needs the instance URL)
+- **Findings** — one panel with nested tabs (NiceGUI `ui.tabs` / `ui.tab_panels`): **Report** (live Gitleaks-style table), **3D map** (NiceGUI `ui.scene` + `@ui.refreshable` company pack), **Vendors**, **Key Tester**. Click a company block for keys/tokens/sources. Reveal, inspect, re-test. **Report template** picker + **Generate report**: pentest / bug-bounty write-up (HackerOne, Bugcrowd, Intigriti style) or an executive briefing for a CEO/CTO meeting. Also writes `findings_report.html`
 - **Artifacts** — preview/download reports (including `findings_report.html`, `vendors.html`, `report_pentest.md`, `report_executive.md` / `.html`, `remediation.md`) plus a zip when the scan finishes
 - **History** — past scans (`~/.reconpipe/history.yaml`) with Open / Rescan
 - **Settings** — dark mode, LLM provider (Ollama / OpenAI-compatible / OpenAI / Anthropic), model, base URL, API key, auto-run after scan, Test LLM, Generate report from a finished workspace
@@ -486,7 +485,7 @@ This is separate from `ai_verdict.json`, which is still a **rule-based** P1/P2/P
 
 Only **redacted fingerprints** are sent to the model, not full secrets. If the LLM is unreachable, a local template with the same Verify / Fix sections is written instead.
 
-**GUI:** Settings → enable LLM reports → Save. Leave **Run automatically when a scan finishes** on, or load a finished output folder and click **Generate report from finished scan**.
+**GUI:** Settings → enable LLM reports → Save. **Run automatically when a scan finishes** starts **unticked**. Turn it on only if you want a report after every scan, or load a finished output folder and click **Generate report from finished scan**.
 
 **Local (no cloud key):**
 
@@ -586,7 +585,7 @@ After validation, those hits (and every other finding) get a **rule-based priori
 
 The score starts from regex confidence and adds/subtracts fixed points for: AI-provider type, MCP config source, live vs dead validation, severity, and container-image origin. That ranking does **not** call an LLM. Optional model-written verify/fix text is `remediation.md` — see [LLM remediation](#llm-remediation).
 
-**Mobile apps** — GUI **Apps** tab, or CLI `--apk app.apk` / `--ipa app.ipa` (repeatable; `.xapk` / `.apkm` too). `--package com.example.app` (repeatable) downloads the APK first with [apkeep](https://github.com/EFForg/apkeep) (preferred; default source APKPure, no Play credentials) or `gplaycli`, then runs the same extract/scan. Pin a version with `com.example.app@1.2.3` (apkeep). Unzips the archive, keeps JS/JSON/XML/plist, strings-dumps binaries (Firebase, Maps keys, `.env`), and scans those files. In Docker, upload the package on the Apps tab (host `/home/.../Downloads` paths are not visible in the container), or install `apkeep` in the image / use `--docker-fallback`.
+**Mobile apps** — GUI **Apps** tab, or CLI `--apk app.apk` / `--ipa app.ipa` (repeatable; `.xapk` / `.apkm` / `.aab` / `.apks` too). `--package com.example.app` (repeatable) downloads the APK first with [apkeep](https://github.com/EFForg/apkeep) (preferred; default source APKPure, no Play credentials) or `gplaycli`, then runs the same extract/scan. Pin a version with `com.example.app@1.2.3` (apkeep). ReconPipe unzips the archive for you, keeps JS/JSON/XML/plist/RN/Flutter/Capacitor configs, strings-dumps binaries, and runs **jadx** / **apktool** / **plutil** when those tools are on `PATH`. In Docker, upload the package on the Apps tab (host `/home/.../Downloads` paths are not visible in the container), or install `apkeep` in the image / use `--docker-fallback`.
 
 **JS source maps** — After download, every `.js` file is checked for `//# sourceMappingURL=` and for `same-url.js.map`. A public map is parsed (`sourcesContent`, or HTTP fetch of listed `sources`) and the original files are written to `reconstructed_sources/`. TruffleHog, Gitleaks, and `config.yaml` regex scan that tree like downloaded JS, then the same live validators run. `--skip-sourcemaps` disables it. Public maps still also appear in `source_map_exposures.json`.
 

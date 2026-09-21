@@ -35,6 +35,7 @@ RUN go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest \
  || true
 RUN go install github.com/tomnomnom/anew@latest || true
 RUN go install github.com/BishopFox/jsluice/cmd/jsluice@latest || true
+RUN go install github.com/rverton/webanalyze/cmd/webanalyze@latest || true
 RUN go install github.com/owasp-amass/amass/v4/...@v4.2.0 \
  || go install github.com/owasp-amass/amass/v4/...@master \
  || true

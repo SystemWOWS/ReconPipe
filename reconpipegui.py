@@ -33,6 +33,11 @@ except ImportError:
     sys.exit(1)
 
 try:
+    from nicegui import events as ng_events
+except Exception:
+    ng_events = None
+
+try:
     from nicegui import run as nicegui_run
 except Exception:
     nicegui_run = None  
@@ -334,7 +339,7 @@ def default_output_dir(domain: str) -> Path:
     return root / f"recon_{safe}"
 
 
-APK_SUFFIXES = (".apk", ".xapk", ".apkm")
+APK_SUFFIXES = (".apk", ".xapk", ".apkm", ".aab", ".apks")
 IPA_SUFFIXES = (".ipa",)
 
 
@@ -1346,8 +1351,6 @@ def build_ui() -> None:
         tab_apps = ui.tab("Apps")
         tab_console = ui.tab("Console")
         tab_findings = ui.tab("Findings")
-        tab_vendors = ui.tab("Vendors")
-        tab_tester = ui.tab("Key Tester")
         tab_artifacts = ui.tab("Artifacts")
         tab_history = ui.tab("History")
         tab_settings = ui.tab("Settings")
@@ -1611,6 +1614,10 @@ def build_ui() -> None:
                                 }
                             )
                             fill_saved_keys()
+                            try:
+                                refresh_tools()
+                            except Exception:
+                                pass
                             ui.notify(f"Saved API keys to {path}", type="positive")
 
                         with ui.row().classes("w-full gap-2"):
@@ -2009,7 +2016,7 @@ def build_ui() -> None:
                         STATE.runner.stop()
                         ui.notify("Stop signal sent", type="warning")
 
-                    with ui.row().classes("gap-2"):
+                    with ui.row().classes("gap-2 items-center"):
                         ui.button("Start scan", on_click=start_scan, color="primary").props(
                             "unelevated"
                         )
@@ -2019,6 +2026,14 @@ def build_ui() -> None:
                         ui.button(
                             "Preview CLI", on_click=preview_cmd, color="secondary"
                         ).props("flat")
+                        status_dot = ui.element("span").classes("rp-status-dot")
+                        status_label = ui.label("IDLE").classes(
+                            "font-mono font-bold tracking-widest"
+                        )
+                    eta_label = ui.label("").classes(
+                        "text-xs text-slate-400 font-mono mt-1"
+                    )
+                    stats_html = ui.html("", sanitize=False).classes("hidden")
                     cmd_preview = ui.label("").classes(
                         "text-xs text-gray-500 font-mono break-all"
                     )
@@ -2039,6 +2054,8 @@ def build_ui() -> None:
                                 "jsluice": rp.check_tool("jsluice"),
                                 "apkeep": rp.check_tool("apkeep"),
                                 "gplaycli": rp.check_tool("gplaycli"),
+                                "jadx": rp.check_tool("jadx"),
+                                "apktool": rp.check_tool("apktool"),
                             }
                             intel = rp.osint_source_status(
                                 shodan_key=shodan_in.value or "",
@@ -2051,9 +2068,17 @@ def build_ui() -> None:
                             with tools_box:
                                 httpx_bin = rp.resolve_httpx_bin()
                                 python_httpx = rp.python_httpx_on_path()
-                                for name, ok in {**status, **extras}.items():
+                                listed = {**status, **extras}
+                                listed.pop("wappalyzer", None)
+                                if "webanalyze" in listed:
+                                    listed["webanalyze"] = bool(
+                                        listed.get("webanalyze")
+                                        or status.get("wappalyzer")
+                                    )
+                                for name, ok in listed.items():
+                                    shown = name
                                     with ui.row().classes("w-full justify-between"):
-                                        ui.label(name).classes("font-mono text-sm")
+                                        ui.label(shown).classes("font-mono text-sm")
                                         if ok:
                                             ui.label("FOUND").classes(
                                                 "text-xs rp-badge-ok"
@@ -2084,12 +2109,15 @@ def build_ui() -> None:
                                 }
                                 for key, title in labels.items():
                                     st = intel.get(key, "off")
-                                    chip = (
-                                        "on" if st in ("key", "env", "on") else "off"
-                                    )
+                                    if st in ("key", "env", "on", "saved"):
+                                        chip, shown = "on", "ON"
+                                    elif st == "skipped":
+                                        chip, shown = "off", "SKIPPED"
+                                    else:
+                                        chip, shown = "off", "OFF"
                                     with ui.row().classes("w-full justify-between"):
                                         ui.label(title).classes("font-mono text-sm")
-                                        ui.label(st.upper()).classes(
+                                        ui.label(shown).classes(
                                             f"text-xs rp-chip {chip}"
                                         )
                                 ui.separator()
@@ -2100,27 +2128,6 @@ def build_ui() -> None:
                                 ).classes("text-xs text-gray-500")
 
                         refresh_tools()
-
-                    with ui.card().classes("w-full rp-card"):
-                        ui.label("Run status").classes("rp-section")
-                        with ui.row().classes("items-center no-wrap"):
-                            status_dot = ui.element("span").classes("rp-status-dot")
-                            status_label = ui.label("IDLE").classes(
-                                "font-mono font-bold tracking-widest"
-                            )
-                        eta_label = ui.label("").classes(
-                            "text-xs text-slate-400 font-mono mt-1"
-                        )
-                        stats_html = ui.html("", sanitize=False).classes("w-full")
-                        ui.button(
-                            "Download reports (.zip)",
-                            on_click=lambda: (
-                                build_ui.download_all_artifacts()  
-                                if callable(getattr(build_ui, "download_all_artifacts", None))
-                                else ui.notify("Open the Artifacts tab first", type="warning")
-                            ),
-                            color="primary",
-                        ).props("unelevated dense").classes("mt-2")
 
                     with ui.card().classes("w-full rp-card"):
                         ui.label("Load workspace").classes("rp-section")
@@ -2286,7 +2293,7 @@ def build_ui() -> None:
                                 max_file_size=200_000_000,
                                 label="Upload APK / IPA",
                             ).props(
-                                'accept=".apk,.xapk,.apkm,.ipa" dense'
+                                'accept=".apk,.xapk,.apkm,.aab,.apks,.ipa" dense'
                             ).classes("flex-1")
                         render_app_files()
 
@@ -2374,8 +2381,9 @@ def build_ui() -> None:
                     with ui.card().classes("w-full rp-card"):
                         ui.label("What this does").classes("rp-section")
                         ui.label(
-                            "Accepts .apk, .xapk, .apkm (APKMirror), and .ipa. "
-                            "Extracts into recon_<domain>/mobile_extract/. "
+                            "Accepts .apk, .xapk, .apkm, .aab, .apks, and .ipa. "
+                            "Unzips and optionally decompiles (jadx / apktool / plutil) "
+                            "into recon_<domain>/mobile_extract/ — no manual unzip. "
                             "Findings show on Findings / Artifacts. "
                             "In Docker, uploads land in /work/mobile_uploads/."
                         ).classes("text-sm text-slate-500")
@@ -2407,831 +2415,975 @@ def build_ui() -> None:
                             "text-xs text-slate-500"
                         )
 
-        # Findings
+        # Findings (Report + 3D map + Vendors + Key Tester — one panel)
         with ui.tab_panel(tab_findings):
-            with ui.card().classes("w-full rp-card"):
-                ui.label("Security Findings").classes("rp-section")
-                ui.label(
-                    "Live Gitleaks-style report: company, where the key was found, "
-                    "redacted secret. Rows fill in while a scan runs. Reveal before copy."
-                ).classes("text-xs text-gray-500 mb-2")
+            with ui.tabs().classes("w-full") as hit_tabs:
+                sub_report = ui.tab("Report")
+                sub_scene = ui.tab("3D map")
+                sub_vendors = ui.tab("Vendors")
+                sub_tester = ui.tab("Key Tester")
+            with ui.tab_panels(hit_tabs, value=sub_report).classes("w-full"):
+                with ui.tab_panel(sub_report):
+                    with ui.card().classes("w-full rp-card"):
+                        ui.label("Security Findings").classes("rp-section")
+                        ui.label(
+                            "Live report: company, where the key was found, "
+                            "redacted secret. Rows fill in while a scan runs. Reveal before copy."
+                        ).classes("text-xs text-gray-500 mb-2")
 
-                with ui.row().classes("w-full gap-2 flex-wrap items-end"):
-                    f_type = ui.select(
-                        ["All"], value="All", label="Filter by Rule"
-                    ).classes("w-48").props("dense outlined")
-                    f_company = ui.select(
-                        ["All"], value="All", label="Filter by Company"
-                    ).classes("w-52").props("dense outlined")
-                    f_file = ui.input("Filter by File").classes("w-64").props(
-                        "dense outlined placeholder='URL, path, or filename'"
-                    )
-                    f_status = ui.select(
-                        ["All", "Valid", "Invalid", "Unchecked", "Error/Skipped"],
-                        value="All",
-                        label="Validation",
-                    ).classes("w-44").props("dense outlined")
-                    f_tier = ui.select(
-                        ["All", "actionable", "informational", "exposure"],
-                        value="All",
-                        label="Tier",
-                    ).classes("w-40").props("dense outlined")
-                    f_sev = ui.select(
-                        ["All", "critical", "high", "medium", "low"],
-                        value="All",
-                        label="Severity",
-                    ).classes("w-36").props("dense outlined")
-                    f_query = ui.input("Search source / note / hash").classes(
-                        "flex-1"
-                    ).props("dense outlined")
-                    f_conf = ui.number(
-                        "Min confidence", value=0, min=0, max=100
-                    ).classes("w-36").props("dense")
-
-                    def apply_filters() -> None:
-                        STATE.filter_type = f_type.value or "All"
-                        STATE.filter_company = f_company.value or "All"
-                        STATE.filter_file = (f_file.value or "").strip().lower()
-                        STATE.filter_status = f_status.value or "All"
-                        STATE.filter_tier = f_tier.value or "All"
-                        STATE.filter_severity = f_sev.value or "All"
-                        STATE.filter_query = (f_query.value or "").strip().lower()
-                        STATE.min_confidence = int(f_conf.value or 0)
-                        render_findings()
-
-                    def reset_filters() -> None:
-                        f_type.set_value("All")
-                        f_company.set_value("All")
-                        f_file.set_value("")
-                        f_status.set_value("All")
-                        f_tier.set_value("All")
-                        f_sev.set_value("All")
-                        f_query.set_value("")
-                        f_conf.set_value(0)
-                        apply_filters()
-
-                    ui.button("Apply", on_click=apply_filters, color="primary").props(
-                        "unelevated dense"
-                    )
-                    ui.button("Reset Filters", on_click=reset_filters, color="secondary").props(
-                        "outline dense"
-                    )
-                    ui.button(
-                        "Reload files", on_click=lambda: reload_findings(), color="secondary"
-                    ).props("outline dense")
-
-                    def export_h1() -> None:
-                        text = rp.export_hackerone_markdown(STATE.findings)
-                        ui.notify("HackerOne markdown generated — see Artifacts", type="positive")
-                        preview_path = (STATE.workspace or STATE.runner.output_dir)
-                        if preview_path:
-                            Path(preview_path).mkdir(parents=True, exist_ok=True)
-                            (Path(preview_path) / "export_hackerone.md").write_text(text, encoding="utf-8")
-
-                    def export_jira() -> None:
-                        text = rp.export_jira_markdown(STATE.findings)
-                        preview_path = (STATE.workspace or STATE.runner.output_dir)
-                        if preview_path:
-                            Path(preview_path).mkdir(parents=True, exist_ok=True)
-                            (Path(preview_path) / "export_jira.md").write_text(text, encoding="utf-8")
-                        ui.notify("Jira markdown generated", type="positive")
-
-                    report_tpl = ui.select(
-                        {
-                            "pentest": "Pentest / bug bounty (HackerOne, Bugcrowd, Intigriti)",
-                            "executive": "Executive briefing (CEO / CTO / board)",
-                        },
-                        value="pentest",
-                        label="Report template",
-                    ).classes("w-96").props("dense outlined")
-
-                    def generate_template_report() -> None:
-                        ws = STATE.workspace or STATE.runner.output_dir
-                        if not ws:
-                            ui.notify("Load or finish a scan first", type="warning")
-                            return
-                        ws_path = Path(ws)
-                        findings = list(STATE.findings or [])
-                        exposures = list(STATE.exposures or [])
-                        informational = list(STATE.informational or [])
-                        if not findings and not exposures and not informational:
-                            findings = load_json_list(ws_path / "findings.json")
-                            informational = load_json_list(ws_path / "informational.json")
-                            exposures = load_json_list(ws_path / "source_map_exposures.json")
-                        domain = STATE.domain or "scan"
-                        tid = str(report_tpl.value or "pentest")
-                        written = rp.rp_reports.write_vendor_and_reports(
-                            ws_path,
-                            domain,
-                            findings,
-                            exposures,
-                            informational,
-                            redact=rp.redact_key,
-                        )
-                        dest = written.get(
-                            "report_executive.md" if tid == "executive" else "report_pentest.md"
-                        )
-                        try:
-                            build_ui.render_vendors()  
-                        except Exception:
-                            pass
-                        try:
-                            build_ui.refresh_artifacts()  
-                        except Exception:
-                            pass
-                        name = dest.name if dest is not None else "report"
-                        ui.notify(
-                            f"Wrote {name} (and vendor dashboard) — open Artifacts to download",
-                            type="positive",
-                        )
-
-                    ui.button(
-                        "Generate report",
-                        on_click=generate_template_report,
-                        color="primary",
-                    ).props("unelevated dense")
-                    ui.button("Export HackerOne", on_click=export_h1, color="secondary").props("flat dense")
-                    ui.button("Export Jira", on_click=export_jira, color="secondary").props("flat dense")
-
-                findings_html = ui.html(
-                    "<p class='text-slate-500 text-sm'>Run a scan or load a workspace — "
-                    "the live report fills in here.</p>",
-                    sanitize=False,
-                )
-                with ui.row().classes("w-full gap-2 flex-wrap items-end mt-2"):
-                    inspect_select = ui.select(
-                        {"_": "Select a finding to inspect"},
-                        value="_",
-                        label="Inspect row",
-                    ).classes("flex-1").props("dense outlined")
-                    inspect_btns = ui.row().classes("gap-1")
-
-                detail_host = ui.card().classes("w-full rp-card mt-2")
-                with detail_host:
-                    ui.label("Select a finding to inspect / re-test.").classes(
-                        "text-slate-400 text-sm"
-                    )
-
-                def filtered_rows() -> List[Dict]:
-                    rows: List[Dict] = []
-                    for f in STATE.findings:
-                        rows.append({**f, "_tier": "actionable"})
-                    for f in STATE.informational:
-                        rows.append({**f, "_tier": "informational"})
-                    for f in STATE.exposures:
-                        rows.append({**f, "_tier": "exposure"})
-
-                    out: List[Dict] = []
-                    for f in rows:
-                        if STATE.filter_tier != "All" and f.get("_tier") != STATE.filter_tier:
-                            continue
-                        if STATE.filter_severity != "All" and str(f.get("severity") or "").lower() != STATE.filter_severity:
-                            continue
-                        if STATE.filter_type != "All" and f.get("type") != STATE.filter_type:
-                            continue
-                        company_want = STATE.filter_company
-                        if company_want and company_want != "All":
-                            vid, _prod = rp.rp_reports.vendor_for_type(str(f.get("type") or ""))
-                            rec = rp.rp_reports.vendor_record(vid)
-                            if rec.get("name") != company_want and vid != company_want:
-                                continue
-                        file_q = STATE.filter_file
-                        if file_q:
-                            loc = rp.rp_reports.finding_source_location(f).lower()
-                            if file_q not in loc:
-                                continue
-                        conf = f.get("confidence")
-                        try:
-                            if conf is not None and int(conf) < STATE.min_confidence:
-                                continue
-                        except (TypeError, ValueError):
-                            pass
-                        valid = f.get("valid")
-                        validated = f.get("validated")
-                        status = STATE.filter_status
-                        if status == "Valid" and not valid:
-                            continue
-                        if status == "Invalid" and not (validated and valid is False):
-                            continue
-                        if status == "Unchecked" and validated:
-                            continue
-                        if status == "Error/Skipped":
-                            note = (f.get("note") or "").lower()
-                            if not any(
-                                x in note
-                                for x in ("skip", "error", "timeout", "no validator")
-                            ):
-                                continue
-                        q = STATE.filter_query
-                        if q:
-                            vid, _prod = rp.rp_reports.vendor_for_type(str(f.get("type") or ""))
-                            company = rp.rp_reports.vendor_record(vid).get("name") or ""
-                            blob = " ".join(
-                                str(f.get(k, ""))
-                                for k in (
-                                    "type",
-                                    "source_url",
-                                    "note",
-                                    "hash",
-                                    "scanner",
-                                    "detector",
-                                )
-                            ).lower()
-                            blob = f"{blob} {company.lower()}"
-                            if q not in blob:
-                                continue
-                        out.append(f)
-                    return out
-
-                def render_findings() -> None:
-                    rows = filtered_rows()
-                    shown = rows[:FINDINGS_RENDER_CAP]
-                    types = sorted(
-                        {
-                            str(f.get("type") or "unknown")
-                            for f in (
-                                STATE.findings
-                                + STATE.informational
-                                + STATE.exposures
+                        with ui.row().classes("w-full gap-2 flex-wrap items-end"):
+                            f_type = ui.select(
+                                ["All"], value="All", label="Filter by Rule"
+                            ).classes("w-48").props("dense outlined")
+                            f_company = ui.select(
+                                ["All"], value="All", label="Filter by Company"
+                            ).classes("w-52").props("dense outlined")
+                            f_file = ui.input("Filter by File").classes("w-64").props(
+                                "dense outlined placeholder='URL, path, or filename'"
                             )
-                        }
-                    )
-                    companies = sorted(
-                        {
-                            rp.rp_reports.vendor_record(
-                                rp.rp_reports.vendor_for_type(str(f.get("type") or ""))[0]
-                            )["name"]
-                            for f in (
-                                STATE.findings
-                                + STATE.informational
-                                + STATE.exposures
-                            )
-                        }
-                    )
-                    type_opts = ["All", *types]
-                    company_opts = ["All", *companies]
-                    if list(f_type.options or []) != type_opts:
-                        f_type.options = type_opts
-                    if list(f_company.options or []) != company_opts:
-                        f_company.options = company_opts
+                            f_status = ui.select(
+                                ["All", "Valid", "Invalid", "Unchecked", "Error/Skipped"],
+                                value="All",
+                                label="Validation",
+                            ).classes("w-44").props("dense outlined")
+                            f_tier = ui.select(
+                                ["All", "actionable", "informational", "exposure"],
+                                value="All",
+                                label="Tier",
+                            ).classes("w-40").props("dense outlined")
+                            f_sev = ui.select(
+                                ["All", "critical", "high", "medium", "low"],
+                                value="All",
+                                label="Severity",
+                            ).classes("w-36").props("dense outlined")
+                            f_query = ui.input("Search source / note / hash").classes(
+                                "flex-1"
+                            ).props("dense outlined")
+                            f_conf = ui.number(
+                                "Min confidence", value=0, min=0, max=100
+                            ).classes("w-36").props("dense")
 
-                    reports = rp.rp_reports
-                    enriched = []
-                    inspect_opts = {"_": "Select a finding to inspect"}
-                    id_map: Dict[str, Dict] = {}
-                    for idx, f in enumerate(shown):
-                        key = str(f.get("key") or "")
-                        fid = str(f.get("hash") or f"{f.get('type')}:{key[:24]}:{idx}")
-                        row = reports.enrich_finding_row(
-                            f,
-                            tier=str(f.get("_tier") or "actionable"),
-                            redact=rp.redact_key,
-                            reveal=fid in STATE.revealed,
-                        )
-                        row["_id"] = fid
-                        enriched.append(row)
-                        loc = row.get("source_short") or "unknown"
-                        inspect_opts[fid] = (
-                            f"{row.get('rule')} · {row.get('company')} · {loc}"
-                        )
-                        id_map[fid] = f
-                    STATE._inspect_map = id_map
-                    stats = reports.findings_report_stats(
-                        STATE.findings, STATE.exposures, STATE.informational
-                    )
-                    live = bool(STATE.runner.running)
-                    mode = "Live scan" if live else "ReconPipe"
-                    generated = (
-                        "Updating as hits arrive"
-                        if live
-                        else datetime.now().strftime("%b %d, %Y %H:%M:%S")
-                    )
-                    dash = reports.findings_dashboard_html(
-                        STATE.domain or "scan",
-                        enriched,
-                        stats=stats,
-                        generated=generated,
-                        scan_mode=mode,
-                        live=live,
-                        fragment=True,
-                        cap=FINDINGS_RENDER_CAP,
-                        total=len(rows),
-                    )
-                    sig = (
-                        dash,
-                        tuple(inspect_opts.items()),
-                        live,
-                    )
-                    if getattr(STATE, "_dash_sig", None) != sig:
-                        STATE._dash_sig = sig
-                        findings_html.set_content(dash)
-                        prev = inspect_select.value
-                        inspect_select.options = inspect_opts
-                        if prev in inspect_opts:
-                            inspect_select.set_value(prev)
-                        elif inspect_select.value not in inspect_opts:
-                            inspect_select.set_value("_")
-
-                        inspect_btns.clear()
-                        with inspect_btns:
-                            def _selected_row() -> Tuple[Optional[Dict], str]:
-                                fid = str(inspect_select.value or "_")
-                                row = (getattr(STATE, "_inspect_map", {}) or {}).get(fid)
-                                return row, fid
-
-                            def do_inspect() -> None:
-                                row, fid = _selected_row()
-                                if not row or fid == "_":
-                                    ui.notify("Select a finding first", type="warning")
-                                    return
-                                show_detail(row, fid)
-
-                            def do_reveal() -> None:
-                                row, fid = _selected_row()
-                                if not row or fid == "_":
-                                    ui.notify("Select a finding first", type="warning")
-                                    return
-                                if fid in STATE.revealed:
-                                    STATE.revealed.discard(fid)
-                                else:
-                                    STATE.revealed.add(fid)
-                                STATE._dash_sig = None
+                            def apply_filters() -> None:
+                                STATE.filter_type = f_type.value or "All"
+                                STATE.filter_company = f_company.value or "All"
+                                STATE.filter_file = (f_file.value or "").strip().lower()
+                                STATE.filter_status = f_status.value or "All"
+                                STATE.filter_tier = f_tier.value or "All"
+                                STATE.filter_severity = f_sev.value or "All"
+                                STATE.filter_query = (f_query.value or "").strip().lower()
+                                STATE.min_confidence = int(f_conf.value or 0)
                                 render_findings()
-                                show_detail(row, fid)
 
-                            async def do_copy() -> None:
-                                row, fid = _selected_row()
-                                if not row or fid == "_":
-                                    ui.notify("Select a finding first", type="warning")
+                            def reset_filters() -> None:
+                                f_type.set_value("All")
+                                f_company.set_value("All")
+                                f_file.set_value("")
+                                f_status.set_value("All")
+                                f_tier.set_value("All")
+                                f_sev.set_value("All")
+                                f_query.set_value("")
+                                f_conf.set_value(0)
+                                apply_filters()
+
+                            ui.button("Apply", on_click=apply_filters, color="primary").props(
+                                "unelevated dense"
+                            )
+                            ui.button("Reset Filters", on_click=reset_filters, color="secondary").props(
+                                "outline dense"
+                            )
+                            ui.button(
+                                "Reload files", on_click=lambda: reload_findings(), color="secondary"
+                            ).props("outline dense")
+
+                            def export_h1() -> None:
+                                text = rp.export_hackerone_markdown(STATE.findings)
+                                ui.notify("HackerOne markdown generated — see Artifacts", type="positive")
+                                preview_path = (STATE.workspace or STATE.runner.output_dir)
+                                if preview_path:
+                                    Path(preview_path).mkdir(parents=True, exist_ok=True)
+                                    (Path(preview_path) / "export_hackerone.md").write_text(text, encoding="utf-8")
+
+                            def export_jira() -> None:
+                                text = rp.export_jira_markdown(STATE.findings)
+                                preview_path = (STATE.workspace or STATE.runner.output_dir)
+                                if preview_path:
+                                    Path(preview_path).mkdir(parents=True, exist_ok=True)
+                                    (Path(preview_path) / "export_jira.md").write_text(text, encoding="utf-8")
+                                ui.notify("Jira markdown generated", type="positive")
+
+                            report_tpl = ui.select(
+                                {
+                                    "pentest": "Pentest / bug bounty (HackerOne, Bugcrowd, Intigriti)",
+                                    "executive": "Executive briefing (CEO / CTO / board)", # Remove
+                                    "internal": "Internal report (Internal use only)",
+                                },
+                                value="pentest",
+                                label="Report template",
+                            ).classes("w-96").props("dense outlined")
+
+                            def generate_template_report() -> None:
+                                ws = STATE.workspace or STATE.runner.output_dir
+                                if not ws:
+                                    ui.notify("Load or finish a scan first", type="warning")
                                     return
-                                val = str(row.get("key") or "")
+                                ws_path = Path(ws)
+                                findings = list(STATE.findings or [])
+                                exposures = list(STATE.exposures or [])
+                                informational = list(STATE.informational or [])
+                                if not findings and not exposures and not informational:
+                                    findings = load_json_list(ws_path / "findings.json")
+                                    informational = load_json_list(ws_path / "informational.json")
+                                    exposures = load_json_list(ws_path / "source_map_exposures.json")
+                                domain = STATE.domain or "scan"
+                                tid = str(report_tpl.value or "pentest")
+                                written = rp.rp_reports.write_vendor_and_reports(
+                                    ws_path,
+                                    domain,
+                                    findings,
+                                    exposures,
+                                    informational,
+                                    redact=rp.redact_key,
+                                )
+                                dest = written.get(
+                                    "report_executive.md" if tid == "executive" else "report_pentest.md"
+                                )
                                 try:
-                                    await ui.run_javascript(
-                                        f"navigator.clipboard.writeText({json.dumps(val)})"
-                                    )
+                                    build_ui.render_vendors()  
                                 except Exception:
                                     pass
-                                ui.notify("Copied to clipboard", type="positive")
-
-                            ui.button("Inspect", on_click=do_inspect, color="primary").props(
-                                "dense unelevated"
-                            )
-                            _row, fid = _selected_row()
-                            revealed = fid in STATE.revealed and fid != "_"
-                            ui.button(
-                                "Hide" if revealed else "Reveal",
-                                on_click=do_reveal,
-                                color="secondary",
-                            ).props("dense flat")
-                            ui.button("Copy", on_click=do_copy, color="secondary").props(
-                                "dense flat"
-                            )
-
-                def show_detail(finding: Dict, fid: str) -> None:
-                    detail_host.clear()
-                    with detail_host:
-                        ui.label(
-                            f"Detail · {finding.get('type', 'unknown')}"
-                        ).classes("rp-section")
-                        revealed = fid in STATE.revealed
-                        ui.label(
-                            "Key: " + redact_secret(str(finding.get("key") or ""), revealed)
-                        ).classes("rp-secret text-sm")
-                        vid, product = rp.rp_reports.vendor_for_type(
-                            str(finding.get("type") or "")
-                        )
-                        company = rp.rp_reports.vendor_record(vid).get("name") or vid
-                        ui.label(f"Company: {company} · {product}").classes(
-                            "text-sm text-slate-300"
-                        )
-                        loc = rp.rp_reports.finding_source_location(finding)
-                        line = rp.rp_reports.finding_line_number(finding)
-                        line_bit = f" · line {line}" if line else ""
-                        ui.label(f"Where found: {loc}{line_bit}").classes(
-                            "text-xs text-slate-400 break-all"
-                        )
-                        if finding.get("scanner"):
-                            ui.label(f"Scanner: {finding.get('scanner')}").classes(
-                                "text-xs text-slate-500"
-                            )
-                        ui.label(f"Hash: {finding.get('hash', '—')}").classes(
-                            "text-xs text-slate-500"
-                        )
-                        ui.label(
-                            f"Valid: {finding.get('valid')} · Status: {finding.get('status_code')} · "
-                            f"Note: {finding.get('note', '')}"
-                        ).classes("text-sm text-slate-300 mt-1")
-                        if finding.get("jwt"):
-                            ui.code(json.dumps(finding["jwt"], indent=2)).classes("w-full")
-
-                        can_test = finding.get("_tier") == "actionable" and (
-                            finding.get("type") in rp.VALIDATORS
-                        )
-                        test_note = ui.label(STATE.last_test_note).classes(
-                            "text-sm text-slate-400 mt-2"
-                        )
-
-                        async def retest() -> None:
-                            if not STATE.domain:
-                                ui.notify(
-                                    "Set domain context (scan form or Load workspace)",
-                                    type="negative",
-                                )
-                                return
-                            if finding.get("type") not in rp.VALIDATORS:
-                                ui.notify(
-                                    "No configured validator for this type",
-                                    type="warning",
-                                )
-                                return
-                            ui.notify("Running configured validator…", type="info")
-                            try:
-                                result = await run_io_bound(
-                                    rp.validate_finding_configured_sync,
-                                    dict(finding),
-                                    STATE.domain,
-                                    STATE.shopify_domain,
-                                    STATE.config_overlays,
-                                )
-                            except Exception as exc:
-                                ui.notify(f"Validation error: {exc}", type="negative")
-                                return
-                            # Merge into actionable findings list
-                            updated = False
-                            for i, existing in enumerate(STATE.findings):
-                                if (
-                                    existing.get("hash")
-                                    and existing.get("hash") == result.get("hash")
-                                ) or (
-                                    existing.get("type") == result.get("type")
-                                    and existing.get("key") == result.get("key")
-                                    and existing.get("source_url")
-                                    == result.get("source_url")
-                                ):
-                                    STATE.findings[i] = result
-                                    updated = True
-                                    break
-                            if not updated and result.get("_tier") != "informational":
-                                STATE.findings.append(result)
-                            # Persist back to findings.json when possible
-                            if STATE.workspace:
-                                path = STATE.workspace / "findings.json"
                                 try:
-                                    path.write_text(
-                                        json.dumps(STATE.findings, indent=2),
-                                        encoding="utf-8",
-                                    )
-                                    valid_only = [
-                                        x for x in STATE.findings if x.get("valid")
-                                    ]
-                                    if valid_only:
-                                        (STATE.workspace / "valid_keys.json").write_text(
-                                            json.dumps(valid_only, indent=2),
-                                            encoding="utf-8",
-                                        )
-                                except Exception as exc:
-                                    ui.notify(
-                                        f"Could not write findings.json: {exc}",
-                                        type="warning",
-                                    )
-                            stamp = datetime.now().strftime("%H:%M:%S")
-                            STATE.last_test_note = (
-                                f"[{stamp}] valid={result.get('valid')} "
-                                f"status={result.get('status_code')} "
-                                f"note={result.get('note', '')}"
+                                    build_ui.refresh_artifacts()  
+                                except Exception:
+                                    pass
+                                name = dest.name if dest is not None else "report"
+                                ui.notify(
+                                    f"Wrote {name} (and vendor dashboard) — open Artifacts to download",
+                                    type="positive",
+                                )
+
+                            ui.button(
+                                "Generate report",
+                                on_click=generate_template_report,
+                                color="primary",
+                            ).props("unelevated dense")
+                            ui.button("Export HackerOne", on_click=export_h1, color="secondary").props("flat dense")
+                            ui.button("Export Jira", on_click=export_jira, color="secondary").props("flat dense")
+
+                        findings_html = ui.html(
+                            "<p class='text-slate-500 text-sm'>Run a scan or load a workspace — "
+                            "the live report fills in here.</p>",
+                            sanitize=False,
+                        )
+                        with ui.row().classes("w-full gap-2 flex-wrap items-end mt-2"):
+                            inspect_select = ui.select(
+                                {"_": "Select a finding to inspect"},
+                                value="_",
+                                label="Inspect row",
+                            ).classes("flex-1").props("dense outlined")
+                            inspect_btns = ui.row().classes("gap-1")
+
+                        detail_host = ui.card().classes("w-full rp-card mt-2")
+                        with detail_host:
+                            ui.label("Select a finding to inspect / re-test.").classes(
+                                "text-slate-400 text-sm"
                             )
-                            test_note.set_text(STATE.last_test_note)
+
+                        def filtered_rows() -> List[Dict]:
+                            rows: List[Dict] = []
+                            for f in STATE.findings:
+                                rows.append({**f, "_tier": "actionable"})
+                            for f in STATE.informational:
+                                rows.append({**f, "_tier": "informational"})
+                            for f in STATE.exposures:
+                                rows.append({**f, "_tier": "exposure"})
+
+                            out: List[Dict] = []
+                            for f in rows:
+                                if STATE.filter_tier != "All" and f.get("_tier") != STATE.filter_tier:
+                                    continue
+                                if STATE.filter_severity != "All" and str(f.get("severity") or "").lower() != STATE.filter_severity:
+                                    continue
+                                if STATE.filter_type != "All" and f.get("type") != STATE.filter_type:
+                                    continue
+                                company_want = STATE.filter_company
+                                if company_want and company_want != "All":
+                                    vid, _prod = rp.rp_reports.vendor_for_type(str(f.get("type") or ""))
+                                    rec = rp.rp_reports.vendor_record(vid)
+                                    if rec.get("name") != company_want and vid != company_want:
+                                        continue
+                                file_q = STATE.filter_file
+                                if file_q:
+                                    loc = rp.rp_reports.finding_source_location(f).lower()
+                                    if file_q not in loc:
+                                        continue
+                                conf = f.get("confidence")
+                                try:
+                                    if conf is not None and int(conf) < STATE.min_confidence:
+                                        continue
+                                except (TypeError, ValueError):
+                                    pass
+                                valid = f.get("valid")
+                                validated = f.get("validated")
+                                status = STATE.filter_status
+                                if status == "Valid" and not valid:
+                                    continue
+                                if status == "Invalid" and not (validated and valid is False):
+                                    continue
+                                if status == "Unchecked" and validated:
+                                    continue
+                                if status == "Error/Skipped":
+                                    note = (f.get("note") or "").lower()
+                                    if not any(
+                                        x in note
+                                        for x in ("skip", "error", "timeout", "no validator")
+                                    ):
+                                        continue
+                                q = STATE.filter_query
+                                if q:
+                                    vid, _prod = rp.rp_reports.vendor_for_type(str(f.get("type") or ""))
+                                    company = rp.rp_reports.vendor_record(vid).get("name") or ""
+                                    blob = " ".join(
+                                        str(f.get(k, ""))
+                                        for k in (
+                                            "type",
+                                            "source_url",
+                                            "note",
+                                            "hash",
+                                            "scanner",
+                                            "detector",
+                                        )
+                                    ).lower()
+                                    blob = f"{blob} {company.lower()}"
+                                    if q not in blob:
+                                        continue
+                                out.append(f)
+                            return out
+
+                        def render_findings() -> None:
+                            rows = filtered_rows()
+                            shown = rows[:FINDINGS_RENDER_CAP]
+                            types = sorted(
+                                {
+                                    str(f.get("type") or "unknown")
+                                    for f in (
+                                        STATE.findings
+                                        + STATE.informational
+                                        + STATE.exposures
+                                    )
+                                }
+                            )
+                            companies = sorted(
+                                {
+                                    rp.rp_reports.vendor_record(
+                                        rp.rp_reports.vendor_for_type(str(f.get("type") or ""))[0]
+                                    )["name"]
+                                    for f in (
+                                        STATE.findings
+                                        + STATE.informational
+                                        + STATE.exposures
+                                    )
+                                }
+                            )
+                            type_opts = ["All", *types]
+                            company_opts = ["All", *companies]
+                            if list(f_type.options or []) != type_opts:
+                                f_type.options = type_opts
+                            if list(f_company.options or []) != company_opts:
+                                f_company.options = company_opts
+
+                            reports = rp.rp_reports
+                            enriched = []
+                            inspect_opts = {"_": "Select a finding to inspect"}
+                            id_map: Dict[str, Dict] = {}
+                            for idx, f in enumerate(shown):
+                                key = str(f.get("key") or "")
+                                fid = str(f.get("hash") or f"{f.get('type')}:{key[:24]}:{idx}")
+                                row = reports.enrich_finding_row(
+                                    f,
+                                    tier=str(f.get("_tier") or "actionable"),
+                                    redact=rp.redact_key,
+                                    reveal=fid in STATE.revealed,
+                                )
+                                row["_id"] = fid
+                                enriched.append(row)
+                                loc = row.get("source_short") or "unknown"
+                                inspect_opts[fid] = (
+                                    f"{row.get('rule')} · {row.get('company')} · {loc}"
+                                )
+                                id_map[fid] = f
+                            STATE._inspect_map = id_map
+                            stats = reports.findings_report_stats(
+                                STATE.findings, STATE.exposures, STATE.informational
+                            )
+                            live = bool(STATE.runner.running)
+                            mode = "Live scan" if live else "ReconPipe"
+                            generated = (
+                                "Updating as hits arrive"
+                                if live
+                                else datetime.now().strftime("%b %d, %Y %H:%M:%S")
+                            )
+                            dash = reports.findings_dashboard_html(
+                                STATE.domain or "scan",
+                                enriched,
+                                stats=stats,
+                                generated=generated,
+                                scan_mode=mode,
+                                live=live,
+                                fragment=True,
+                                cap=FINDINGS_RENDER_CAP,
+                                total=len(rows),
+                            )
+                            sig = (
+                                dash,
+                                tuple(inspect_opts.items()),
+                                live,
+                            )
+                            if getattr(STATE, "_dash_sig", None) != sig:
+                                STATE._dash_sig = sig
+                                findings_html.set_content(dash)
+                                prev = inspect_select.value
+                                inspect_select.options = inspect_opts
+                                if prev in inspect_opts:
+                                    inspect_select.set_value(prev)
+                                elif inspect_select.value not in inspect_opts:
+                                    inspect_select.set_value("_")
+
+                                inspect_btns.clear()
+                                with inspect_btns:
+                                    def _selected_row() -> Tuple[Optional[Dict], str]:
+                                        fid = str(inspect_select.value or "_")
+                                        row = (getattr(STATE, "_inspect_map", {}) or {}).get(fid)
+                                        return row, fid
+
+                                    def do_inspect() -> None:
+                                        row, fid = _selected_row()
+                                        if not row or fid == "_":
+                                            ui.notify("Select a finding first", type="warning")
+                                            return
+                                        show_detail(row, fid)
+
+                                    def do_reveal() -> None:
+                                        row, fid = _selected_row()
+                                        if not row or fid == "_":
+                                            ui.notify("Select a finding first", type="warning")
+                                            return
+                                        if fid in STATE.revealed:
+                                            STATE.revealed.discard(fid)
+                                        else:
+                                            STATE.revealed.add(fid)
+                                        STATE._dash_sig = None
+                                        render_findings()
+                                        show_detail(row, fid)
+
+                                    async def do_copy() -> None:
+                                        row, fid = _selected_row()
+                                        if not row or fid == "_":
+                                            ui.notify("Select a finding first", type="warning")
+                                            return
+                                        val = str(row.get("key") or "")
+                                        try:
+                                            await ui.run_javascript(
+                                                f"navigator.clipboard.writeText({json.dumps(val)})"
+                                            )
+                                        except Exception:
+                                            pass
+                                        ui.notify("Copied to clipboard", type="positive")
+
+                                    ui.button("Inspect", on_click=do_inspect, color="primary").props(
+                                        "dense unelevated"
+                                    )
+                                    _row, fid = _selected_row()
+                                    revealed = fid in STATE.revealed and fid != "_"
+                                    ui.button(
+                                        "Hide" if revealed else "Reveal",
+                                        on_click=do_reveal,
+                                        color="secondary",
+                                    ).props("dense flat")
+                                    ui.button("Copy", on_click=do_copy, color="secondary").props(
+                                        "dense flat"
+                                    )
+                            try:
+                                draw = getattr(build_ui, "draw_vendor_scene", None)
+                                if callable(draw):
+                                    draw()
+                            except Exception:
+                                pass
+
+                        def show_detail(finding: Dict, fid: str) -> None:
+                            detail_host.clear()
+                            with detail_host:
+                                ui.label(
+                                    f"Detail · {finding.get('type', 'unknown')}"
+                                ).classes("rp-section")
+                                revealed = fid in STATE.revealed
+                                ui.label(
+                                    "Key: " + redact_secret(str(finding.get("key") or ""), revealed)
+                                ).classes("rp-secret text-sm")
+                                vid, product = rp.rp_reports.vendor_for_type(
+                                    str(finding.get("type") or "")
+                                )
+                                company = rp.rp_reports.vendor_record(vid).get("name") or vid
+                                ui.label(f"Company: {company} · {product}").classes(
+                                    "text-sm text-slate-300"
+                                )
+                                loc = rp.rp_reports.finding_source_location(finding)
+                                line = rp.rp_reports.finding_line_number(finding)
+                                line_bit = f" · line {line}" if line else ""
+                                ui.label(f"Where found: {loc}{line_bit}").classes(
+                                    "text-xs text-slate-400 break-all"
+                                )
+                                if finding.get("scanner"):
+                                    ui.label(f"Scanner: {finding.get('scanner')}").classes(
+                                        "text-xs text-slate-500"
+                                    )
+                                ui.label(f"Hash: {finding.get('hash', '—')}").classes(
+                                    "text-xs text-slate-500"
+                                )
+                                ui.label(
+                                    f"Valid: {finding.get('valid')} · Status: {finding.get('status_code')} · "
+                                    f"Note: {finding.get('note', '')}"
+                                ).classes("text-sm text-slate-300 mt-1")
+                                if finding.get("jwt"):
+                                    ui.code(json.dumps(finding["jwt"], indent=2)).classes("w-full")
+
+                                can_test = finding.get("_tier") == "actionable" and (
+                                    finding.get("type") in rp.VALIDATORS
+                                )
+                                test_note = ui.label(STATE.last_test_note).classes(
+                                    "text-sm text-slate-400 mt-2"
+                                )
+
+                                async def retest() -> None:
+                                    if not STATE.domain:
+                                        ui.notify(
+                                            "Set domain context (scan form or Load workspace)",
+                                            type="negative",
+                                        )
+                                        return
+                                    if finding.get("type") not in rp.VALIDATORS:
+                                        ui.notify(
+                                            "No configured validator for this type",
+                                            type="warning",
+                                        )
+                                        return
+                                    ui.notify("Running configured validator…", type="info")
+                                    try:
+                                        result = await run_io_bound(
+                                            rp.validate_finding_configured_sync,
+                                            dict(finding),
+                                            STATE.domain,
+                                            STATE.shopify_domain,
+                                            STATE.config_overlays,
+                                        )
+                                    except Exception as exc:
+                                        ui.notify(f"Validation error: {exc}", type="negative")
+                                        return
+                                    # Merge into actionable findings list
+                                    updated = False
+                                    for i, existing in enumerate(STATE.findings):
+                                        if (
+                                            existing.get("hash")
+                                            and existing.get("hash") == result.get("hash")
+                                        ) or (
+                                            existing.get("type") == result.get("type")
+                                            and existing.get("key") == result.get("key")
+                                            and existing.get("source_url")
+                                            == result.get("source_url")
+                                        ):
+                                            STATE.findings[i] = result
+                                            updated = True
+                                            break
+                                    if not updated and result.get("_tier") != "informational":
+                                        STATE.findings.append(result)
+                                    # Persist back to findings.json when possible
+                                    if STATE.workspace:
+                                        path = STATE.workspace / "findings.json"
+                                        try:
+                                            path.write_text(
+                                                json.dumps(STATE.findings, indent=2),
+                                                encoding="utf-8",
+                                            )
+                                            valid_only = [
+                                                x for x in STATE.findings if x.get("valid")
+                                            ]
+                                            if valid_only:
+                                                (STATE.workspace / "valid_keys.json").write_text(
+                                                    json.dumps(valid_only, indent=2),
+                                                    encoding="utf-8",
+                                                )
+                                        except Exception as exc:
+                                            ui.notify(
+                                                f"Could not write findings.json: {exc}",
+                                                type="warning",
+                                            )
+                                    stamp = datetime.now().strftime("%H:%M:%S")
+                                    STATE.last_test_note = (
+                                        f"[{stamp}] valid={result.get('valid')} "
+                                        f"status={result.get('status_code')} "
+                                        f"note={result.get('note', '')}"
+                                    )
+                                    test_note.set_text(STATE.last_test_note)
+                                    render_findings()
+                                    show_detail(result, fid)
+                                    ui.notify("Re-test complete", type="positive")
+
+                                with ui.row().classes("gap-2 mt-3"):
+                                    if can_test:
+                                        ui.button(
+                                            "Test key (live check)",
+                                            on_click=retest,
+                                            color="positive",
+                                        ).props("unelevated")
+                                    else:
+                                        ui.label(
+                                            "No live validator configured for this tier/type."
+                                        ).classes("text-sm text-slate-500")
+
+                        def reload_findings() -> None:
+                            if not STATE.workspace:
+                                ui.notify("No workspace selected", type="warning")
+                                return
+                            STATE.findings = load_json_list(STATE.workspace / "findings.json")
+                            STATE.informational = load_json_list(
+                                STATE.workspace / "informational.json"
+                            )
+                            STATE.exposures = load_json_list(
+                                STATE.workspace / "source_map_exposures.json"
+                            )
+                            STATE._dash_sig = None
+                            STATE._finding_sigs = None
                             render_findings()
-                            show_detail(result, fid)
-                            ui.notify("Re-test complete", type="positive")
+                            try:
+                                build_ui.render_vendors()  
+                            except Exception:
+                                pass
+                            update_stats(force=True)
+                            ui.notify(
+                                f"Loaded {len(STATE.findings)} findings from {STATE.workspace}",
+                                type="info",
+                            )
+
+                        # bind for outer timers
+                        build_ui.reload_findings = reload_findings  
+                        build_ui.render_findings = render_findings
+                        for _w in (f_type, f_company, f_status, f_tier, f_sev):
+                            _w.on("update:model-value", lambda *_: apply_filters())
+                        f_file.on("blur", lambda *_: apply_filters())
+                        f_file.on("keydown.enter", lambda *_: apply_filters())
+                        render_findings()
+
+                with ui.tab_panel(sub_scene):
+                    scene_meta = ui.label(
+                        "Click a company block to open its key pack"
+                    ).classes("text-sm text-slate-400")
+                    findings_scene_box: Dict[str, Any] = {"scene": None}
+
+                    def _draw_vendor_scene() -> None:
+                        scene = findings_scene_box.get("scene")
+                        groups = rp.rp_reports.group_findings_by_vendor(
+                            STATE.findings,
+                            STATE.exposures,
+                            STATE.informational,
+                            redact=rp.redact_key,
+                        )
+                        nodes = rp.rp_reports.vendor_scene_nodes(groups)
+                        n = len(nodes)
+                        scene_meta.set_text(
+                            f"{n} compan{'y' if n == 1 else 'ies'} — click a block for the key pack"
+                        )
+                        if scene is None:
+                            return
+                        try:
+                            scene.clear()
+                        except Exception:
+                            return
+                        try:
+                            scene.axes_helper()
+                        except Exception:
+                            pass
+                        for node in nodes:
+                            nid = "vendor:" + str(node["id"])
+                            col = str(node.get("color") or "#f0883e")
+                            h = float(node.get("h") or 0.8)
+                            x = float(node["x"])
+                            y = float(node["y"])
+                            box = scene.box(0.85, 0.85, h).material(col).move(
+                                x=x, y=y, z=h / 2.0
+                            )
+                            try:
+                                box.with_name(nid)
+                            except Exception:
+                                pass
+                            if node.get("live"):
+                                sph = scene.sphere(0.16).material("#3fb950").move(
+                                    x=x, y=y, z=h + 0.28
+                                )
+                                try:
+                                    sph.with_name(nid)
+                                except Exception:
+                                    pass
+                            try:
+                                scene.text(
+                                    str(node.get("name") or ""),
+                                    "color:#e6edf3;background:rgba(0,0,0,0.4);"
+                                    "padding:3px 8px;border-radius:4px",
+                                ).move(x=x, y=y, z=h + 0.55).with_name(nid)
+                            except Exception:
+                                pass
+
+                    def _on_scene_click(e) -> None:
+                        hits = getattr(e, "hits", None) or []
+                        name = ""
+                        for hit in hits:
+                            name = str(getattr(hit, "object_name", "") or "")
+                            if name.startswith("vendor:"):
+                                break
+                        if not name.startswith("vendor:"):
+                            return
+                        vid = name.split(":", 1)[1]
+                        try:
+                            company_pack.refresh(vid)
+                        except Exception:
+                            pass
+
+                    @ui.refreshable
+                    def company_pack(vendor_id: str = "") -> None:
+                        groups = rp.rp_reports.group_findings_by_vendor(
+                            STATE.findings,
+                            STATE.exposures,
+                            STATE.informational,
+                            redact=rp.redact_key,
+                        )
+                        g = next(
+                            (x for x in groups if str(x.get("id")) == str(vendor_id)),
+                            None,
+                        )
+                        if not g:
+                            ui.label(
+                                "Click a company in the 3D map to open its key pack."
+                            ).classes("text-sm text-slate-400")
+                            return
+                        ui.label(str(g.get("name") or "")).classes(
+                            "text-lg font-semibold"
+                        )
+                        ui.label(
+                            f"{g.get('category') or ''} · {g.get('website') or ''}"
+                        ).classes("text-xs text-slate-500")
+                        ui.label(str(g.get("about") or "")).classes(
+                            "text-sm text-slate-300 mt-1"
+                        )
+                        ui.label(
+                            f"LIVE {g.get('live')}/{g.get('total')}"
+                        ).classes("text-xs text-slate-400 mt-2")
+                        for k in g.get("keys") or []:
+                            live = "LIVE" if k.get("valid") else "seen"
+                            ui.label(
+                                f"{k.get('product')}  `{k.get('type')}`  {live}  "
+                                f"{k.get('fingerprint')}  "
+                                f"{str(k.get('source_url') or '')[:80]}"
+                            ).classes("text-xs font-mono text-slate-400 break-all")
+
+                    with ui.row().classes("w-full gap-3 items-stretch"):
+                        with ui.column().classes("w-full lg:w-7/12"):
+                            with ui.scene(
+                                width=640,
+                                height=460,
+                                on_click=_on_scene_click,
+                                grid=True,
+                            ).classes("w-full") as sc:
+                                findings_scene_box["scene"] = sc
+                                try:
+                                    sc.axes_helper()
+                                except Exception:
+                                    pass
+                        with ui.column().classes("w-full lg:w-5/12"):
+                            ui.label("Company pack").classes("rp-section")
+                            scene_meta
+                            company_pack()
+                    _draw_vendor_scene()
+                    build_ui.draw_vendor_scene = _draw_vendor_scene
+                    build_ui.company_pack = company_pack
+
+                with ui.tab_panel(sub_vendors):
+                    with ui.card().classes("w-full rp-card"):
+                        ui.label("Vendors & API keys").classes("rp-section")
+                        ui.label(
+                            "Companies whose credentials showed up in this scan, with a short "
+                            "description of the vendor. Fingerprints only — full secrets stay redacted."
+                        ).classes("text-xs text-gray-500 mb-2")
+                        vendors_meta = ui.label("No vendors yet").classes("text-sm text-slate-400")
+                        vendors_host = ui.column().classes("w-full gap-3 mt-2")
+
+                        def render_vendors() -> None:
+                            groups = rp.rp_reports.group_findings_by_vendor(
+                                STATE.findings,
+                                STATE.exposures,
+                                STATE.informational,
+                                redact=rp.redact_key,
+                            )
+                            live_n = sum(int(g.get("live") or 0) for g in groups)
+                            vendors_meta.set_text(
+                                f"{len(groups)} compan{'y' if len(groups) == 1 else 'ies'} · "
+                                f"{live_n} live key(s)"
+                            )
+                            vendors_host.clear()
+                            with vendors_host:
+                                if not groups:
+                                    ui.label(
+                                        "Run a scan or load a workspace — vendors appear from findings."
+                                    ).classes("text-slate-500 text-sm")
+                                    return
+                                for g in groups:
+                                    with ui.card().classes("w-full rp-subcard"):
+                                        with ui.row().classes("w-full items-center justify-between"):
+                                            ui.label(str(g.get("name") or "")).classes("text-base font-semibold")
+                                            ui.label(
+                                                f"LIVE {g.get('live')}/{g.get('total')}"
+                                                if g.get("live")
+                                                else f"{g.get('total')} seen"
+                                            ).classes("text-xs text-slate-400")
+                                        ui.label(
+                                            f"{g.get('category') or ''} · {g.get('website') or ''}"
+                                        ).classes("text-xs text-slate-500")
+                                        ui.label(str(g.get("about") or "")).classes(
+                                            "text-sm text-slate-300 mt-1"
+                                        )
+                                        for k in g.get("keys") or []:
+                                            live = "LIVE" if k.get("valid") else "—"
+                                            ui.label(
+                                                f"{k.get('product')}  `{k.get('type')}`  {live}  "
+                                                f"{k.get('fingerprint')}  {str(k.get('source_url') or '')[:60]}"
+                                            ).classes("text-xs font-mono text-slate-400 break-all")
+
+                        ui.button("Refresh", on_click=render_vendors, color="secondary").props(
+                            "outline dense"
+                        )
+                        render_vendors()
+                        build_ui.render_vendors = render_vendors  
+
+                with ui.tab_panel(sub_tester):
+                    with ui.card().classes("w-full rp-card"):
+                        ui.label("Key Tester").classes("rp-section")
+                        ui.label(
+                            "Paste one or more API keys (one per line) and run the configured "
+                            "provider check (keyhacks-style). Google AIza keys are sprayed across "
+                            "cheap Maps JSON, YouTube, and Gemini models-list probes — not billed "
+                            "image APIs. LIVE means the credential is accepted. Batch mode fills the table below."
+                        ).classes("text-xs text-gray-500 mb-3")
+
+                        with ui.row().classes("w-full gap-2 flex-wrap"):
+                            tester_type = ui.select(
+                                validator_type_options(),
+                                value=validator_type_options()[0] if validator_type_options() else None,
+                                label="Key type",
+                            ).classes("w-56").props("dense outlined")
+                            tester_domain = ui.input(
+                                "Target domain (Referer / Shopify / n8n instance)",
+                                value="",
+                                placeholder="example.com or https://tenant.app.n8n.cloud",
+                            ).classes("flex-1").props("dense outlined")
+                            tester_shop = ui.input(
+                                "Shopify store (if testing shpat_)",
+                                placeholder="store.myshopify.com",
+                            ).classes("flex-1").props("dense outlined")
+
+                        tester_key = ui.textarea(
+                            "API key / token (one per line for batch)",
+                            placeholder="paste credential(s), one per line",
+                        ).classes("w-full").props("outlined dense")
+
+                        with ui.row().classes("w-full gap-2"):
+                            tester_secret = ui.input(
+                                "Paired secret (AWS secret / Twilio auth token)",
+                                password=True,
+                                password_toggle_button=True,
+                            ).classes("flex-1").props("outlined dense")
+                            tester_session = ui.input(
+                                "AWS session token (ASIA keys)",
+                                password=True,
+                                password_toggle_button=True,
+                            ).classes("flex-1").props("outlined dense")
+
+                        guess_label = ui.label("").classes("text-xs text-gray-500")
+                        tester_verdict = ui.html(
+                            '<div class="rp-verdict skip">NO TEST YET</div>',
+                            sanitize=False,
+                        ).classes("w-full mt-2")
+                        tester_detail = ui.label("").classes(
+                            "text-sm text-gray-400 font-mono mt-2 whitespace-pre-wrap"
+                        )
+                        tester_batch = ui.column().classes("w-full gap-1 mt-2")
+
+                        def apply_guess() -> None:
+                            hits = guess_key_types(tester_key.value or "")
+                            if not hits:
+                                guess_label.set_text("")
+                                return
+                            preferred = [h for h in hits if h in rp.VALIDATORS] or hits
+                            guess_label.set_text("Detected: " + ", ".join(hits[:6]))
+                            if preferred[0] in validator_type_options():
+                                tester_type.set_value(preferred[0])
+
+                        tester_key.on("blur", lambda: apply_guess())
+
+                        async def run_manual_test() -> None:
+                            keys = rp.split_tester_keys(tester_key.value or "")
+                            ktype = tester_type.value
+                            if not keys:
+                                ui.notify("Paste an API key first", type="warning")
+                                return
+                            if not ktype:
+                                ui.notify("Select a key type", type="warning")
+                                return
+                            if ktype not in rp.VALIDATORS:
+                                ui.notify(f"No configured validator for {ktype}", type="warning")
+                                return
+                            domain = (
+                                (tester_domain.value or "").strip()
+                                or STATE.domain
+                                or "example.com"
+                            )
+                            shop = (
+                                (tester_shop.value or "").strip()
+                                or STATE.shopify_domain
+                            )
+                            secret = (tester_secret.value or "").strip()
+                            session = (tester_session.value or "").strip()
+                            ui.notify(f"Testing {len(keys)} {ktype} key(s)…", type="info")
+                            rows: List[Dict[str, Any]] = []
+                            last_result: Dict[str, Any] = {}
+                            last_label = "INCONCLUSIVE"
+                            last_valid = False
+                            for key in keys:
+                                hits = guess_key_types(key)
+                                use_type = ktype
+                                if len(keys) > 1 and hits:
+                                    preferred = [h for h in hits if h in rp.VALIDATORS]
+                                    if preferred:
+                                        use_type = preferred[0]
+                                finding: Dict[str, Any] = {
+                                    "type": use_type,
+                                    "key": key,
+                                    "source_url": "gui://key-tester",
+                                }
+                                if use_type in {"grafana_token"}:
+                                    finding["grafana_url"] = domain
+                                if use_type in {"n8n_api", "jwt"}:
+                                    inst = (tester_domain.value or "").strip()
+                                    if inst and inst.lower() not in {"example.com"}:
+                                        finding["n8n_url"] = inst
+                                if use_type in {"hashicorp_vault"}:
+                                    finding["vault_addr"] = domain
+                                if secret:
+                                    if use_type == "aws_access_key":
+                                        finding["aws_secret"] = secret
+                                    if use_type in ("twilio_sid", "twilio_token"):
+                                        finding["twilio_token"] = secret
+                                if session:
+                                    finding["aws_session_token"] = session
+                                try:
+                                    result = await run_io_bound(
+                                        rp.validate_finding_configured_sync,
+                                        finding,
+                                        domain,
+                                        shop,
+                                        STATE.config_overlays,
+                                    )
+                                except Exception as exc:
+                                    result = {
+                                        "type": use_type,
+                                        "key": key,
+                                        "valid": False,
+                                        "validated": False,
+                                        "note": str(exc),
+                                    }
+                                rows.append(result)
+                                last_result = result
+                            tester_batch.clear()
+                            with tester_batch:
+                                if len(rows) > 1:
+                                    with ui.row().classes("w-full text-xs text-slate-500"):
+                                        ui.label("type").classes("w-40")
+                                        ui.label("verdict").classes("w-24")
+                                        ui.label("key").classes("flex-1")
+                                        ui.label("note").classes("flex-1")
+                                    for r in rows:
+                                        valid = bool(r.get("valid"))
+                                        note = str(r.get("note") or "")
+                                        skipped = note.lower().startswith("skip")
+                                        label = (
+                                            "LIVE"
+                                            if valid
+                                            else ("SKIP" if skipped else "DEAD")
+                                        )
+                                        with ui.row().classes("w-full items-center gap-2"):
+                                            ui.label(str(r.get("type") or "")).classes(
+                                                "w-40 font-mono text-xs"
+                                            )
+                                            ui.label(label).classes(
+                                                "w-24 text-emerald-400"
+                                                if valid
+                                                else "w-24 text-amber-300"
+                                            )
+                                            ui.label(
+                                                redact_secret(str(r.get("key") or ""), False)
+                                            ).classes("flex-1 rp-secret text-xs")
+                                            ui.label(note[:80]).classes(
+                                                "flex-1 text-xs text-slate-400"
+                                            )
+                            valid = bool(last_result.get("valid"))
+                            validated = bool(last_result.get("validated"))
+                            note = str(last_result.get("note") or "")
+                            skipped = note.lower().startswith("skip") or (
+                                "no validator" in note.lower()
+                            )
+                            if valid:
+                                cls, label = "live", "LIVE"
+                            elif skipped:
+                                cls, label = "skip", "SKIPPED"
+                            elif validated:
+                                cls, label = "dead", "DEAD"
+                            else:
+                                cls, label = "skip", "INCONCLUSIVE"
+                            last_label = label
+                            last_valid = valid
+                            tester_verdict.set_content(
+                                f'<div class="rp-verdict {cls}">{label}'
+                                + (f" · {len(rows)} keys" if len(rows) > 1 else "")
+                                + "</div>"
+                            )
+                            stamp = datetime.now().strftime("%H:%M:%S")
+                            services = last_result.get("google_services")
+                            extra = ""
+                            if isinstance(services, dict) and services:
+                                extra = "\nservices=" + ", ".join(
+                                    f"{k}:{v}" for k, v in services.items()
+                                )
+                            scopes = last_result.get("github_scopes")
+                            if scopes:
+                                extra += "\nscopes=" + ",".join(str(s) for s in scopes)
+                            tester_detail.set_text(
+                                f"[{stamp}] type={last_result.get('type')}\n"
+                                f"valid={last_result.get('valid')}  validated={last_result.get('validated')}  "
+                                f"http={last_result.get('status_code')}\n"
+                                f"note={note}{extra}"
+                            )
+                            footer_status.set_text(f"LAST TEST  {last_label}")
+                            live_n = sum(1 for r in rows if r.get("valid"))
+                            ui.notify(
+                                f"Key test: {live_n}/{len(rows)} LIVE"
+                                if len(rows) > 1
+                                else f"Key test: {last_label}",
+                                type="positive" if last_valid or live_n else "warning",
+                            )
 
                         with ui.row().classes("gap-2 mt-3"):
-                            if can_test:
-                                ui.button(
-                                    "Test key (live check)",
-                                    on_click=retest,
-                                    color="positive",
-                                ).props("unelevated")
-                            else:
-                                ui.label(
-                                    "No live validator configured for this tier/type."
-                                ).classes("text-sm text-slate-500")
-
-                def reload_findings() -> None:
-                    if not STATE.workspace:
-                        ui.notify("No workspace selected", type="warning")
-                        return
-                    STATE.findings = load_json_list(STATE.workspace / "findings.json")
-                    STATE.informational = load_json_list(
-                        STATE.workspace / "informational.json"
-                    )
-                    STATE.exposures = load_json_list(
-                        STATE.workspace / "source_map_exposures.json"
-                    )
-                    STATE._dash_sig = None
-                    STATE._finding_sigs = None
-                    render_findings()
-                    try:
-                        build_ui.render_vendors()  
-                    except Exception:
-                        pass
-                    update_stats(force=True)
-                    ui.notify(
-                        f"Loaded {len(STATE.findings)} findings from {STATE.workspace}",
-                        type="info",
-                    )
-
-                # bind for outer timers
-                build_ui.reload_findings = reload_findings  
-                build_ui.render_findings = render_findings
-                for _w in (f_type, f_company, f_status, f_tier, f_sev):
-                    _w.on("update:model-value", lambda *_: apply_filters())
-                f_file.on("blur", lambda *_: apply_filters())
-                f_file.on("keydown.enter", lambda *_: apply_filters())
-                render_findings()  
-
-        # Vendors
-        with ui.tab_panel(tab_vendors):
-            with ui.card().classes("w-full rp-card"):
-                ui.label("Vendors & API keys").classes("rp-section")
-                ui.label(
-                    "Companies whose credentials showed up in this scan, with a short "
-                    "description of the vendor. Fingerprints only — full secrets stay redacted."
-                ).classes("text-xs text-gray-500 mb-2")
-                vendors_meta = ui.label("No vendors yet").classes("text-sm text-slate-400")
-                vendors_host = ui.column().classes("w-full gap-3 mt-2")
-
-                def render_vendors() -> None:
-                    groups = rp.rp_reports.group_findings_by_vendor(
-                        STATE.findings,
-                        STATE.exposures,
-                        STATE.informational,
-                        redact=rp.redact_key,
-                    )
-                    live_n = sum(int(g.get("live") or 0) for g in groups)
-                    vendors_meta.set_text(
-                        f"{len(groups)} compan{'y' if len(groups) == 1 else 'ies'} · "
-                        f"{live_n} live key(s)"
-                    )
-                    vendors_host.clear()
-                    with vendors_host:
-                        if not groups:
-                            ui.label(
-                                "Run a scan or load a workspace — vendors appear from findings."
-                            ).classes("text-slate-500 text-sm")
-                            return
-                        for g in groups:
-                            with ui.card().classes("w-full rp-subcard"):
-                                with ui.row().classes("w-full items-center justify-between"):
-                                    ui.label(str(g.get("name") or "")).classes("text-base font-semibold")
-                                    ui.label(
-                                        f"LIVE {g.get('live')}/{g.get('total')}"
-                                        if g.get("live")
-                                        else f"{g.get('total')} seen"
-                                    ).classes("text-xs text-slate-400")
-                                ui.label(
-                                    f"{g.get('category') or ''} · {g.get('website') or ''}"
-                                ).classes("text-xs text-slate-500")
-                                ui.label(str(g.get("about") or "")).classes(
-                                    "text-sm text-slate-300 mt-1"
-                                )
-                                for k in g.get("keys") or []:
-                                    live = "LIVE" if k.get("valid") else "—"
-                                    ui.label(
-                                        f"{k.get('product')}  `{k.get('type')}`  {live}  "
-                                        f"{k.get('fingerprint')}  {str(k.get('source_url') or '')[:60]}"
-                                    ).classes("text-xs font-mono text-slate-400 break-all")
-
-                ui.button("Refresh", on_click=render_vendors, color="secondary").props(
-                    "outline dense"
-                )
-                render_vendors()
-                build_ui.render_vendors = render_vendors  
-
-        # Key Tester
-        with ui.tab_panel(tab_tester):
-            with ui.card().classes("w-full rp-card"):
-                ui.label("Key Tester").classes("rp-section")
-                ui.label(
-                    "Paste one or more API keys (one per line) and run the configured "
-                    "provider check (keyhacks-style). Google AIza keys are sprayed across "
-                    "cheap Maps JSON, YouTube, and Gemini models-list probes — not billed "
-                    "image APIs. LIVE means the credential is accepted. Batch mode fills the table below."
-                ).classes("text-xs text-gray-500 mb-3")
-
-                with ui.row().classes("w-full gap-2 flex-wrap"):
-                    tester_type = ui.select(
-                        validator_type_options(),
-                        value=validator_type_options()[0] if validator_type_options() else None,
-                        label="Key type",
-                    ).classes("w-56").props("dense outlined")
-                    tester_domain = ui.input(
-                        "Target domain (Referer / Shopify / n8n instance)",
-                        value="",
-                        placeholder="example.com or https://tenant.app.n8n.cloud",
-                    ).classes("flex-1").props("dense outlined")
-                    tester_shop = ui.input(
-                        "Shopify store (if testing shpat_)",
-                        placeholder="store.myshopify.com",
-                    ).classes("flex-1").props("dense outlined")
-
-                tester_key = ui.textarea(
-                    "API key / token (one per line for batch)",
-                    placeholder="paste credential(s), one per line",
-                ).classes("w-full").props("outlined dense")
-
-                with ui.row().classes("w-full gap-2"):
-                    tester_secret = ui.input(
-                        "Paired secret (AWS secret / Twilio auth token)",
-                        password=True,
-                        password_toggle_button=True,
-                    ).classes("flex-1").props("outlined dense")
-                    tester_session = ui.input(
-                        "AWS session token (ASIA keys)",
-                        password=True,
-                        password_toggle_button=True,
-                    ).classes("flex-1").props("outlined dense")
-
-                guess_label = ui.label("").classes("text-xs text-gray-500")
-                tester_verdict = ui.html(
-                    '<div class="rp-verdict skip">NO TEST YET</div>',
-                    sanitize=False,
-                ).classes("w-full mt-2")
-                tester_detail = ui.label("").classes(
-                    "text-sm text-gray-400 font-mono mt-2 whitespace-pre-wrap"
-                )
-                tester_batch = ui.column().classes("w-full gap-1 mt-2")
-
-                def apply_guess() -> None:
-                    hits = guess_key_types(tester_key.value or "")
-                    if not hits:
-                        guess_label.set_text("")
-                        return
-                    preferred = [h for h in hits if h in rp.VALIDATORS] or hits
-                    guess_label.set_text("Detected: " + ", ".join(hits[:6]))
-                    if preferred[0] in validator_type_options():
-                        tester_type.set_value(preferred[0])
-
-                tester_key.on("blur", lambda: apply_guess())
-
-                async def run_manual_test() -> None:
-                    keys = rp.split_tester_keys(tester_key.value or "")
-                    ktype = tester_type.value
-                    if not keys:
-                        ui.notify("Paste an API key first", type="warning")
-                        return
-                    if not ktype:
-                        ui.notify("Select a key type", type="warning")
-                        return
-                    if ktype not in rp.VALIDATORS:
-                        ui.notify(f"No configured validator for {ktype}", type="warning")
-                        return
-                    domain = (
-                        (tester_domain.value or "").strip()
-                        or STATE.domain
-                        or "example.com"
-                    )
-                    shop = (
-                        (tester_shop.value or "").strip()
-                        or STATE.shopify_domain
-                    )
-                    secret = (tester_secret.value or "").strip()
-                    session = (tester_session.value or "").strip()
-                    ui.notify(f"Testing {len(keys)} {ktype} key(s)…", type="info")
-                    rows: List[Dict[str, Any]] = []
-                    last_result: Dict[str, Any] = {}
-                    last_label = "INCONCLUSIVE"
-                    last_valid = False
-                    for key in keys:
-                        hits = guess_key_types(key)
-                        use_type = ktype
-                        if len(keys) > 1 and hits:
-                            preferred = [h for h in hits if h in rp.VALIDATORS]
-                            if preferred:
-                                use_type = preferred[0]
-                        finding: Dict[str, Any] = {
-                            "type": use_type,
-                            "key": key,
-                            "source_url": "gui://key-tester",
-                        }
-                        if use_type in {"grafana_token"}:
-                            finding["grafana_url"] = domain
-                        if use_type in {"n8n_api", "jwt"}:
-                            inst = (tester_domain.value or "").strip()
-                            if inst and inst.lower() not in {"example.com"}:
-                                finding["n8n_url"] = inst
-                        if use_type in {"hashicorp_vault"}:
-                            finding["vault_addr"] = domain
-                        if secret:
-                            if use_type == "aws_access_key":
-                                finding["aws_secret"] = secret
-                            if use_type in ("twilio_sid", "twilio_token"):
-                                finding["twilio_token"] = secret
-                        if session:
-                            finding["aws_session_token"] = session
-                        try:
-                            result = await run_io_bound(
-                                rp.validate_finding_configured_sync,
-                                finding,
-                                domain,
-                                shop,
-                                STATE.config_overlays,
-                            )
-                        except Exception as exc:
-                            result = {
-                                "type": use_type,
-                                "key": key,
-                                "valid": False,
-                                "validated": False,
-                                "note": str(exc),
-                            }
-                        rows.append(result)
-                        last_result = result
-                    tester_batch.clear()
-                    with tester_batch:
-                        if len(rows) > 1:
-                            with ui.row().classes("w-full text-xs text-slate-500"):
-                                ui.label("type").classes("w-40")
-                                ui.label("verdict").classes("w-24")
-                                ui.label("key").classes("flex-1")
-                                ui.label("note").classes("flex-1")
-                            for r in rows:
-                                valid = bool(r.get("valid"))
-                                note = str(r.get("note") or "")
-                                skipped = note.lower().startswith("skip")
-                                label = (
-                                    "LIVE"
-                                    if valid
-                                    else ("SKIP" if skipped else "DEAD")
-                                )
-                                with ui.row().classes("w-full items-center gap-2"):
-                                    ui.label(str(r.get("type") or "")).classes(
-                                        "w-40 font-mono text-xs"
-                                    )
-                                    ui.label(label).classes(
-                                        "w-24 text-emerald-400"
-                                        if valid
-                                        else "w-24 text-amber-300"
-                                    )
-                                    ui.label(
-                                        redact_secret(str(r.get("key") or ""), False)
-                                    ).classes("flex-1 rp-secret text-xs")
-                                    ui.label(note[:80]).classes(
-                                        "flex-1 text-xs text-slate-400"
-                                    )
-                    valid = bool(last_result.get("valid"))
-                    validated = bool(last_result.get("validated"))
-                    note = str(last_result.get("note") or "")
-                    skipped = note.lower().startswith("skip") or (
-                        "no validator" in note.lower()
-                    )
-                    if valid:
-                        cls, label = "live", "LIVE"
-                    elif skipped:
-                        cls, label = "skip", "SKIPPED"
-                    elif validated:
-                        cls, label = "dead", "DEAD"
-                    else:
-                        cls, label = "skip", "INCONCLUSIVE"
-                    last_label = label
-                    last_valid = valid
-                    tester_verdict.set_content(
-                        f'<div class="rp-verdict {cls}">{label}'
-                        + (f" · {len(rows)} keys" if len(rows) > 1 else "")
-                        + "</div>"
-                    )
-                    stamp = datetime.now().strftime("%H:%M:%S")
-                    services = last_result.get("google_services")
-                    extra = ""
-                    if isinstance(services, dict) and services:
-                        extra = "\nservices=" + ", ".join(
-                            f"{k}:{v}" for k, v in services.items()
-                        )
-                    scopes = last_result.get("github_scopes")
-                    if scopes:
-                        extra += "\nscopes=" + ",".join(str(s) for s in scopes)
-                    tester_detail.set_text(
-                        f"[{stamp}] type={last_result.get('type')}\n"
-                        f"valid={last_result.get('valid')}  validated={last_result.get('validated')}  "
-                        f"http={last_result.get('status_code')}\n"
-                        f"note={note}{extra}"
-                    )
-                    footer_status.set_text(f"LAST TEST  {last_label}")
-                    live_n = sum(1 for r in rows if r.get("valid"))
-                    ui.notify(
-                        f"Key test: {live_n}/{len(rows)} LIVE"
-                        if len(rows) > 1
-                        else f"Key test: {last_label}",
-                        type="positive" if last_valid or live_n else "warning",
-                    )
-
-                with ui.row().classes("gap-2 mt-3"):
-                    ui.button(
-                        "Detect type", on_click=apply_guess, color="secondary"
-                    ).props("outline")
-                    ui.button(
-                        "Test key(s)", on_click=run_manual_test, color="primary"
-                    ).props("unelevated")
+                            ui.button(
+                                "Detect type", on_click=apply_guess, color="secondary"
+                            ).props("outline")
+                            ui.button(
+                                "Test key(s)", on_click=run_manual_test, color="primary"
+                            ).props("unelevated")
 
         # Artifacts 
         with ui.tab_panel(tab_artifacts):
@@ -3458,7 +3610,7 @@ def build_ui() -> None:
                 )
                 llm_auto = ui.checkbox(
                     "Run automatically when a scan finishes",
-                    value=bool(saved_llm.get("auto", True)),
+                    value=bool(saved_llm.get("auto", False)),
                 )
                 llm_provider = ui.select(
                     {
@@ -3830,6 +3982,18 @@ def build_ui() -> None:
                     except Exception:
                         pass
                     try:
+                        draw = getattr(build_ui, "draw_vendor_scene", None)
+                        if callable(draw):
+                            draw()
+                    except Exception:
+                        pass
+                    try:
+                        pack = getattr(build_ui, "company_pack", None)
+                        if pack is not None:
+                            pack.refresh()
+                    except Exception:
+                        pass
+                    try:
                         build_ui.render_vendors()
                     except Exception:
                         pass
@@ -3927,7 +4091,7 @@ def _ui_run(**kwargs: Any) -> None:
 def native_backend_available() -> bool:
     """True if pywebview can be imported (GTK WebKit on Linux)."""
     try:
-        import webview  # noqa: F401
+        import webview
         return True
     except Exception:
         return False
@@ -4014,8 +4178,8 @@ def main() -> None:
         print("ReconPipe GUI — desktop window (not Firefox)")
         print("Close the window or press Ctrl+C to stop.")
     else:
-        print(f"ReconPipe GUI → http://{host}:{port}")
-        print("Press Ctrl+C to stop.")
+        print(f"ReconPipe GUI -> http://{host}:{port}", flush=True)
+        print("Press Ctrl+C to stop.", flush=True)
 
 
     run_kwargs: Dict[str, Any] = dict[str, Any](

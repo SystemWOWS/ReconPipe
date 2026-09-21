@@ -103,7 +103,7 @@ FINDING_GUIDANCE: Dict[str, Dict[str, str]] = {
 def default_llm_settings() -> Dict[str, Any]:
     return {
         "enabled": False,
-        "auto": True,
+        "auto": False,
         "provider": "ollama",
         "model": DEFAULT_MODELS["ollama"],
         "base_url": DEFAULT_BASE_URLS["ollama"],

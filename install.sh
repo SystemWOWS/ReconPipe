@@ -6,7 +6,7 @@
 #  Core (a useful first scan): Python deps, Chaos, subfinder, dnsx, httpx,
 #  Katana, gospider, waymore/gau/waybackurls, TruffleHog, Gitleaks, GUI.
 #  Extra (installed when possible): amass, assetfinder, findomain, hakrawler,
-#  paramspider, LinkFinder, naabu, whatweb, wappalyzer, gowitness, nuclei,
+#  paramspider, LinkFinder, naabu, whatweb, webanalyze, gowitness, nuclei,
 #  jsluice, jsleak, spray.
 #
 #  Missing extras are skipped at scan time; they do not abort install.
@@ -35,7 +35,7 @@ CORE_TOOLS=(chaos httpx katana subfinder dnsx gau gospider waybackurls waymore t
 # Insstalled when posible; ReconPipe skips them if absent.
 EXTRA_TOOLS=(
     jsluice anew amass assetfinder findomain hakrawler paramspider linkfinder
-    naabu whatweb wappalyzer gowitness nuclei jsleak spray
+    naabu whatweb webanalyze gowitness nuclei jsleak spray
 )
 
 TOOLS=("${CORE_TOOLS[@]}" "${EXTRA_TOOLS[@]}")
@@ -756,24 +756,18 @@ exec ruby \"$src/whatweb\" \"\$@\""
     fi
 }
 # will need to find a differnet version or package for that.
-# install_wappalyzer() {
-#     header "STEP 6i: Wappalyzer CLI"
-#     if tool_present wappalyzer; then
-#         success "wappalyzer already installed"
-#         return 0
-#     fi
-#     if ! command -v npm &>/dev/null; then
-#         warn "npm not found — skipping wappalyzer (optional tech fingerprint)"
-#         return 0
-#     fi
-#     log "npm install -g wappalyzer (optional; pulls Chromium via puppeteer)..."
-#     if run_as_user npm config set prefix "$REAL_HOME/.local" \
-#         && run_as_user npm install -g wappalyzer; then
-#         success "wappalyzer installed via npm"
-#     else
-#         warn "wappalyzer is optional. Manual: npm install -g wappalyzer"
-#     fi
-# }
+install_webanalyze() {
+    header "STEP 6i: webanalyze (Wappalyzer fingerprints)"
+    if tool_present webanalyze; then
+        success "webanalyze already installed"
+        return 0
+    fi
+    if install_go_tool "webanalyze" "github.com/rverton/webanalyze/cmd/webanalyze@latest"; then
+        success "webanalyze installed (replaces unmaintained npm wappalyzer)"
+    else
+        warn "webanalyze is optional. httpx -tech-detect is used when it is missing."
+    fi
+}
 
 install_nuclei_templates() {
     header "STEP 6j: Nuclei templates"
@@ -918,7 +912,7 @@ install_spray
 install_paramspider
 install_linkfinder
 install_whatweb
-# install_wappalyzer
+install_webanalyze
 install_nuclei_templates
 link_tools_system_wide
 install_reconpipe_commands

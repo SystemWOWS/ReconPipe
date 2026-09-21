@@ -267,11 +267,12 @@ def test_gui_module_compiles_and_helpers():
     assert "Upload APK / IPA" in src
     assert "Scan apps" in src
     apk, ipa = mod.parse_mobile_paths(
-        "/work/app.apk\n/tmp/app.ipa\n/tmp/bundle.apkm\nskip.txt\n"
+        "/work/app.apk\n/tmp/app.ipa\n/tmp/bundle.apkm\n/tmp/app.aab\nskip.txt\n"
     )
-    assert apk == ["/work/app.apk", "/tmp/bundle.apkm"]
+    assert apk == ["/work/app.apk", "/tmp/bundle.apkm", "/tmp/app.aab"]
     assert ipa == ["/tmp/app.ipa"]
     assert mod.classify_mobile_path("foo.xapk") == "apk"
+    assert mod.classify_mobile_path("store.aab") == "apk"
     assert mod.sanitize_upload_name("../evil.apk") == "evil.apk"
 
     class _V2Up:
@@ -312,6 +313,19 @@ def test_gui_module_compiles_and_helpers():
     assert "Filter by Company" in src
     assert "ingest_workspace_findings" in src
     assert "findings_report.html" in src
+    assert "3D map" in src
+    assert "ui.scene" in src
+    assert "@ui.refreshable" in src
+    assert "company_pack" in src
+    assert "hit_tabs" in src
+    assert 'ui.tab("Vendors")' in src
+    assert 'ui.tab("Key Tester")' in src
+    assert "Run status" not in src
+    assert "Download reports" not in src
+    assert 'saved_llm.get("auto", False)' in src
+    assert '"webanalyze"' in src or "webanalyze" in src
+    assert 'st in ("key", "env", "on", "saved")' in src
+    assert ".aab" in src and "jadx" in src
     assert "Showing first" in (ROOT / "reconpipe_reports.py").read_text(encoding="utf-8")
     dst: list = []
     assert mod.merge_finding_rows(dst, [{"type": "stripe_live", "key": "sk_live_aaaa", "hash": "h1"}]) == 1
@@ -387,23 +401,28 @@ def test_gui_server_smoke():
     env["RECONPIPE_GUI_NATIVE"] = "0"
 
     proc = subprocess.Popen(
-        [sys.executable, str(ROOT / "reconpipegui.py")],
+        [
+            sys.executable,
+            "-u",
+            str(ROOT / "reconpipegui.py"),
+            "--browser",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            str(port),
+        ],
         cwd=str(ROOT),
         env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
     )
     try:
         url = f"http://127.0.0.1:{port}/"
         ok = False
         last_err = None
-        for _ in range(40):
+        for _ in range(80):
             if proc.poll() is not None:
-                out = proc.stdout.read() if proc.stdout else ""
-                raise AssertionError(f"GUI exited early code={proc.returncode}\n{out[:2000]}")
+                raise AssertionError(f"GUI exited early code={proc.returncode}")
             try:
                 with urllib.request.urlopen(url, timeout=1.5) as resp:
                     body = resp.read(200)
@@ -412,7 +431,7 @@ def test_gui_server_smoke():
                         break
             except Exception as exc:
                 last_err = exc
-                time.sleep(0.35)
+                time.sleep(0.25)
         assert ok, f"GUI did not respond on {url}: {last_err}"
         print(f"[ok] GUI HTTP smoke test on {url}")
     finally:

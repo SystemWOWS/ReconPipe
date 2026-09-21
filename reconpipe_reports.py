@@ -1156,6 +1156,34 @@ REPORT_TEMPLATES = {
 }
 
 
+def vendor_scene_nodes(groups: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Layout company nodes for NiceGUI ui.scene (circle, height = hit count)."""
+    items = [g for g in (groups or []) if isinstance(g, dict)]
+    n = max(len(items), 1)
+    radius = max(3.0, 0.55 * n)
+    nodes: List[Dict[str, Any]] = []
+    for i, g in enumerate(items):
+        angle = (2.0 * math.pi * i) / n if items else 0.0
+        live = int(g.get("live") or 0)
+        total = max(int(g.get("total") or 1), 1)
+        height = 0.45 + min(2.8, 0.22 * total)
+        vid = str(g.get("id") or f"v{i}")
+        nodes.append(
+            {
+                "id": vid,
+                "name": str(g.get("name") or vid),
+                "category": str(g.get("category") or ""),
+                "x": round(radius * math.cos(angle), 3),
+                "y": round(radius * math.sin(angle), 3),
+                "h": round(height, 3),
+                "live": live,
+                "total": total,
+                "color": "#3fb950" if live else "#f0883e",
+            }
+        )
+    return nodes
+
+
 def render_report_template(
     template_id: str,
     domain: str,

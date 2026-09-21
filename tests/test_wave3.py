@@ -117,6 +117,35 @@ class Wave3HelperTests(unittest.TestCase):
             strings = (out / "_apk_strings.txt").read_text(encoding="utf-8")
             self.assertIn("sk_live_", strings)
 
+    def test_aab_and_ipa_unzip_without_manual_extract(self):
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
+            aab = td_path / "app.aab"
+            with zipfile.ZipFile(aab, "w") as zf:
+                zf.writestr(
+                    "base/assets/capacitor.config.json",
+                    '{"server":{"url":"https://api.example.com"}}',
+                )
+                zf.writestr("base/root/google-services.json", '{"api_key":"AIzaSyAabKey000000000000000000000000"}')
+            out = td_path / "aab_out"
+            files = w3.extract_mobile_archive(aab, out)
+            names = {p.name.lower() for p in files}
+            self.assertIn("capacitor.config.json", names)
+            self.assertIn("google-services.json", names)
+            extra = w3.decompile_mobile_archive(aab, out)
+            self.assertIsInstance(extra, list)
+
+            ipa = td_path / "app.ipa"
+            with zipfile.ZipFile(ipa, "w") as zf:
+                zf.writestr("Payload/App.app/Info.plist", "<dict><key>CFBundleIdentifier</key><string>com.ex.app</string></dict>")
+                zf.writestr("Payload/App.app/GoogleService-Info.plist", "<dict><key>API_KEY</key><string>AIzaSyIpaKey000000000000000000000000</string></dict>")
+            ipa_out = td_path / "ipa_out"
+            ipa_files = w3.extract_mobile_archive(ipa, ipa_out)
+            ipa_names = {p.name.lower() for p in ipa_files}
+            self.assertTrue(
+                "info.plist" in ipa_names or "googleservice-info.plist" in ipa_names
+            )
+
     def test_apkm_nested_apk_extract(self):
         with tempfile.TemporaryDirectory() as td:
             td_path = Path(td)

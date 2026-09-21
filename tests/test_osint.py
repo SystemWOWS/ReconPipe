@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -95,6 +96,34 @@ class OsintHelpers(unittest.TestCase):
         self.assertEqual(st["censys"], "key")
         self.assertEqual(st["zoomeye"], "key")
         self.assertEqual(st["crtsh"], "on")
+
+    def test_status_saved_keys_without_widget_values(self):
+        with tempfile.TemporaryDirectory() as td:
+            with patch.dict(os.environ, {"RECONPIPE_HOME": td}, clear=False):
+                rp.save_user_keys(
+                    {
+                        "shodan": "disk-shodan",
+                        "censys_id": "cid",
+                        "censys_secret": "csec",
+                        "zoomeye": "disk-zoom",
+                    }
+                )
+                for k in (
+                    "SHODAN_API_KEY",
+                    "CENSYS_API_ID",
+                    "CENSYS_API_SECRET",
+                    "ZOOMEYE_API_KEY",
+                    "ZOOMEYE_KEY",
+                ):
+                    os.environ.pop(k, None)
+                st = rp.osint_source_status()
+                self.assertEqual(st["shodan"], "saved")
+                self.assertEqual(st["censys"], "saved")
+                self.assertEqual(st["zoomeye"], "saved")
+                self.assertEqual(st["crtsh"], "on")
+                blob = " ".join(st.values())
+                self.assertNotIn("disk-shodan", blob)
+                self.assertNotIn("csec", blob)
 
     def test_argv_includes_intel_flags(self):
         argv = rp.argv_from_options(

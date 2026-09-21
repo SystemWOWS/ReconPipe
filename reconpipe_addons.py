@@ -846,11 +846,77 @@ def build_whatweb_cmd(urls_file: str, output_file: str) -> List[str]:
     return ["whatweb", "-i", urls_file, "--log-json", output_file, "-q"]
 
 
+def resolve_webanalyze_bin() -> Optional[str]:
+    try:
+        import reconpipe as rp
+
+        return rp.resolve_tool_path("webanalyze") or rp.resolve_tool_path("wappalyzer")
+    except Exception:
+        pass
+    for name in ("webanalyze", "wappalyzer"):
+        path = shutil.which(name)
+        if path:
+            return path
+    return None
+
+
 def build_wappalyzer_cmd(url: str) -> List[str]:
-    return ["wappalyzer", url, "--pretty"]
+    """webanalyze (maintained Go port) replaces the unmaintained npm wappalyzer CLI."""
+    binary = resolve_webanalyze_bin() or "webanalyze"
+    name = Path(binary).name.lower()
+    if "webanalyze" in name:
+        return [binary, "-host", url, "-silent", "-output", "json"]
+    return [binary, url, "--pretty"]
+
+
+def build_webanalyze_file_cmd(hosts_file: str, output_file: str) -> List[str]:
+    binary = resolve_webanalyze_bin() or "webanalyze"
+    return [binary, "-hosts", hosts_file, "-output", "json", "-silent"]
+
+
+def build_httpx_tech_cmd(
+    httpx_bin: str,
+    list_file: str,
+    output_file: str,
+) -> List[str]:
+    """ProjectDiscovery httpx -tech-detect (wappalyzergo fingerprints)."""
+    return [
+        httpx_bin,
+        "-silent",
+        "-nc",
+        "-l",
+        list_file,
+        "-td",
+        "-json",
+        "-o",
+        output_file,
+    ]
 
 
 def build_gowitness_cmd(urls_file: str, output_dir: str) -> List[str]:
+    """v2: `gowitness file`. v3: `gowitness scan file`."""
+    blob = ""
+    path = shutil.which("gowitness")
+    if path:
+        try:
+            proc = subprocess.run(
+                [path, "--help"], capture_output=True, timeout=3
+            )
+            blob = ((proc.stdout or b"") + (proc.stderr or b"")).decode(
+                "utf-8", errors="replace"
+            ).lower()
+        except (OSError, subprocess.TimeoutExpired):
+            blob = ""
+    if "scan file" in blob or "\n  scan" in blob:
+        return [
+            "gowitness",
+            "scan",
+            "file",
+            "-f",
+            urls_file,
+            "--screenshot-path",
+            output_dir,
+        ]
     return ["gowitness", "file", "-f", urls_file, "-P", output_dir, "--disable-logging"]
 
 

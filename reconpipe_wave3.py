@@ -44,13 +44,21 @@ POSTMAN_HINT_RE = re.compile(r'"_postman_id"|info"\s*:\s*\{[^}]{0,200}"schema".*
 MOBILE_KEEP_SUFFIX = {
     ".js", ".json", ".xml", ".html", ".htm", ".txt", ".properties",
     ".plist", ".env", ".yml", ".yaml", ".cfg", ".ini", ".gradle",
+    ".bundle", ".jsbundle", ".map", ".kt", ".java", ".smali", ".dart.js",
+    ".xcconfig", ".mobileprovision", ".entitlements", ".ts",
 }
 MOBILE_KEEP_NAMES = {
-    "androidmanifest.xml", "google-services.json", "google-services.json",
+    "androidmanifest.xml", "google-services.json",
     "awsconfiguration.json", "network_security_config.xml", "info.plist",
     "strings.xml", "config.json", "firebase-config.json",
+    "googleservice-info.plist", "assetmanifest.json", "assetmanifest.bin",
+    "app.json", "eas.json", "index.android.bundle", "main.jsbundle",
+    "kernel_blob.bin", "flutter_assets",
+    "capacitor.config.json", "capacitor.config.ts", "sentry.properties",
+    "react-native.config.js", "app.config.js", "app.config.ts",
+    ".env.production", ".env.staging", "google-services.json",
 }
-MOBILE_PKG_SUFFIX = {".apk", ".xapk", ".apkm", ".ipa"}
+MOBILE_PKG_SUFFIX = {".apk", ".xapk", ".apkm", ".ipa", ".aab", ".apks"}
 
 GENERIC_PAIRS = (
     ("paypal_client_id", "paypal_secret", "paypal_secret", "paypal_client_id"),
@@ -1269,7 +1277,67 @@ def extract_mobile_archive(
         dump = dest / "_apk_strings.txt"
         dump.write_text("\n\n".join(strings_buf)[:2_000_000], encoding="utf-8")
         written.append(dump)
+    written.extend(decompile_mobile_archive(archive, dest))
     return written
+
+
+def _collect_decompiled_text(root: Path, limit: int = 200) -> List[Path]:
+    out: List[Path] = []
+    if not root.is_dir():
+        return out
+    keep_suffix = MOBILE_KEEP_SUFFIX | {".java", ".kt", ".smali", ".xml", ".json"}
+    for path in root.rglob("*"):
+        if not path.is_file():
+            continue
+        if path.suffix.lower() not in keep_suffix and path.name.lower() not in MOBILE_KEEP_NAMES:
+            continue
+        if path.stat().st_size > 4_000_000:
+            continue
+        out.append(path)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def decompile_mobile_archive(archive: Path, dest: Path) -> List[Path]:
+    """Optional jadx / apktool / plutil — user does not unzip by hand."""
+    archive = Path(archive)
+    dest = Path(dest)
+    extra: List[Path] = []
+    suffix = archive.suffix.lower()
+    if suffix not in {".apk", ".xapk", ".apkm", ".aab", ".apks", ".ipa"}:
+        return extra
+
+    def _run(cmd: List[str], timeout: int = 180) -> bool:
+        try:
+            proc = subprocess.run(cmd, capture_output=True, timeout=timeout)
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+            return False
+        return int(proc.returncode or 0) == 0
+
+    android_pkg = suffix in {".apk", ".xapk", ".apkm", ".aab", ".apks"}
+    jadx = shutil.which("jadx")
+    if jadx and android_pkg:
+        out = dest / "_jadx"
+        if _run([jadx, "-d", str(out), "-q", "--no-res", str(archive)]):
+            extra.extend(_collect_decompiled_text(out))
+    apktool = shutil.which("apktool")
+    if apktool and android_pkg:
+        out = dest / "_apktool"
+        if _run([apktool, "d", "-f", "-o", str(out), str(archive)]):
+            extra.extend(_collect_decompiled_text(out))
+    plutil = shutil.which("plutil")
+    if plutil:
+        for plist in dest.rglob("*.plist"):
+            try:
+                if plist.stat().st_size > 2_000_000:
+                    continue
+                xml_out = plist.with_suffix(plist.suffix + ".xml.txt")
+                if _run([plutil, "-convert", "xml1", "-o", str(xml_out), str(plist)]):
+                    extra.append(xml_out)
+            except OSError:
+                continue
+    return extra
 
 
 PACKAGE_ID_RE = re.compile(

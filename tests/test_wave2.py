@@ -506,7 +506,8 @@ class Wave2PipelineTests(unittest.TestCase):
         m.finish_stage("chaos", 8)
         report = m.to_report()
         self.assertEqual(report["stages"][0]["out"], 8)
-        self.assertEqual(rp.build_wappalyzer_cmd("https://ex.com")[0], "wappalyzer")
+        cmd0 = Path(rp.build_wappalyzer_cmd("https://ex.com")[0]).name.lower()
+        self.assertIn(cmd0, ("webanalyze", "wappalyzer"))
         self.assertIn("linkfinder", rp.build_linkfinder_cmd("https://ex.com/a.js"))
 
     def test_notify_stage_progress_redacts(self):
@@ -967,6 +968,40 @@ class Wave2PipelineTests(unittest.TestCase):
             self.assertEqual(out, dest)
             self.assertGreaterEqual(n, 1)
             self.assertTrue(dest.is_file())
+
+
+class ToolPreflightTests(unittest.TestCase):
+    def _exe(self, directory: Path, name: str) -> Path:
+        if os.name == "nt":
+            path = directory / f"{name}.exe"
+            path.write_bytes(b"MZ")
+        else:
+            path = directory / name
+            path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            path.chmod(0o755)
+        return path
+
+    def test_check_tool_uses_gobin_and_aliases(self):
+        with tempfile.TemporaryDirectory() as td:
+            gobin = Path(td) / "gobin"
+            gobin.mkdir()
+            self._exe(gobin, "webanalyze")
+            self._exe(gobin, "whatweb")
+            self._exe(gobin, "jsluice")
+            self._exe(gobin, "gowitness")
+            self._exe(gobin, "apkeep")
+            self._exe(gobin, "gplaycli")
+            env = {"GOBIN": str(gobin), "PATH": str(Path(td) / "empty")}
+            (Path(td) / "empty").mkdir()
+            with patch.dict(os.environ, env, clear=False):
+                self.assertTrue(rp.check_tool("webanalyze"))
+                self.assertTrue(rp.check_tool("wappalyzer"))
+                self.assertTrue(rp.check_tool("whatweb"))
+                self.assertTrue(rp.check_tool("jsluice"))
+                self.assertTrue(rp.check_tool("gowitness"))
+                self.assertTrue(rp.check_tool("apkeep"))
+                self.assertTrue(rp.check_tool("gplaycli"))
+                self.assertFalse(rp.check_tool("definitely_missing_reconpipe_tool"))
 
 
 if __name__ == "__main__":

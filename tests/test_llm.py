@@ -54,6 +54,13 @@ class LlmSettingsTests(unittest.TestCase):
         keys = rp.load_user_keys()
         self.assertEqual(keys.get("llm"), "sk-test-not-real")
 
+    def test_default_auto_is_off(self):
+        saved = llm.default_llm_settings()
+        self.assertFalse(saved["auto"])
+        self.assertFalse(saved["enabled"])
+        loaded = llm.load_app_settings()
+        self.assertFalse(loaded["auto"])
+
     def test_ci_skips_llm_unless_forced(self):
         llm.save_app_settings({"enabled": True, "auto": True, "provider": "ollama"})
         args = rp.build_parser().parse_args(["-d", "example.com", "--ci"])

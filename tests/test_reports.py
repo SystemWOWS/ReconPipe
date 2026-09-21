@@ -215,6 +215,35 @@ class LiveFindingsDashboardTests(unittest.TestCase):
         self.assertEqual(hits[0]["git_author"], "Richard Gomez")
         self.assertEqual(hits[0]["source_url"], "detect/detect_test.go")
 
+    def test_vendor_scene_nodes_layout(self):
+        groups = reports.group_findings_by_vendor(
+            [
+                {
+                    "type": "stripe_live",
+                    "key": "sk_live_" + "A" * 24,
+                    "valid": True,
+                    "source_url": "https://cdn.example.com/a.js",
+                },
+                {
+                    "type": "openai_key",
+                    "key": "sk-proj-not-a-real-openai-key-value",
+                    "valid": False,
+                    "source_url": "https://example.com/.env",
+                },
+            ],
+            redact=rp.redact_key,
+        )
+        nodes = reports.vendor_scene_nodes(groups)
+        self.assertEqual(len(nodes), 2)
+        ids = {n["id"] for n in nodes}
+        self.assertIn("stripe", ids)
+        self.assertIn("openai", ids)
+        live = next(n for n in nodes if n["id"] == "stripe")
+        self.assertEqual(live["color"], "#3fb950")
+        self.assertGreater(live["h"], 0.4)
+        xs = {n["x"] for n in nodes}
+        self.assertGreaterEqual(len(xs), 2)
+
 
 class NewPatternTests(unittest.TestCase):
     @classmethod
