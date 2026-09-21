@@ -307,7 +307,18 @@ def test_gui_module_compiles_and_helpers():
             else:
                 os.environ["RECONPIPE_WORKDIR"] = old
     assert "FINDINGS_RENDER_CAP" in src
-    assert "Showing first" in src
+    assert "Security Findings" in src
+    assert "findings_dashboard_html" in src
+    assert "Filter by Company" in src
+    assert "ingest_workspace_findings" in src
+    assert "findings_report.html" in src
+    assert "Showing first" in (ROOT / "reconpipe_reports.py").read_text(encoding="utf-8")
+    dst: list = []
+    assert mod.merge_finding_rows(dst, [{"type": "stripe_live", "key": "sk_live_aaaa", "hash": "h1"}]) == 1
+    assert mod.merge_finding_rows(dst, [{"type": "stripe_live", "key": "sk_live_aaaa", "hash": "h1", "valid": True}]) == 1
+    assert len(dst) == 1 and dst[0]["valid"] is True
+    assert mod.merge_finding_rows(dst, [{"type": "openai_key", "key": "sk-proj-x", "hash": "h2"}]) == 1
+    assert len(dst) == 2
     assert "rp-usage" in src and "ResourceMonitor" in src
     assert mod.fmt_bytes(512) == "512 B"
     assert mod.fmt_bytes(2048) == "2.0 KB"

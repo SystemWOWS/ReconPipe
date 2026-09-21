@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import html
 import json
+import math
+from collections import Counter
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
@@ -433,6 +435,335 @@ def vendor_for_type(key_type: str) -> Tuple[str, str]:
 def vendor_record(vendor_id: str) -> Dict[str, str]:
     row = VENDORS.get(vendor_id) or VENDORS["other"]
     return dict(row)
+
+
+def finding_source_location(finding: Dict[str, Any]) -> str:
+    return str(
+        finding.get("source_url")
+        or finding.get("file")
+        or finding.get("source")
+        or finding.get("path")
+        or ""
+    ).strip()
+
+
+def finding_line_number(finding: Dict[str, Any]) -> str:
+    for key in ("line", "StartLine", "start_line", "startLine", "Line"):
+        value = finding.get(key)
+        if value not in (None, ""):
+            return str(value)
+    return ""
+
+
+def finding_source_short(source: str, limit: int = 72) -> str:
+    text = (source or "").replace("https://", "").replace("http://", "")
+    if len(text) <= limit:
+        return text
+    keep = max(12, (limit - 1) // 2)
+    return f"{text[:keep]}…{text[-keep:]}"
+
+
+def _shannon_entropy(text: str) -> float:
+    if not text:
+        return 0.0
+    counts = Counter(text)
+    n = float(len(text))
+    return round(-sum((c / n) * math.log2(c / n) for c in counts.values()), 2)
+
+
+def _default_redact(value: str) -> str:
+    text = value or ""
+    if len(text) <= 8:
+        return "*" * len(text)
+    return f"{text[:4]}…{text[-4:]}"
+
+
+def enrich_finding_row(
+    finding: Dict[str, Any],
+    *,
+    tier: str = "actionable",
+    redact: Optional[RedactFn] = None,
+    reveal: bool = False,
+) -> Dict[str, Any]:
+    """Company, where-found, and redacted fingerprint for the live findings table."""
+    redact_fn = redact or _default_redact
+    typ = str(finding.get("type") or finding.get("detector") or "unknown")
+    vid, product = vendor_for_type(typ)
+    rec = vendor_record(vid)
+    key = str(finding.get("key") or "")
+    fingerprint = key if reveal else redact_fn(key)
+    source = finding_source_location(finding)
+    line = finding_line_number(finding)
+    about = str(rec.get("about") or "").split(". ")[0].rstrip(".")
+    description = product
+    if about:
+        description = f"{product} — {about}."
+    scanner = str(finding.get("scanner") or finding.get("detector") or "")
+    entropy = finding.get("entropy")
+    if entropy is None and key:
+        entropy = _shannon_entropy(key)
+    try:
+        entropy_n = round(float(entropy), 2) if entropy is not None else None
+    except (TypeError, ValueError):
+        entropy_n = None
+    valid = finding.get("valid")
+    if valid is True:
+        verdict = "LIVE"
+    elif finding.get("validated") and valid is False:
+        verdict = "invalid"
+    else:
+        verdict = str(tier or "seen")
+    return {
+        "rule": typ,
+        "company": rec.get("name") or vid,
+        "vendor_id": vid,
+        "category": rec.get("category") or "",
+        "product": product,
+        "description": description,
+        "source_url": source,
+        "source_short": finding_source_short(source),
+        "line": line,
+        "scanner": scanner,
+        "entropy": entropy_n,
+        "confidence": finding.get("confidence"),
+        "severity": str(finding.get("severity") or ""),
+        "valid": bool(valid),
+        "validated": bool(finding.get("validated")),
+        "verdict": verdict,
+        "fingerprint": fingerprint,
+        "git_commit": str(finding.get("git_commit") or "")[:12],
+        "git_author": str(finding.get("git_author") or ""),
+        "git_date": str(finding.get("git_date") or ""),
+        "tier": tier,
+        "hash": str(finding.get("hash") or ""),
+        "from_wayback": bool(finding.get("from_wayback")),
+        "mcp_config": bool(finding.get("mcp_config")),
+    }
+
+
+def findings_report_stats(
+    findings: Optional[Iterable[Dict[str, Any]]] = None,
+    exposures: Optional[Iterable[Dict[str, Any]]] = None,
+    informational: Optional[Iterable[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    rows: List[Dict[str, Any]] = []
+    for group in (findings, informational, exposures):
+        for item in group or []:
+            if isinstance(item, dict):
+                rows.append(item)
+    sources: set = set()
+    rules: set = set()
+    companies: set = set()
+    live_n = 0
+    by_company: Counter = Counter()
+    for item in rows:
+        src = finding_source_location(item)
+        if src:
+            sources.add(src)
+        typ = str(item.get("type") or "unknown")
+        rules.add(typ)
+        name = vendor_record(vendor_for_type(typ)[0])["name"]
+        companies.add(name)
+        by_company[name] += 1
+        if item.get("valid"):
+            live_n += 1
+    return {
+        "total": len(rows),
+        "sources": len(sources),
+        "rules": len(rules),
+        "companies": len(companies),
+        "live": live_n,
+        "by_company": by_company.most_common(10),
+    }
+
+
+def findings_dashboard_html(
+    domain: str,
+    rows: List[Dict[str, Any]],
+    *,
+    stats: Optional[Dict[str, Any]] = None,
+    generated: Optional[str] = None,
+    scan_mode: str = "ReconPipe",
+    live: bool = False,
+    fragment: bool = False,
+    cap: int = 200,
+    total: Optional[int] = None,
+) -> str:
+    """Gitleaks-style scan report: stats, company graph, filterable-looking table."""
+    ts = generated or datetime.now().strftime("%b %d, %Y %H:%M:%S")
+    shown = list(rows or [])[: max(1, int(cap))]
+    if not shown and rows:
+        shown = []
+    n_total = int(total if total is not None else len(rows or []))
+    st = dict(stats or {})
+    if not st:
+        st = {
+            "total": n_total,
+            "sources": len({str(r.get("source_url") or "") for r in (rows or []) if r.get("source_url")}),
+            "rules": len({str(r.get("rule") or "") for r in (rows or []) if r.get("rule")}),
+            "companies": len({str(r.get("company") or "") for r in (rows or []) if r.get("company")}),
+            "live": sum(1 for r in (rows or []) if r.get("valid")),
+            "by_company": [],
+        }
+    bars = st.get("by_company") or []
+    max_bar = max((int(c) for _n, c in bars), default=1) or 1
+    bar_html = []
+    for name, count in bars:
+        pct = max(4, int(round(100.0 * int(count) / max_bar)))
+        bar_html.append(
+            "<div class='rp-gl-bar-row'>"
+            f"<span class='rp-gl-bar-name'>{html.escape(str(name))}</span>"
+            "<span class='rp-gl-bar-track'><span class='rp-gl-bar-fill' "
+            f"style='width:{pct}%'></span></span>"
+            f"<span class='rp-gl-bar-n'>{int(count)}</span>"
+            "</div>"
+        )
+    if not bar_html:
+        bar_html.append("<p class='rp-gl-empty'>No companies yet — hits appear here during the scan.</p>")
+
+    body_rows = []
+    for row in shown:
+        line = str(row.get("line") or "")
+        file_cell = html.escape(str(row.get("source_short") or row.get("source_url") or "—"))
+        if line:
+            file_cell += f"<div class='rp-gl-sub'>Line: {html.escape(line)}</div>"
+        if row.get("from_wayback"):
+            file_cell += "<div class='rp-gl-sub'>Wayback snapshot</div>"
+        if row.get("mcp_config"):
+            file_cell += "<div class='rp-gl-sub'>MCP config</div>"
+        meta_bits = []
+        if row.get("entropy") is not None:
+            meta_bits.append(f"Entropy: {html.escape(str(row.get('entropy')))}")
+        if row.get("confidence") not in (None, ""):
+            meta_bits.append(f"Confidence: {html.escape(str(row.get('confidence')))}")
+        if row.get("scanner"):
+            meta_bits.append(f"Scanner: {html.escape(str(row.get('scanner')))}")
+        if row.get("git_author"):
+            meta_bits.append(f"Author: {html.escape(str(row.get('git_author')))}")
+        if row.get("git_date"):
+            meta_bits.append(f"Date: {html.escape(str(row.get('git_date')))}")
+        if row.get("git_commit"):
+            meta_bits.append(f"Commit: {html.escape(str(row.get('git_commit')))}")
+        sev = str(row.get("severity") or "")
+        if sev:
+            meta_bits.append(f"Severity: {html.escape(sev)}")
+        meta_bits.append(f"Status: {html.escape(str(row.get('verdict') or ''))}")
+        meta = "<br>".join(meta_bits) if meta_bits else "—"
+        company = html.escape(str(row.get("company") or "Other"))
+        cat = html.escape(str(row.get("category") or ""))
+        pill_cls = "rp-secret-pill live" if row.get("valid") else "rp-secret-pill"
+        body_rows.append(
+            "<tr>"
+            f"<td><code>{html.escape(str(row.get('rule') or ''))}</code></td>"
+            f"<td class='rp-gl-file'>{file_cell}</td>"
+            f"<td><strong>{company}</strong>"
+            f"{f'<div class=\"rp-gl-sub\">{cat}</div>' if cat else ''}</td>"
+            f"<td>{html.escape(str(row.get('description') or ''))}</td>"
+            f"<td><span class='{pill_cls}'>{html.escape(str(row.get('fingerprint') or ''))}</span></td>"
+            f"<td class='rp-gl-meta'>{meta}</td>"
+            "</tr>"
+        )
+    if not body_rows:
+        body_rows.append(
+            "<tr><td colspan='6' class='rp-gl-empty'>No findings match the current filters.</td></tr>"
+        )
+
+    cap_note = ""
+    if n_total > len(shown):
+        cap_note = (
+            f"<p class='rp-gl-sub'>Showing first {len(shown)} of {n_total} findings.</p>"
+        )
+    live_badge = "<span class='rp-gl-live'>LIVE</span>" if live else ""
+    inner = (
+        "<section class='rp-gl'>"
+        "<div class='rp-gl-title-row'>"
+        "<div>"
+        "<h2>Security Scan Report</h2>"
+        f"<div class='rp-gl-sub'>Generated on {html.escape(ts)}"
+        f"{' · ' + html.escape(domain) if domain else ''}</div>"
+        "</div>"
+        f"{live_badge}"
+        "</div>"
+        "<div class='rp-gl-stats'>"
+        f"<div><div class='v'>{int(st.get('total') or 0)}</div><div class='k'>Total Findings</div></div>"
+        f"<div><div class='v'>{int(st.get('sources') or 0)}</div><div class='k'>Sources Affected</div></div>"
+        f"<div><div class='v'>{int(st.get('rules') or 0)}</div><div class='k'>Unique Rules</div></div>"
+        f"<div><div class='v'>{int(st.get('companies') or 0)}</div><div class='k'>Companies</div></div>"
+        f"<div><div class='v'>{html.escape(scan_mode or 'ReconPipe')}</div>"
+        "<div class='k'>Scan Mode</div></div>"
+        "</div>"
+        "<h3 class='rp-gl-h3'>Keys by company</h3>"
+        f"<div class='rp-gl-bars'>{''.join(bar_html)}</div>"
+        f"{cap_note}"
+        "<div class='rp-gl-table-wrap'><table class='rp-gl-table'>"
+        "<thead><tr>"
+        "<th>Rule</th><th>Where found</th><th>Company</th>"
+        "<th>Description</th><th>Secret</th><th>Metadata</th>"
+        "</tr></thead>"
+        f"<tbody>{''.join(body_rows)}</tbody></table></div>"
+        "<div class='rp-gl-foot'>Generated by ReconPipe"
+        f"<span>Total Findings: {int(st.get('total') or 0)}</span></div>"
+        "</section>"
+    )
+    styles = (
+        "<style>"
+        ".rp-gl{font-family:Segoe UI,system-ui,sans-serif;color:inherit}"
+        ".rp-gl-title-row{display:flex;justify-content:space-between;align-items:flex-start;gap:12px}"
+        ".rp-gl h2{margin:0;font-size:22px;font-weight:700}"
+        ".rp-gl-h3{margin:16px 0 8px;font-size:13px;letter-spacing:.08em;text-transform:uppercase;opacity:.7}"
+        ".rp-gl-sub{font-size:12px;opacity:.65;margin-top:2px}"
+        ".rp-gl-live{background:#22c55e;color:#052e16;font-size:10px;font-weight:800;"
+        "letter-spacing:.14em;padding:4px 10px;border-radius:999px}"
+        ".rp-gl-stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));"
+        "gap:8px;padding:16px 18px;margin:12px 0;border:1px solid rgba(127,127,127,.25);"
+        "border-radius:10px}"
+        ".rp-gl-stats .v{font-size:26px;font-weight:700;line-height:1.15}"
+        ".rp-gl-stats .k{font-size:11px;opacity:.65;margin-top:4px}"
+        ".rp-gl-bar-row{display:flex;align-items:center;gap:10px;margin:5px 0}"
+        ".rp-gl-bar-name{width:160px;font-size:12px;white-space:nowrap;overflow:hidden;"
+        "text-overflow:ellipsis}"
+        ".rp-gl-bar-track{flex:1;height:8px;border-radius:99px;background:rgba(127,127,127,.25);overflow:hidden}"
+        ".rp-gl-bar-fill{display:block;height:100%;background:#f0883e}"
+        ".rp-gl-bar-n{width:28px;text-align:right;font-size:12px;font-variant-numeric:tabular-nums}"
+        ".rp-gl-table-wrap{overflow:auto;margin-top:8px}"
+        ".rp-gl-table{width:100%;border-collapse:collapse;font-size:13px}"
+        ".rp-gl-table th{text-align:left;font-size:11px;opacity:.65;padding:8px 10px;"
+        "border-bottom:1px solid rgba(127,127,127,.25)}"
+        ".rp-gl-table td{padding:12px 10px;border-bottom:1px solid rgba(127,127,127,.18);"
+        "vertical-align:top}"
+        ".rp-gl-file{max-width:240px;word-break:break-all}"
+        ".rp-gl-meta{font-size:12px;opacity:.8;white-space:nowrap}"
+        ".rp-secret-pill{font-family:ui-monospace,Consolas,monospace;font-size:12px;"
+        "background:#fecaca;color:#9f1239;padding:4px 10px;border-radius:4px;display:inline-block}"
+        ".rp-secret-pill.live{background:#bbf7d0;color:#14532d}"
+        ".rp-gl-empty{opacity:.6;padding:18px;text-align:center}"
+        ".rp-gl-foot{display:flex;justify-content:space-between;font-size:11px;opacity:.55;margin-top:10px}"
+        "@media (prefers-color-scheme: dark){"
+        ".rp-secret-pill{background:#7f1d1d;color:#fecaca}"
+        ".rp-secret-pill.live{background:#14532d;color:#bbf7d0}"
+        "}"
+        "</style>"
+    )
+    if fragment:
+        return styles + inner
+    banner = (
+        "<header class='gl-banner'>ReconPipe Security Findings</header>"
+    )
+    return (
+        "<!DOCTYPE html><html><head><meta charset='utf-8'>"
+        f"<title>Security Scan Report — {html.escape(domain)}</title>"
+        "<meta name='viewport' content='width=device-width, initial-scale=1'>"
+        f"{styles}"
+        "<style>body{margin:0;background:#f3f4f6;color:#111827}"
+        ".gl-banner{background:#1d4ed8;color:#fff;padding:14px 24px;font-weight:700;font-size:20px}"
+        ".rp-gl{max-width:1200px;margin:20px auto;background:#fff;padding:24px;"
+        "border-radius:12px;box-shadow:0 1px 2px rgba(0,0,0,.06)}"
+        "@media (prefers-color-scheme: dark){body{background:#0f172a;color:#e5e7eb}"
+        ".rp-gl{background:#111827}.gl-banner{background:#1e3a8a}}</style>"
+        "</head><body>"
+        f"{banner}{inner}"
+        "</body></html>"
+    )
 
 
 def _iter_findings(
@@ -867,4 +1198,20 @@ def write_vendor_and_reports(
     p_exh = output_dir / "report_executive.html"
     p_exh.write_text(export_executive_html(domain, groups), encoding="utf-8")
     written["report_executive.html"] = p_exh
+    enriched: List[Dict[str, Any]] = []
+    for tier, item in _iter_findings(findings, exposures, informational):
+        enriched.append(enrich_finding_row(item, tier=tier, redact=redact))
+    stats = findings_report_stats(findings, exposures, informational)
+    p_fr = output_dir / "findings_report.html"
+    p_fr.write_text(
+        findings_dashboard_html(
+            domain,
+            enriched,
+            stats=stats,
+            scan_mode="ReconPipe",
+            fragment=False,
+        ),
+        encoding="utf-8",
+    )
+    written["findings_report.html"] = p_fr
     return written

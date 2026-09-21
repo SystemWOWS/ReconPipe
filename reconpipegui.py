@@ -14,7 +14,7 @@ import time
 import zipfile
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 import asyncio
 
 HERE = Path(__file__).resolve().parent
@@ -114,6 +114,7 @@ ARTIFACT_FILES = [
     "report_pentest.md",
     "report_executive.md",
     "report_executive.html",
+    "findings_report.html",
 ]
 ARTIFACT_ZIP_NAME = "reconpipe_artifacts.zip"
 
@@ -238,6 +239,54 @@ def load_jsonl_list(path: Path, limit: int = 2500) -> List[Dict]:
     except Exception:
         return []
     return rows
+
+
+def finding_identity(row: Dict) -> Tuple[Any, Any, Any]:
+    return (row.get("hash"), row.get("type"), row.get("key"))
+
+
+def merge_finding_rows(dst: List[Dict], incoming: Iterable[Dict]) -> int:
+    """Upsert streamed/workspace findings. Returns new + updated count."""
+    if not incoming:
+        return 0
+    index = {finding_identity(f): i for i, f in enumerate(dst)}
+    changed = 0
+    for item in incoming:
+        if not isinstance(item, dict):
+            continue
+        ident = finding_identity(item)
+        if ident in index and (ident[0] or ident[2]):
+            i = index[ident]
+            merged = dict(dst[i])
+            merged.update(item)
+            if merged != dst[i]:
+                dst[i] = merged
+                changed += 1
+            continue
+        dst.append(item)
+        index[ident] = len(dst) - 1
+        changed += 1
+    return changed
+
+
+def workspace_file_sig(path: Path) -> Tuple[int, int]:
+    try:
+        st = path.stat()
+        return (int(getattr(st, "st_mtime_ns", int(st.st_mtime * 1_000_000_000))), int(st.st_size))
+    except OSError:
+        return (0, 0)
+
+
+def ingest_workspace_findings(workspace: Path) -> int:
+    """Merge live stream + JSON artifacts into STATE. Returns how many rows changed."""
+    ws = Path(workspace)
+    n = 0
+    n += merge_finding_rows(STATE.findings, load_jsonl_list(ws / "findings_stream.jsonl"))
+    n += merge_finding_rows(STATE.findings, load_json_list(ws / "unique_findings.json"))
+    n += merge_finding_rows(STATE.findings, load_json_list(ws / "findings.json"))
+    n += merge_finding_rows(STATE.informational, load_json_list(ws / "informational.json"))
+    n += merge_finding_rows(STATE.exposures, load_json_list(ws / "source_map_exposures.json"))
+    return n
 
 
 def load_scan_status(path: Path) -> Dict[str, Any]:
@@ -941,6 +990,8 @@ class GuiState:
         self.filter_query: str = ""
         self.min_confidence: int = 0
         self.filter_severity: str = "All"
+        self.filter_company: str = "All"
+        self.filter_file: str = ""
         self.scan_queue: List[str] = []
         self.mobile_paths: List[str] = []
         self.dark_on: bool = True
@@ -1262,6 +1313,9 @@ def build_ui() -> None:
           .rp-expansion .q-item__label { font-weight: 650; font-size: 13px; color: var(--rp-text-strong); }
           .rp-expansion .q-expansion-item__content { padding: 4px 12px 12px 12px; }
           .rp-hint { font-size: 11.5px; color: var(--rp-muted); margin: 0 0 8px 0; }
+          .rp-gl-table td code { font-size: 12px; }
+          .body--dark .rp-secret-pill { background: #7f1d1d; color: #fecaca; }
+          .body--dark .rp-secret-pill.live { background: #14532d; color: #bbf7d0; }
         </style>
         """
     )
@@ -1902,7 +1956,9 @@ def build_ui() -> None:
                         STATE.informational.clear()
                         STATE.exposures.clear()
                         STATE.revealed.clear()
-                        STATE._finalized_at = None  
+                        STATE._finalized_at = None
+                        STATE._finding_sigs = None
+                        STATE._dash_sig = None  
                         try:
                             console.clear()
                         except Exception:
@@ -2354,16 +2410,22 @@ def build_ui() -> None:
         # Findings
         with ui.tab_panel(tab_findings):
             with ui.card().classes("w-full rp-card"):
-                ui.label("Findings").classes("rp-section")
+                ui.label("Security Findings").classes("rp-section")
                 ui.label(
-                    "Keys are redacted until Reveal. Inspect a finding to re-test it, "
-                    "or use the Key Tester tab for a pasted credential."
+                    "Live Gitleaks-style report: company, where the key was found, "
+                    "redacted secret. Rows fill in while a scan runs. Reveal before copy."
                 ).classes("text-xs text-gray-500 mb-2")
 
                 with ui.row().classes("w-full gap-2 flex-wrap items-end"):
                     f_type = ui.select(
-                        ["All"], value="All", label="Key type"
+                        ["All"], value="All", label="Filter by Rule"
                     ).classes("w-48").props("dense outlined")
+                    f_company = ui.select(
+                        ["All"], value="All", label="Filter by Company"
+                    ).classes("w-52").props("dense outlined")
+                    f_file = ui.input("Filter by File").classes("w-64").props(
+                        "dense outlined placeholder='URL, path, or filename'"
+                    )
                     f_status = ui.select(
                         ["All", "Valid", "Invalid", "Unchecked", "Error/Skipped"],
                         value="All",
@@ -2388,6 +2450,8 @@ def build_ui() -> None:
 
                     def apply_filters() -> None:
                         STATE.filter_type = f_type.value or "All"
+                        STATE.filter_company = f_company.value or "All"
+                        STATE.filter_file = (f_file.value or "").strip().lower()
                         STATE.filter_status = f_status.value or "All"
                         STATE.filter_tier = f_tier.value or "All"
                         STATE.filter_severity = f_sev.value or "All"
@@ -2395,8 +2459,22 @@ def build_ui() -> None:
                         STATE.min_confidence = int(f_conf.value or 0)
                         render_findings()
 
+                    def reset_filters() -> None:
+                        f_type.set_value("All")
+                        f_company.set_value("All")
+                        f_file.set_value("")
+                        f_status.set_value("All")
+                        f_tier.set_value("All")
+                        f_sev.set_value("All")
+                        f_query.set_value("")
+                        f_conf.set_value(0)
+                        apply_filters()
+
                     ui.button("Apply", on_click=apply_filters, color="primary").props(
                         "unelevated dense"
+                    )
+                    ui.button("Reset Filters", on_click=reset_filters, color="secondary").props(
+                        "outline dense"
                     )
                     ui.button(
                         "Reload files", on_click=lambda: reload_findings(), color="secondary"
@@ -2475,8 +2553,19 @@ def build_ui() -> None:
                     ui.button("Export HackerOne", on_click=export_h1, color="secondary").props("flat dense")
                     ui.button("Export Jira", on_click=export_jira, color="secondary").props("flat dense")
 
-                findings_meta = ui.label("0 findings").classes("text-sm text-slate-400")
-                findings_host = ui.column().classes("w-full gap-2 mt-2")
+                findings_html = ui.html(
+                    "<p class='text-slate-500 text-sm'>Run a scan or load a workspace — "
+                    "the live report fills in here.</p>",
+                    sanitize=False,
+                )
+                with ui.row().classes("w-full gap-2 flex-wrap items-end mt-2"):
+                    inspect_select = ui.select(
+                        {"_": "Select a finding to inspect"},
+                        value="_",
+                        label="Inspect row",
+                    ).classes("flex-1").props("dense outlined")
+                    inspect_btns = ui.row().classes("gap-1")
+
                 detail_host = ui.card().classes("w-full rp-card mt-2")
                 with detail_host:
                     ui.label("Select a finding to inspect / re-test.").classes(
@@ -2500,6 +2589,17 @@ def build_ui() -> None:
                             continue
                         if STATE.filter_type != "All" and f.get("type") != STATE.filter_type:
                             continue
+                        company_want = STATE.filter_company
+                        if company_want and company_want != "All":
+                            vid, _prod = rp.rp_reports.vendor_for_type(str(f.get("type") or ""))
+                            rec = rp.rp_reports.vendor_record(vid)
+                            if rec.get("name") != company_want and vid != company_want:
+                                continue
+                        file_q = STATE.filter_file
+                        if file_q:
+                            loc = rp.rp_reports.finding_source_location(f).lower()
+                            if file_q not in loc:
+                                continue
                         conf = f.get("confidence")
                         try:
                             if conf is not None and int(conf) < STATE.min_confidence:
@@ -2524,6 +2624,8 @@ def build_ui() -> None:
                                 continue
                         q = STATE.filter_query
                         if q:
+                            vid, _prod = rp.rp_reports.vendor_for_type(str(f.get("type") or ""))
+                            company = rp.rp_reports.vendor_record(vid).get("name") or ""
                             blob = " ".join(
                                 str(f.get(k, ""))
                                 for k in (
@@ -2531,9 +2633,11 @@ def build_ui() -> None:
                                     "source_url",
                                     "note",
                                     "hash",
-                                    "key",
+                                    "scanner",
+                                    "detector",
                                 )
                             ).lower()
+                            blob = f"{blob} {company.lower()}"
                             if q not in blob:
                                 continue
                         out.append(f)
@@ -2542,12 +2646,6 @@ def build_ui() -> None:
                 def render_findings() -> None:
                     rows = filtered_rows()
                     shown = rows[:FINDINGS_RENDER_CAP]
-                    findings_meta.set_text(
-                        f"{min(len(rows), FINDINGS_RENDER_CAP)} shown · "
-                        f"{len(STATE.findings)} actionable · "
-                        f"{len(STATE.informational)} informational · "
-                        f"{len(STATE.exposures)} exposures"
-                    )
                     types = sorted(
                         {
                             str(f.get("type") or "unknown")
@@ -2558,107 +2656,136 @@ def build_ui() -> None:
                             )
                         }
                     )
-                    f_type.options = ["All", *types]
-                    findings_host.clear()
-                    with findings_host:
-                        if not rows:
-                            ui.label("No findings match the current filters.").classes(
-                                "text-slate-500 text-sm"
+                    companies = sorted(
+                        {
+                            rp.rp_reports.vendor_record(
+                                rp.rp_reports.vendor_for_type(str(f.get("type") or ""))[0]
+                            )["name"]
+                            for f in (
+                                STATE.findings
+                                + STATE.informational
+                                + STATE.exposures
                             )
-                            return
-                        if len(rows) > FINDINGS_RENDER_CAP:
-                            ui.label(
-                                f"Showing first {FINDINGS_RENDER_CAP} of {len(rows)} findings."
-                            ).classes("text-xs text-slate-500")
-                        for idx, f in enumerate(shown):
-                            key = str(f.get("key") or "")
-                            fid = f.get("hash") or f"{f.get('type')}:{key[:24]}:{idx}"
-                            revealed = fid in STATE.revealed
-                            valid = f.get("valid")
-                            badge = (
-                                "VALID"
-                                if valid
-                                else (
-                                    "checked"
-                                    if f.get("validated")
-                                    else f.get("_tier", "finding")
-                                )
+                        }
+                    )
+                    type_opts = ["All", *types]
+                    company_opts = ["All", *companies]
+                    if list(f_type.options or []) != type_opts:
+                        f_type.options = type_opts
+                    if list(f_company.options or []) != company_opts:
+                        f_company.options = company_opts
+
+                    reports = rp.rp_reports
+                    enriched = []
+                    inspect_opts = {"_": "Select a finding to inspect"}
+                    id_map: Dict[str, Dict] = {}
+                    for idx, f in enumerate(shown):
+                        key = str(f.get("key") or "")
+                        fid = str(f.get("hash") or f"{f.get('type')}:{key[:24]}:{idx}")
+                        row = reports.enrich_finding_row(
+                            f,
+                            tier=str(f.get("_tier") or "actionable"),
+                            redact=rp.redact_key,
+                            reveal=fid in STATE.revealed,
+                        )
+                        row["_id"] = fid
+                        enriched.append(row)
+                        loc = row.get("source_short") or "unknown"
+                        inspect_opts[fid] = (
+                            f"{row.get('rule')} · {row.get('company')} · {loc}"
+                        )
+                        id_map[fid] = f
+                    STATE._inspect_map = id_map
+                    stats = reports.findings_report_stats(
+                        STATE.findings, STATE.exposures, STATE.informational
+                    )
+                    live = bool(STATE.runner.running)
+                    mode = "Live scan" if live else "ReconPipe"
+                    generated = (
+                        "Updating as hits arrive"
+                        if live
+                        else datetime.now().strftime("%b %d, %Y %H:%M:%S")
+                    )
+                    dash = reports.findings_dashboard_html(
+                        STATE.domain or "scan",
+                        enriched,
+                        stats=stats,
+                        generated=generated,
+                        scan_mode=mode,
+                        live=live,
+                        fragment=True,
+                        cap=FINDINGS_RENDER_CAP,
+                        total=len(rows),
+                    )
+                    sig = (
+                        dash,
+                        tuple(inspect_opts.items()),
+                        live,
+                    )
+                    if getattr(STATE, "_dash_sig", None) != sig:
+                        STATE._dash_sig = sig
+                        findings_html.set_content(dash)
+                        prev = inspect_select.value
+                        inspect_select.options = inspect_opts
+                        if prev in inspect_opts:
+                            inspect_select.set_value(prev)
+                        elif inspect_select.value not in inspect_opts:
+                            inspect_select.set_value("_")
+
+                        inspect_btns.clear()
+                        with inspect_btns:
+                            def _selected_row() -> Tuple[Optional[Dict], str]:
+                                fid = str(inspect_select.value or "_")
+                                row = (getattr(STATE, "_inspect_map", {}) or {}).get(fid)
+                                return row, fid
+
+                            def do_inspect() -> None:
+                                row, fid = _selected_row()
+                                if not row or fid == "_":
+                                    ui.notify("Select a finding first", type="warning")
+                                    return
+                                show_detail(row, fid)
+
+                            def do_reveal() -> None:
+                                row, fid = _selected_row()
+                                if not row or fid == "_":
+                                    ui.notify("Select a finding first", type="warning")
+                                    return
+                                if fid in STATE.revealed:
+                                    STATE.revealed.discard(fid)
+                                else:
+                                    STATE.revealed.add(fid)
+                                STATE._dash_sig = None
+                                render_findings()
+                                show_detail(row, fid)
+
+                            async def do_copy() -> None:
+                                row, fid = _selected_row()
+                                if not row or fid == "_":
+                                    ui.notify("Select a finding first", type="warning")
+                                    return
+                                val = str(row.get("key") or "")
+                                try:
+                                    await ui.run_javascript(
+                                        f"navigator.clipboard.writeText({json.dumps(val)})"
+                                    )
+                                except Exception:
+                                    pass
+                                ui.notify("Copied to clipboard", type="positive")
+
+                            ui.button("Inspect", on_click=do_inspect, color="primary").props(
+                                "dense unelevated"
                             )
-                            color = (
-                                "text-emerald-400"
-                                if valid
-                                else (
-                                    "text-amber-300"
-                                    if f.get("_tier") == "exposure"
-                                    else "text-slate-300"
-                                )
+                            _row, fid = _selected_row()
+                            revealed = fid in STATE.revealed and fid != "_"
+                            ui.button(
+                                "Hide" if revealed else "Reveal",
+                                on_click=do_reveal,
+                                color="secondary",
+                            ).props("dense flat")
+                            ui.button("Copy", on_click=do_copy, color="secondary").props(
+                                "dense flat"
                             )
-                            with ui.card().classes("w-full rp-subcard"):
-                                with ui.row().classes(
-                                    "w-full justify-between items-start gap-2"
-                                ):
-                                    with ui.column().classes("gap-0 flex-1"):
-                                        ui.label(
-                                            f"[{f.get('type', 'unknown')}]  "
-                                            f"{f.get('severity', '')}  "
-                                            f"conf={f.get('confidence', '—')}  ·  {badge}"
-                                        ).classes(f"font-semibold {color}")
-                                        ui.label(
-                                            redact_secret(key, reveal=revealed)
-                                        ).classes("rp-secret text-sm text-slate-200")
-                                        src = f.get("source_url") or ""
-                                        ui.label(src).classes(
-                                            "text-xs text-slate-500 break-all"
-                                        )
-                                        if f.get("note"):
-                                            ui.label(str(f.get("note"))).classes(
-                                                "text-xs text-slate-400"
-                                            )
-                                    with ui.column().classes("gap-1"):
-                                        def make_select(i=idx, row=f, id_=fid):
-                                            def _sel():
-                                                STATE.selected_idx = i
-                                                show_detail(row, id_)
-
-                                            return _sel
-
-                                        def make_reveal(id_=fid):
-                                            def _rev():
-                                                if id_ in STATE.revealed:
-                                                    STATE.revealed.discard(id_)
-                                                else:
-                                                    STATE.revealed.add(id_)
-                                                render_findings()
-
-                                            return _rev
-
-                                        def make_copy(val=key):
-                                            async def _cp():
-                                                try:
-                                                    await ui.run_javascript(
-                                                        f"navigator.clipboard.writeText({json.dumps(val)})"
-                                                    )
-                                                except Exception:
-                                                    pass
-                                                ui.notify("Copied to clipboard", type="positive")
-
-                                            return _cp
-
-                                        ui.button(
-                                            "Inspect",
-                                            on_click=make_select(),
-                                            color="primary",
-                                        ).props("dense unelevated")
-                                        ui.button(
-                                            "Copy",
-                                            on_click=make_copy(),
-                                            color="secondary",
-                                        ).props("dense flat")
-                                        ui.button(
-                                            "Reveal" if not revealed else "Hide",
-                                            on_click=make_reveal(),
-                                            color="secondary",
-                                        ).props("dense flat")
 
                 def show_detail(finding: Dict, fid: str) -> None:
                     detail_host.clear()
@@ -2670,9 +2797,23 @@ def build_ui() -> None:
                         ui.label(
                             "Key: " + redact_secret(str(finding.get("key") or ""), revealed)
                         ).classes("rp-secret text-sm")
-                        ui.label(f"Source: {finding.get('source_url', '')}").classes(
+                        vid, product = rp.rp_reports.vendor_for_type(
+                            str(finding.get("type") or "")
+                        )
+                        company = rp.rp_reports.vendor_record(vid).get("name") or vid
+                        ui.label(f"Company: {company} · {product}").classes(
+                            "text-sm text-slate-300"
+                        )
+                        loc = rp.rp_reports.finding_source_location(finding)
+                        line = rp.rp_reports.finding_line_number(finding)
+                        line_bit = f" · line {line}" if line else ""
+                        ui.label(f"Where found: {loc}{line_bit}").classes(
                             "text-xs text-slate-400 break-all"
                         )
+                        if finding.get("scanner"):
+                            ui.label(f"Scanner: {finding.get('scanner')}").classes(
+                                "text-xs text-slate-500"
+                            )
                         ui.label(f"Hash: {finding.get('hash', '—')}").classes(
                             "text-xs text-slate-500"
                         )
@@ -2787,6 +2928,8 @@ def build_ui() -> None:
                     STATE.exposures = load_json_list(
                         STATE.workspace / "source_map_exposures.json"
                     )
+                    STATE._dash_sig = None
+                    STATE._finding_sigs = None
                     render_findings()
                     try:
                         build_ui.render_vendors()  
@@ -2800,7 +2943,12 @@ def build_ui() -> None:
 
                 # bind for outer timers
                 build_ui.reload_findings = reload_findings  
-                build_ui.render_findings = render_findings  
+                build_ui.render_findings = render_findings
+                for _w in (f_type, f_company, f_status, f_tier, f_sev):
+                    _w.on("update:model-value", lambda *_: apply_filters())
+                f_file.on("blur", lambda *_: apply_filters())
+                f_file.on("keydown.enter", lambda *_: apply_filters())
+                render_findings()  
 
         # Vendors
         with ui.tab_panel(tab_vendors):
@@ -3662,22 +3810,29 @@ def build_ui() -> None:
         if STATE.runner.running:
             update_stats()
             ws = Path(STATE.workspace or STATE.runner.output_dir or "")
-            stream_file = ws / "findings_stream.jsonl" if str(ws) else None
-            if stream_file and stream_file.is_file():
-                streamed = load_jsonl_list(stream_file)
-                n = len(streamed)
-                if n != getattr(STATE, "_stream_n", 0):
-                    STATE._stream_n = n
-                    known = {
-                        (f.get("hash"), f.get("type"), f.get("key"))
-                        for f in STATE.findings
-                    }
-                    for f in streamed:
-                        ident = (f.get("hash"), f.get("type"), f.get("key"))
-                        if ident in known:
-                            continue
-                        STATE.findings.append(f)
-                        known.add(ident)
+            if str(ws):
+                sigs = (
+                    workspace_file_sig(ws / "findings_stream.jsonl"),
+                    workspace_file_sig(ws / "unique_findings.json"),
+                    workspace_file_sig(ws / "findings.json"),
+                    workspace_file_sig(ws / "informational.json"),
+                    workspace_file_sig(ws / "source_map_exposures.json"),
+                )
+                if sigs != getattr(STATE, "_finding_sigs", None):
+                    STATE._finding_sigs = sigs
+                    try:
+                        ingest_workspace_findings(ws)
+                    except Exception:
+                        pass
+                    STATE._dash_sig = None
+                    try:
+                        build_ui.render_findings()
+                    except Exception:
+                        pass
+                    try:
+                        build_ui.render_vendors()
+                    except Exception:
+                        pass
 
         elif STATE.runner.finished_at and STATE.runner.exit_code is not None:
             # Finalize once

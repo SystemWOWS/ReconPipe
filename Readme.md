@@ -459,10 +459,10 @@ Tabs:
 - **Scan** — target, intel keys, stage skips, start / cancel
 - **Apps** — APK / IPA / package IDs
 - **Console** — live log and stage tracker (`reconpipe.py` as a cancellable subprocess)
-- **Findings** — actionable / informational / exposures, redacted secrets, Reveal, re-test. **Report template** picker + **Generate report**: pentest / bug-bounty write-up (HackerOne, Bugcrowd, Intigriti style) or an executive briefing for a CEO/CTO meeting
+- **Findings** — live Gitleaks-style report (totals, keys-by-company graph, table of rule / where found / company / redacted secret / metadata). Fills in during a scan. Reveal, inspect, re-test. **Report template** picker + **Generate report**: pentest / bug-bounty write-up (HackerOne, Bugcrowd, Intigriti style) or an executive briefing for a CEO/CTO meeting. Also writes `findings_report.html`
 - **Vendors** — companies whose keys showed up, with a short about/website blurb, product type, live vs seen, and redacted fingerprints
 - **Key Tester** — paste one or more credentials, pick a type (auto-detected when the prefix is unique), live-check without a full scan. Includes HubSpot private-app tokens (`pat-na1-…` / `pat-eu1-…` / `pat-ap1-…`) and n8n public API keys (legacy `n8n_api_…` or JWT with `iss=n8n` / `aud=public-api`; live-check needs the instance URL)
-- **Artifacts** — preview/download reports (including `vendors.html`, `report_pentest.md`, `report_executive.md` / `.html`, `remediation.md`) plus a zip when the scan finishes
+- **Artifacts** — preview/download reports (including `findings_report.html`, `vendors.html`, `report_pentest.md`, `report_executive.md` / `.html`, `remediation.md`) plus a zip when the scan finishes
 - **History** — past scans (`~/.reconpipe/history.yaml`) with Open / Rescan
 - **Settings** — dark mode, LLM provider (Ollama / OpenAI-compatible / OpenAI / Anthropic), model, base URL, API key, auto-run after scan, Test LLM, Generate report from a finished workspace
 
@@ -643,12 +643,13 @@ Start here:
 | `results.sarif`                          | SARIF 2.1.0 for CI                           |
 | `export_hackerone.md` / `export_jira.md` | Draft write-ups                              |
 | `vendors.json` / `vendors.html`          | Companies + key types, fingerprints only     |
+| `findings_report.html`                   | Live-style table: company, where found, secret |
 | `report_pentest.md`                      | Bug-bounty style (CWE, impact, verify steps) |
 | `report_executive.md` / `.html`          | Meeting-room brief for CEO / CTO / board     |
 | `.reconpipe_ignore.json`                 | Baseline (type + source, or `--ignore-hash`) |
 
 
-Useful intermediates: `subdomains.txt`, `live_hosts.txt`, `files_to_scan.txt`, `downloaded_files/`, `reconstructed_sources/`, `image_layers/`, `js_history.json`, `js_history_removed.json`, `js_endpoints.json`, `js_secrets.json`, `gitleaks.json`, `jsleak.txt`, `sensitive_paths.txt`, `wayback_sources.json`, `code_search_urls.txt`, `docker_hub_images.json`, `image_refs.json`, `ai_verdict.json`, `remediation.md`, `llm_report.json`, `vendors.json`, `report_pentest.md`, `report_executive.md`, `buckets.json`, `openapi_urls.txt`, `download_etag.json`, `pipeline_metrics.json`, `checkpoint.json`.
+Useful intermediates: `subdomains.txt`, `live_hosts.txt`, `files_to_scan.txt`, `downloaded_files/`, `reconstructed_sources/`, `image_layers/`, `js_history.json`, `js_history_removed.json`, `js_endpoints.json`, `js_secrets.json`, `gitleaks.json`, `jsleak.txt`, `sensitive_paths.txt`, `wayback_sources.json`, `code_search_urls.txt`, `docker_hub_images.json`, `image_refs.json`, `ai_verdict.json`, `remediation.md`, `llm_report.json`, `vendors.json`, `findings_report.html`, `report_pentest.md`, `report_executive.md`, `buckets.json`, `openapi_urls.txt`, `download_etag.json`, `pipeline_metrics.json`, `checkpoint.json`.
 
 Keep the output directory private. `valid_keys.json` is the highest-risk file.
 

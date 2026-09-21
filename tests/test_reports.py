@@ -126,11 +126,94 @@ class ReportTemplateTests(unittest.TestCase):
                 "report_pentest.md",
                 "report_executive.md",
                 "report_executive.html",
+                "findings_report.html",
             ):
                 self.assertIn(name, written)
                 self.assertTrue((out / name).is_file(), name)
             data = json.loads((out / "vendors.json").read_text(encoding="utf-8"))
             self.assertEqual(data["vendors"][0]["id"], "groq")
+
+
+class LiveFindingsDashboardTests(unittest.TestCase):
+    def test_enrich_has_company_and_where_found(self):
+        secret = "AKIAIOSFODNN7EXAMPLE"
+        row = reports.enrich_finding_row(
+            {
+                "type": "aws_access_key",
+                "key": secret,
+                "source_url": "https://cdn.example.com/app.js",
+                "line": 727,
+                "scanner": "gitleaks",
+                "valid": True,
+                "entropy": 3.88,
+                "git_author": "Richard Gomez",
+                "git_commit": "c2afd56",
+            },
+            redact=rp.redact_key,
+        )
+        self.assertEqual(row["company"], "Amazon Web Services")
+        self.assertEqual(row["line"], "727")
+        self.assertIn("app.js", row["source_short"])
+        self.assertNotIn(secret, row["fingerprint"])
+        self.assertEqual(row["verdict"], "LIVE")
+
+    def test_dashboard_html_redacts_and_graphs_companies(self):
+        secret = "sk_live_" + "Z" * 24
+        findings = [
+            {
+                "type": "stripe_live",
+                "key": secret,
+                "valid": True,
+                "source_url": "https://cdn.example.com/pay.js",
+                "line": 12,
+                "scanner": "trufflehog",
+            },
+            {
+                "type": "openai_key",
+                "key": "sk-proj-not-a-real-openai-key-value",
+                "source_url": "https://example.com/.env",
+                "scanner": "gitleaks",
+            },
+        ]
+        stats = reports.findings_report_stats(findings)
+        self.assertEqual(stats["total"], 2)
+        self.assertEqual(stats["companies"], 2)
+        self.assertGreaterEqual(stats["sources"], 2)
+        rows = [reports.enrich_finding_row(f, redact=rp.redact_key) for f in findings]
+        html = reports.findings_dashboard_html(
+            "example.com",
+            rows,
+            stats=stats,
+            live=True,
+            fragment=True,
+        )
+        self.assertIn("Security Scan Report", html)
+        self.assertIn("Where found", html)
+        self.assertIn("Company", html)
+        self.assertIn("Stripe", html)
+        self.assertIn("OpenAI", html)
+        self.assertIn("Keys by company", html)
+        self.assertIn("pay.js", html)
+        self.assertIn("LIVE", html)
+        self.assertNotIn(secret, html)
+
+    def test_gitleaks_copies_line_and_author(self):
+        hits = rp.findings_from_gitleaks(
+            [
+                {
+                    "RuleID": "aws-access-token",
+                    "Secret": "AKIABCDEFGHIJKLMNOPQ",
+                    "File": "detect/detect_test.go",
+                    "StartLine": 727,
+                    "Author": "Richard Gomez",
+                    "Date": "2025-02-20T01:36:42Z",
+                    "Commit": "c2afd56abc",
+                }
+            ]
+        )
+        self.assertEqual(hits[0]["line"], 727)
+        self.assertEqual(hits[0]["git_author"], "Richard Gomez")
+        self.assertEqual(hits[0]["source_url"], "detect/detect_test.go")
 
 
 class NewPatternTests(unittest.TestCase):

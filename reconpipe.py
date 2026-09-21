@@ -4849,6 +4849,15 @@ def findings_from_gitleaks(rows: List[Dict], scanner: str = "gitleaks") -> List[
         commit = row.get("Commit") or row.get("commit")
         if commit:
             item["git_commit"] = str(commit)
+        start_line = row.get("StartLine") or row.get("startLine") or row.get("Line")
+        if start_line not in (None, ""):
+            item["line"] = start_line
+        author = row.get("Author") or row.get("author")
+        if author:
+            item["git_author"] = str(author)
+        date = row.get("Date") or row.get("date")
+        if date:
+            item["git_date"] = str(date)
         out.append(item)
     return out
 
