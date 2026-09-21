@@ -1,10 +1,4 @@
 #!/usr/bin/env python3
-"""Vendor dashboard + pentest / executive report templates.
-
-Findings are grouped by company. Secrets in these reports are always redacted.
-Pentest steps tell the operator how to verify a leak is still public
-(source URL + Key Tester)
-"""
 from __future__ import annotations
 
 import html
@@ -459,7 +453,7 @@ def group_findings_by_vendor(
     redact: Optional[RedactFn] = None,
 ) -> List[Dict[str, Any]]:
     if redact is None:
-        def redact(value: str) -> str:  # noqa: E306
+        def redact(value: str) -> str:
             text = value or ""
             if len(text) <= 8:
                 return "*" * len(text)
@@ -601,7 +595,6 @@ def export_pentest_markdown(
     *,
     generated: Optional[str] = None,
 ) -> str:
-    """HackerOne / Bugcrowd / Intigriti-style write-up. Verification only."""
     ts = generated or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     live_n = sum(int(g.get("live") or 0) for g in groups)
     total = sum(int(g.get("total") or 0) for g in groups)
@@ -686,7 +679,6 @@ def export_executive_markdown(
     *,
     generated: Optional[str] = None,
 ) -> str:
-    """Meeting-room brief for CEO / CTO / board. No raw secrets."""
     ts = generated or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     live_n = sum(int(g.get("live") or 0) for g in groups)
     live_companies = [g for g in groups if g.get("live")]
@@ -765,7 +757,6 @@ def export_executive_markdown(
 
 def export_executive_html(domain: str, groups: List[Dict[str, Any]]) -> str:
     md_like = export_executive_markdown(domain, groups)
-    # lightweight HTML for a projector / meeting room
     live_n = sum(int(g.get("live") or 0) for g in groups)
     rows = []
     for g in groups:

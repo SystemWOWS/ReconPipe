@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-
 from __future__ import annotations
 
 import argparse
@@ -37,7 +35,7 @@ except ImportError:
 try:
     from nicegui import run as nicegui_run
 except Exception:
-    nicegui_run = None  # type: ignore[assignment]
+    nicegui_run = None  
 
 
 async def run_io_bound(func: Any, *args: Any, **kwargs: Any) -> Any:
@@ -807,7 +805,7 @@ def validate_form(opts: Dict[str, Any]) -> List[str]:
 
     return errors
 
-# Pipeline worker (subprocess — safe cancel / isolation)
+# Pipeline worker
 
 class PipelineRunner:
     def __init__(self) -> None:
@@ -847,7 +845,7 @@ class PipelineRunner:
 
             env = os.environ.copy()
             env["PYTHONUNBUFFERED"] = "1"
-            # Prefer UTF-8 console on Windows / Linux
+            
             env.setdefault("PYTHONIOENCODING", "utf-8")
 
             self.proc = subprocess.Popen(
@@ -1458,7 +1456,7 @@ def build_ui() -> None:
                                 "Delete", on_click=delete_selected_target, color="negative"
                             ).props("flat dense")
                         refresh_target_select()
-                        build_ui.refresh_targets = refresh_target_select  # type: ignore[attr-defined]
+                        build_ui.refresh_targets = refresh_target_select  
 
                     with ui.card().classes("w-full rp-card"):
                         ui.label("Passive intel").classes("rp-section")
@@ -1895,7 +1893,7 @@ def build_ui() -> None:
                         STATE.informational.clear()
                         STATE.exposures.clear()
                         STATE.revealed.clear()
-                        STATE._finalized_at = None  # type: ignore[attr-defined]
+                        STATE._finalized_at = None  
                         try:
                             console.clear()
                         except Exception:
@@ -1934,7 +1932,7 @@ def build_ui() -> None:
                             None,
                         )
                         if not row:
-                            row = rp.find_saved_target(name)  # type: ignore[assignment]
+                            row = rp.find_saved_target(name)  
                         if not row:
                             ui.notify("Load or save a target first", type="warning")
                             return
@@ -2052,7 +2050,7 @@ def build_ui() -> None:
                         ui.button(
                             "Download reports (.zip)",
                             on_click=lambda: (
-                                build_ui.download_all_artifacts()  # type: ignore[attr-defined]
+                                build_ui.download_all_artifacts()  
                                 if callable(getattr(build_ui, "download_all_artifacts", None))
                                 else ui.notify("Open the Artifacts tab first", type="warning")
                             ),
@@ -2327,7 +2325,7 @@ def build_ui() -> None:
                         on_click=lambda: (STATE.log_lines.clear(), console.clear()),
                         color="secondary",
                     ).props("flat dense")
-                # ui.log appends; rewriting a giant <pre> every tick freezes Firefox
+                
                 console = ui.log(max_lines=120).classes("rp-console w-full")
 
                 stage_labels: Dict[int, Any] = {}
@@ -2447,11 +2445,11 @@ def build_ui() -> None:
                             "report_executive.md" if tid == "executive" else "report_pentest.md"
                         )
                         try:
-                            build_ui.render_vendors()  # type: ignore[attr-defined]
+                            build_ui.render_vendors()  
                         except Exception:
                             pass
                         try:
-                            build_ui.refresh_artifacts()  # type: ignore[attr-defined]
+                            build_ui.refresh_artifacts()  
                         except Exception:
                             pass
                         name = dest.name if dest is not None else "report"
@@ -2782,7 +2780,7 @@ def build_ui() -> None:
                     )
                     render_findings()
                     try:
-                        build_ui.render_vendors()  # type: ignore[attr-defined]
+                        build_ui.render_vendors()  
                     except Exception:
                         pass
                     update_stats(force=True)
@@ -2792,8 +2790,8 @@ def build_ui() -> None:
                     )
 
                 # bind for outer timers
-                build_ui.reload_findings = reload_findings  # type: ignore[attr-defined]
-                build_ui.render_findings = render_findings  # type: ignore[attr-defined]
+                build_ui.reload_findings = reload_findings  
+                build_ui.render_findings = render_findings  
 
         # Vendors
         with ui.tab_panel(tab_vendors):
@@ -2851,7 +2849,7 @@ def build_ui() -> None:
                     "outline dense"
                 )
                 render_vendors()
-                build_ui.render_vendors = render_vendors  # type: ignore[attr-defined]
+                build_ui.render_vendors = render_vendors  
 
         # Key Tester
         with ui.tab_panel(tab_tester):
@@ -3206,8 +3204,8 @@ def build_ui() -> None:
                                             "text-xs text-slate-600"
                                         )
 
-                build_ui.refresh_artifacts = refresh_artifacts  # type: ignore[attr-defined]
-                build_ui.download_all_artifacts = download_all_artifacts  # type: ignore[attr-defined]
+                build_ui.refresh_artifacts = refresh_artifacts  
+                build_ui.download_all_artifacts = download_all_artifacts  
 
         # History 
         with ui.tab_panel(tab_history):
@@ -3270,7 +3268,7 @@ def build_ui() -> None:
                                         color="primary",
                                     ).props("unelevated dense")
 
-                build_ui.render_history = render_history  # type: ignore[attr-defined]
+                build_ui.render_history = render_history 
                 render_history()
 
         with ui.tab_panel(tab_settings):
@@ -3447,7 +3445,7 @@ def build_ui() -> None:
                         llm_status.set_text(f"Wrote {dest}")
                         ui.notify(f"Wrote {dest.name}", type="positive")
                         try:
-                            build_ui.refresh_artifacts()  # type: ignore[attr-defined]
+                            build_ui.refresh_artifacts()  
                         except Exception:
                             pass
                     else:
@@ -3635,8 +3633,7 @@ def build_ui() -> None:
             STATE.log_lines.extend(lines)
             if len(STATE.log_lines) > 400:
                 STATE.log_lines = STATE.log_lines[-300:]
-            # Keep websocket frames small — NiceGUI drops the connection on
-            # "Message too long" if a console dump exceeds the WS limit.
+
             if lines:
                 text = "\n".join(lines)
                 if len(text) > CONSOLE_PUSH_CHARS:
@@ -3668,8 +3665,7 @@ def build_ui() -> None:
                             continue
                         STATE.findings.append(f)
                         known.add(ident)
-                    # Do not rebuild the findings table mid-scan — that crashes
-                    # the browser websocket at the live-host / discovery stages.
+
         elif STATE.runner.finished_at and STATE.runner.exit_code is not None:
             # Finalize once
             if getattr(STATE, "_finalized_at", None) != STATE.runner.finished_at:
@@ -3680,19 +3676,19 @@ def build_ui() -> None:
                 except Exception:
                     pass
                 try:
-                    build_ui.reload_findings()  # type: ignore[attr-defined]
+                    build_ui.reload_findings()  
                 except Exception:
                     pass
                 try:
-                    build_ui.refresh_artifacts()  # type: ignore[attr-defined]
+                    build_ui.refresh_artifacts()  
                 except Exception:
                     pass
                 try:
-                    build_ui.render_history()  # type: ignore[attr-defined]
+                    build_ui.render_history()  
                 except Exception:
                     pass
                 try:
-                    build_ui.refresh_targets()  # type: ignore[attr-defined]
+                    build_ui.refresh_targets()  
                 except Exception:
                     pass
                 try:
@@ -3853,29 +3849,26 @@ def main() -> None:
         print(f"ReconPipe GUI → http://{host}:{port}")
         print("Press Ctrl+C to stop.")
 
-    # Official NiceGUI desktop app: native=True / window_size
-    # https://nicegui.io/documentation/run#ui_run
-    run_kwargs: Dict[str, Any] = dict(
+
+    run_kwargs: Dict[str, Any] = dict[str, Any](
         title="ReconPipe",
         host="127.0.0.1" if native else host,
         reload=False,
         show=show,
         native=native,
-        favicon="🔑",
+        favicon="assets/reconpipe.ico",
         dark=True,
         prod_js=True,
         show_welcome_message=False,
         uvicorn_logging_level="warning",
-        # Default is 0.1s; 2s is far easier on WebKit during long scans.
         binding_refresh_interval=2.0,
-        # Do not replay a huge backlog after a hitch (default 1000 can crash WS).
         message_history_length=0,
         reconnect_timeout=30.0,
     )
     if native:
         run_kwargs["window_size"] = (1440, 900)
         run_kwargs["frameless"] = False
-        # Native mode picks a free port itself; a busy 8088 would fail to start.
+
     else:
         run_kwargs["port"] = port
 

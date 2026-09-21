@@ -148,7 +148,7 @@ SCAN_SOURCEMAPS = True
 SCAN_PUBLIC_APIS = True
 WAYBACK_BY_FILE: Dict[str, Dict[str, str]] = {}
 DOWNLOAD_ETAG_CACHE: Dict[str, Dict[str, str]] = {}
-VALIDATION_STORE = None  # sqlite3 connection or None
+VALIDATION_STORE = None  
 SCAN_VALIDATION_CACHE = True
 
 _VALIDATOR_FIELD_NAMES = {f.name for f in fields(ValidatorSpec)}
@@ -156,7 +156,6 @@ _VALIDATOR_FIELD_NAMES = {f.name for f in fields(ValidatorSpec)}
 
 def _coerce_validator(raw: Dict[str, Any]) -> ValidatorSpec:
     data = dict(raw or {})
-    # Legacy note_200 / notes: {"200": "..."} → notes: {200: "..."}
     notes: Dict[int, str] = {}
     if isinstance(data.get("notes"), dict):
         for k, v in data["notes"].items():
@@ -363,7 +362,7 @@ STOPWORDS = {
     "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
 }
 
-# Plain words that pass length checks but are not secrets (generic_secret gate)
+# Plain words that pass length checks but are not secrets
 DICTIONARY_WORDS = frozenset({
     "password", "passwd", "secret", "token", "apikey", "bearer",
     "changeme", "admin", "root", "username", "password1", "password123",
@@ -404,12 +403,12 @@ IGNORED_PATH_PATTERNS = [
     r"/node_modules/",
 ]
 
-# .map files are scanned (not ignored) — exposure is its own severity bucket
+# .map files are scanned
 SOURCE_MAP_PATH_RE = re.compile(r"\.map(?:$|\?|#)", re.I)
 
 BASELINE_FILE = ".reconpipe_ignore.json"
 
-# config ( might look into fixing or changing it soon.)
+# config
 load_default_config()
 addons.bind_config_lookups(REVOCATION_URLS, COMPLIANCE_TAGS)
 
@@ -671,11 +670,6 @@ def fmt_remaining_short(seconds: float) -> str:
 
 
 class ScanEta:
-    """
-    Nmap-like scan clock: elapsed, % done, ETC, remaining.
-    Budgets are expected times (not hard timeouts) and shrink as stages finish.
-    """
-
     def __init__(self, output_dir: Optional[Path] = None) -> None:
         self.output_dir = Path(output_dir) if output_dir else None
         self.started = time.monotonic()
@@ -921,13 +915,12 @@ def set_scan_eta(eta: Optional[ScanEta]) -> None:
 
 
 def eta_heartbeat(timeout: int = 0):
-    """Pulse remaining-time logs during a long blocking tool."""
     if _ETA is None or int(timeout) < 45:
         return nullcontext()
     return _ETA.heartbeat()
 
 
-# Saved keys / targets live in ~/.reconpipe (override with RECONPIPE_HOME).
+# Saved keys / targets live in ~/.reconpipe
 USER_KEY_FIELDS = (
     ("chaos", "chaos_key", ("CHAOS_KEY", "PDCP_API_KEY")),
     ("shodan", "shodan_key", ("SHODAN_API_KEY",)),
@@ -1068,7 +1061,6 @@ def delete_saved_target(name: str) -> List[Dict[str, str]]:
 
 
 def find_saved_target(domain: str) -> Optional[Dict[str, str]]:
-    """Match a saved target by name or domain (case-insensitive)."""
     want = (domain or "").strip().lower()
     if not want:
         return None
@@ -1109,7 +1101,6 @@ def append_scan_history(entry: Dict[str, str], limit: int = 50) -> List[Dict[str
 
 
 def apply_rescan_defaults(args: Any) -> Any:
-    """Reuse a saved target's lists/output and enable --resume."""
     domain = (getattr(args, "domain", None) or "").strip()
     row = find_saved_target(domain)
     if row:
@@ -1140,7 +1131,6 @@ def remember_scan_target(
     subdomains: Optional[Path] = None,
     output: Optional[Path] = None,
 ) -> Dict[str, str]:
-    """Persist domain + URL list so the next scan can skip discovery."""
     domain = (domain or "").strip()
     files_path = ""
     if files and Path(files).is_file():
@@ -1210,7 +1200,6 @@ KEEP_CONTENT_HINTS = (
 
 
 def content_type_allowed(content_type: str) -> bool:
-    """False for binaries/images so downloaders skip them."""
     ct = (content_type or "").split(";")[0].strip().lower()
     if not ct:
         return True
@@ -1251,7 +1240,6 @@ def apply_scope_files(
 
 
 def default_scope_patterns(domain: str) -> List[str]:
-    """Apex + wildcard subdomains for -d, so crawls cannot wander to other sites."""
     host = _host_from_target(domain)
     if not host or "." not in host:
         return [host] if host else []
@@ -1263,7 +1251,6 @@ def default_scope_patterns(domain: str) -> List[str]:
 
 
 def apply_default_target_scope(domain: str) -> List[str]:
-    """If the user did not set include globs, lock scope to the scan domain."""
     global SCOPE_INCLUDE
     if SCOPE_INCLUDE:
         return []
@@ -1275,7 +1262,6 @@ def apply_default_target_scope(domain: str) -> List[str]:
 
 
 def is_local_scan_path(value: str) -> bool:
-    """True for repo/apk/downloaded file paths (not http URLs)."""
     text = (value or "").strip()
     if not text:
         return False
@@ -1936,7 +1922,6 @@ def download_url_file(
     timeout: int = 8,
     wayback: bool = False,
 ) -> str:
-    """Download one URL. Returns downloaded|cached|skipped|error|wayback."""
     fname = download_filename(url)
     out_path = Path(dl_dir) / fname
     if not (url.startswith("http://") or url.startswith("https://")):
@@ -2088,7 +2073,6 @@ def download_files_parallel(
 
 
 def iter_scan_files(*roots: Path, limit: int = 2500) -> List[Path]:
-    """Walk downloaded / reconstructed / history trees for secret scanners."""
     out: List[Path] = []
     seen: Set[str] = set()
     for root in roots:
@@ -2138,7 +2122,6 @@ def reconstruct_downloaded_js_maps(
     dl_dir: Path,
     dest_dir: Path,
 ) -> Tuple[int, int]:
-    """Fetch public maps for downloaded JS and write sourcesContent as files."""
     dest_dir = Path(dest_dir)
     dest_dir.mkdir(parents=True, exist_ok=True)
     maps = 0
@@ -3886,7 +3869,6 @@ def custom_scan(urls_file: str, output_dir: Optional[Path] = None) -> List[Dict]
     informational: List[Dict] = []
     exposures: List[Dict] = []
     quarantine: List[Dict] = []
-    # In-run dedup is per (hash, source) so the same key on a new URL still surfaces
     seen_pairs: set = set()
     baseline: Dict[str, Dict] = load_baseline(output_dir) if output_dir else {}
 
@@ -3914,7 +3896,6 @@ def custom_scan(urls_file: str, output_dir: Optional[Path] = None) -> List[Dict]
                 continue
             from_wayback = bool(extra.get("from_wayback"))
 
-            # Source maps: report exposure, then scan unminified sourcesContent
             from_source_map = is_source_map_path(url) or looks_like_source_map_json(page)
             if from_source_map:
                 exp_h = finding_hash("source_map_exposure", url)
@@ -3938,12 +3919,10 @@ def custom_scan(urls_file: str, output_dir: Optional[Path] = None) -> List[Dict]
                         baseline_record(baseline, h, key_type, url)
                         continue
 
-                    # Mapbox: require JSON-decodable payload (not literal eyJ1Ijoi)
                     if key_type == "mapbox_token" and not is_mapbox_token(key):
                         baseline_record(baseline, h, key_type, url)
                         continue
 
-                    # Public-by-design — record, don't treat as a leak
                     if key_type in INFORMATIONAL_TYPES:
                         informational.append({
                             "type": key_type,
@@ -3956,7 +3935,6 @@ def custom_scan(urls_file: str, output_dir: Optional[Path] = None) -> List[Dict]
                         })
                         continue
 
-                    # Weak detectors need nearby credential context
                     needs_context = key_type in {
                         "generic_secret", "uuid_candidate", "jwt",
                         "discord_token", "datadog_api_key", "hashicorp_vault",
@@ -3978,7 +3956,6 @@ def custom_scan(urls_file: str, output_dir: Optional[Path] = None) -> List[Dict]
                         })
                         continue
 
-                    # UUID + Heroku markers → heroku_api; else quarantine (feeder only)
                     if key_type == "uuid_candidate":
                         if has_heroku_context(page, m.start(), m.end(), window=100):
                             key_type = "heroku_api"
@@ -3996,7 +3973,6 @@ def custom_scan(urls_file: str, output_dir: Optional[Path] = None) -> List[Dict]
                             })
                             continue
 
-                    # generic_secret: Shannon entropy + dictionary-word gate
                     if key_type == "generic_secret":
                         ent = entropy(key)
                         if ent < GENERIC_SECRET_MIN_ENTROPY:
@@ -4160,7 +4136,6 @@ def _finding_source(f: Dict) -> str:
 
 
 def _source_host(src: str) -> str:
-    """Host for cross-file pairing (URL host, or parent path for local files)."""
     if not src:
         return ""
     m = re.match(r"https?://([^/]+)", src, re.I)
@@ -4236,7 +4211,6 @@ def pair_credential_findings(findings: List[Dict]) -> List[Dict]:
     host_filled += _host_complete_pairs(pairs["aws"], "secret", "session")
     host_filled += _host_complete_pairs(pairs["twilio"], "sid", "token")
 
-    # Global fallback: exactly one of each half across the whole scan
     aws_accesses = {p["access"] for p in pairs["aws"].values() if p.get("access")}
     aws_secrets = {p["secret"] for p in pairs["aws"].values() if p.get("secret")}
     aws_sessions = {p["session"] for p in pairs["aws"].values() if p.get("session")}
@@ -4984,8 +4958,6 @@ def classify_http_status(validator: ValidatorSpec, status: int,
     return False, f"Inconclusive (HTTP {status})"
 
 
-# Cheap Google key checks from keyhacks (Maps JSON) + Gemini models list.
-# Do not call Static Maps / Street View / Distance Matrix (large billed payloads).
 GOOGLE_API_PROBES: List[Dict[str, Any]] = [
     {
         "id": "geolocation",
@@ -7830,7 +7802,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 "success" if (leak_urls or js_hits) else "info",
             )
             # Stash hits on args for merge after secret scan starts with empty raw_findings
-            args._jsleak_findings = js_hits  # type: ignore[attr-defined]
+            args._jsleak_findings = js_hits
     if not getattr(args, "skip_openapi", False):
         spec_extra: List[str] = []
         spec_findings: List[Dict] = list(getattr(args, "_spec_findings", None) or [])
@@ -7847,7 +7819,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             spec_findings.extend(harvest_spec_secret_findings(page, u))
         extra_urls.extend(spec_extra)
         if spec_findings:
-            args._spec_findings = spec_findings  # type: ignore[attr-defined]
+            args._spec_findings = spec_findings  
     if extra_urls:
         url_list = dedupe_urls(url_list + extra_urls)
     scoped_extra = filter_urls_in_scope(url_list)
@@ -8583,7 +8555,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 sf.write(f"Type    : {f.get('type','unknown')}\n")
                 sf.write(f"Key     : {f.get('key','')}\n")
                 sf.write(f"Source  : {f.get('source_url','')}\n")
-                # --no-validate / no status_code → omit Status line
+               
                 status = f.get("status_code")
                 if status is not None:
                     sf.write(f"Status  : HTTP {status}\n")
@@ -8729,7 +8701,6 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"  Hit bundle   :  {C.BOLD}{hits_dir}/{C.RESET}")
     print(f"{C.CYAN}{'═' * 62}{C.RESET}\n")
 
-    # Merge gate: live-validated secrets fail the process (CI can block merges)
     if valid_count and not args.no_fail_on_valid:
         log(
             f"Exiting with code 1: {valid_count} valid key(s) "
