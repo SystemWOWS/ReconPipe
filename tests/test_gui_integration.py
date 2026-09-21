@@ -169,6 +169,10 @@ def test_gui_module_compiles_and_helpers():
     assert "stripe_live" in hits
     hub = mod.guess_key_types("pat-na1-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
     assert "hubspot_api" in hub
+    n8n_legacy = mod.guess_key_types("n8n_api_" + "A" * 20)
+    assert "n8n_api" in n8n_legacy
+    assert "n8n_api" in mod.validator_type_options()
+    assert "--n8n-url" in src
     assert "github_pat" in mod.validator_type_options()
     status_path = Path(tempfile.mkdtemp()) / "scan_status.json"
     status_path.write_text(

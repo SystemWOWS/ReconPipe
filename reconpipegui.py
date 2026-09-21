@@ -742,7 +742,11 @@ def guess_key_types(key: str) -> List[str]:
         if m:
             hits.append((len(m.group(0)), name))
     hits.sort(reverse=True)
-    return [name for _, name in hits]
+    names = [name for _, name in hits]
+    refined = rp.refine_secret_type(names[0] if names else "", text)
+    if refined:
+        names = [refined] + [n for n in names if n != refined]
+    return names
 
 
 def validator_type_options() -> List[str]:
@@ -1379,6 +1383,10 @@ def build_ui() -> None:
                                     "Grafana host (--grafana-url)",
                                     placeholder="grafana.example.com",
                                 ).classes("flex-1").props("outlined dense")
+                            n8n_in = ui.input(
+                                "n8n instance (--n8n-url)",
+                                placeholder="https://tenant.app.n8n.cloud",
+                            ).classes("w-full").props("outlined dense")
                             webhook_in = ui.input(
                                 "Notify webhook (--notify-webhook)",
                                 placeholder="Slack/Discord/custom URL",
@@ -1793,6 +1801,7 @@ def build_ui() -> None:
                             "include_pattern": (include_in.value or "").strip() or None,
                             "vault_addr": (vault_in.value or "").strip() or None,
                             "grafana_url": (grafana_in.value or "").strip() or None,
+                            "n8n_url": (n8n_in.value or "").strip() or None,
                             "notify_webhook": (webhook_in.value or "").strip() or None,
                             "config": configs,
                             "ignore_hash": hashes,
@@ -2869,9 +2878,9 @@ def build_ui() -> None:
                         label="Key type",
                     ).classes("w-56").props("dense outlined")
                     tester_domain = ui.input(
-                        "Target domain (Referer / Shopify host context)",
+                        "Target domain (Referer / Shopify / n8n instance)",
                         value="",
-                        placeholder="example.com",
+                        placeholder="example.com or https://tenant.app.n8n.cloud",
                     ).classes("flex-1").props("dense outlined")
                     tester_shop = ui.input(
                         "Shopify store (if testing shpat_)",
@@ -2959,6 +2968,10 @@ def build_ui() -> None:
                         }
                         if use_type in {"grafana_token"}:
                             finding["grafana_url"] = domain
+                        if use_type in {"n8n_api", "jwt"}:
+                            inst = (tester_domain.value or "").strip()
+                            if inst and inst.lower() not in {"example.com"}:
+                                finding["n8n_url"] = inst
                         if use_type in {"hashicorp_vault"}:
                             finding["vault_addr"] = domain
                         if secret:

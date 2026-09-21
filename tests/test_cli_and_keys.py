@@ -9,6 +9,7 @@ import sys
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+import base64 as b64
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -294,6 +295,7 @@ class GoogleKeyhacks(unittest.TestCase):
         self.assertIn("huggingface_token", opts)
         self.assertIn("linear_api_key", opts)
         self.assertIn("hubspot_api", opts)
+        self.assertIn("n8n_api", opts)
         self.assertIn("groq_api", opts)
         self.assertIn("figma_token", opts)
         self.assertIn("postman_api", opts)
@@ -307,6 +309,69 @@ class GoogleKeyhacks(unittest.TestCase):
         self.assertTrue(rx.search("pat-eu1-11111111-2222-3333-4444-555555555555"))
         self.assertIsNone(rx.search("pat-na1-short"))
         self.assertEqual(rp.gitleaks_type_for("hubspot-api-token", "pat-na1-x"), "hubspot_api")
+
+    def test_n8n_legacy_and_jwt_keys(self):
+        rx = re.compile(rp.PATTERNS["n8n_api"])
+        self.assertTrue(rx.search("n8n_api_" + "A" * 20))
+        self.assertIsNone(rx.search("n8n_api_short"))
+        spec = rp.VALIDATORS["n8n_api"]
+        self.assertTrue(spec.needs_n8n)
+        self.assertEqual(spec.headers.get("X-N8N-API-KEY"), "{key}")
+        self.assertIn("/api/v1/workflows", spec.url)
+        self.assertIn(
+            "--n8n-url",
+            rp.argv_from_options(
+                {"domain": "example.com", "n8n_url": "https://demo.app.n8n.cloud"}
+            ),
+        )
+
+        header = b64.urlsafe_b64encode(
+            json.dumps({"alg": "HS256", "typ": "JWT"}).encode()
+        ).decode().rstrip("=")
+        payload = b64.urlsafe_b64encode(
+            json.dumps(
+                {
+                    "sub": "00000000-0000-4000-8000-000000000001",
+                    "iss": "n8n",
+                    "aud": "public-api",
+                    "jti": "00000000-0000-4000-8000-000000000002",
+                    "iat": 1781551662,
+                }
+            ).encode()
+        ).decode().rstrip("=")
+        token = f"{header}.{payload}.sig"
+        meta = rp.inspect_jwt(token)
+        self.assertTrue(rp.is_n8n_jwt(meta))
+        self.assertEqual(rp.jwt_provider_kind(meta), "n8n_api")
+        self.assertTrue(rp.is_n8n_api_token(token))
+        self.assertEqual(rp.refine_secret_type("jwt", token), "n8n_api")
+        self.assertEqual(rp.classify_secret_type(token), "n8n_api")
+        self.assertEqual(rp.gitleaks_type_for("jwt", token), "n8n_api")
+        self.assertEqual(
+            rp.infer_n8n_base("https://acme.app.n8n.cloud/workflow/1"),
+            "https://acme.app.n8n.cloud",
+        )
+        self.assertEqual(
+            rp._n8n_instance_base("https://acme.app.n8n.cloud/api/v1"),
+            "https://acme.app.n8n.cloud",
+        )
+        generic = (
+            "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9."
+            "eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ."
+            "SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"
+        )
+        self.assertFalse(rp.is_n8n_api_token(generic))
+        self.assertEqual(rp.refine_secret_type("jwt", generic), "jwt")
+        skipped = rp.validate_finding_configured_sync(
+            {
+                "type": "n8n_api",
+                "key": "n8n_api_" + "A" * 20,
+                "source_url": "gui://key-tester",
+            },
+            "example.com",
+        )
+        self.assertIn("n8n-url", skipped.get("note") or "")
+        self.assertFalse(skipped.get("valid"))
 
     def test_exposure_types_not_every_secret(self):
         self.assertEqual(rp.EXPOSURE_TYPES, frozenset({"source_map_exposure"}))

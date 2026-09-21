@@ -967,3 +967,8 @@ patterns:
     - FLWSECK-AAAAAAAAAA
     junk:
     - FLWSECK-ab
+  n8n_api:
+    good:
+    - n8n_api_AAAAAAAAAAAAAAAAAAAA
+    junk:
+    - n8n_api_short

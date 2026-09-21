@@ -152,6 +152,7 @@ class NewPatternTests(unittest.TestCase):
             "cloudinary_url",
             "razorpay_key",
             "flutterwave_secret",
+            "n8n_api",
         ):
             self.assertIn(name, rp.PATTERNS, name)
             self.assertIn(name, rp.VALIDATORS, name)
@@ -165,6 +166,7 @@ class NewPatternTests(unittest.TestCase):
             "cloudinary_url": "cloudinary://abc:secretpass@demo-cloud",
             "xai_api": "xai-" + "D" * 20,
             "slack_app_token": "xapp-1-" + "E" * 20,
+            "n8n_api": "n8n_api_" + "H" * 20,
         }
         for name, sample in samples.items():
             self.assertTrue(rp.re.search(rp.PATTERNS[name], sample), name)

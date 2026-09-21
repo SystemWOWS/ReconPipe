@@ -901,9 +901,27 @@ def is_supabase_anon(jwt_meta: Optional[Dict]) -> bool:
     return role == "anon" and ("supabase.co" in iss or bool(claims.get("ref")))
 
 
+def is_n8n_jwt(jwt_meta: Optional[Dict]) -> bool:
+    """n8n public API keys (v1.70+) are JWTs with iss=n8n and aud=public-api."""
+    if not jwt_meta or not jwt_meta.get("ok"):
+        return False
+    claims = jwt_meta.get("claims") or {}
+    iss = str(jwt_meta.get("iss") or claims.get("iss") or "").strip().lower()
+    aud = jwt_meta.get("aud")
+    if aud is None:
+        aud = claims.get("aud")
+    if isinstance(aud, list):
+        auds = [str(a).strip().lower() for a in aud]
+    else:
+        auds = [str(aud or "").strip().lower()]
+    return iss == "n8n" and "public-api" in auds
+
+
 def jwt_provider_kind(jwt_meta: Optional[Dict]) -> str:
     if not jwt_meta or not jwt_meta.get("ok"):
         return ""
+    if is_n8n_jwt(jwt_meta):
+        return "n8n_api"
     blob = json.dumps(jwt_meta.get("claims") or {}, default=str).lower()
     iss = str(jwt_meta.get("iss") or "").lower()
     combined = iss + " " + blob

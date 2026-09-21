@@ -406,6 +406,7 @@ def main() -> None:
         },
         "razorpay_key": {"good": ["rzp_live_" + "A" * 14], "junk": ["rzp_live_short"]},
         "flutterwave_secret": {"good": ["FLWSECK-" + "A" * 10], "junk": ["FLWSECK-ab"]},
+        "n8n_api": {"good": ["n8n_api_" + "A" * 20], "junk": ["n8n_api_short"]},
     }
     # uuid-like hex-with-dashes: 8-4-4-4-12 = 36 including dashes
     uuidish = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"

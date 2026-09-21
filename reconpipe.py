@@ -110,6 +110,7 @@ class ValidatorSpec:
     uri_inspect: bool = False
     needs_vault: bool = False
     needs_grafana: bool = False
+    needs_n8n: bool = False
 
     def note_for(self, status: int, default: str = "") -> str:
         if status in self.notes:
@@ -377,7 +378,8 @@ CONTEXT_WORDS = {
     "authorization", "client_secret", "access_token", "private_key",
     "maps", "google", "firebase", "stripe", "slack", "twilio",
     "sendgrid", "mailgun", "heroku", "herokuapp", "platform-api", "shopify", "discord",
-    "hubspot", "hapikey",
+    "hubspot", "hapikey", "n8n",
+
     "openai", "anthropic", "gitlab", "mapbox", "npm", "pypi", "digitalocean",
     "aws_session", "session_token",
     "cloudflare", "huggingface", "notion", "grafana", "vault", "datadog",
@@ -466,6 +468,7 @@ build_gowitness_cmd = addons.build_gowitness_cmd
 build_nuclei_cmd = addons.build_nuclei_cmd
 inspect_connection_uri = addons.inspect_connection_uri
 is_supabase_anon = addons.is_supabase_anon
+is_n8n_jwt = addons.is_n8n_jwt
 jwt_provider_kind = addons.jwt_provider_kind
 jwt_age_days = addons.jwt_age_days
 finding_cvss = addons.finding_cvss
@@ -1372,6 +1375,7 @@ SEVERITY_HIGH = frozenset({
     "openai_key", "anthropic_key", "sendgrid", "heroku_api", "cloudflare_api",
     "huggingface_token", "notion_token", "linear_api_key", "supabase_service",
     "hubspot_api",
+    "n8n_api",
     "digitalocean_pat", "npm_token", "pypi_token", "shopify_token", "shopify_secret",
     "slack_token", "twilio_sid", "twilio_token", "azure_sas", "mcp_credential",
 })
@@ -2407,6 +2411,7 @@ def findings_from_removed_js_lines(
                     continue
                 if key_type == "mapbox_token" and not is_mapbox_token(key):
                     continue
+                key_type = refine_secret_type(key_type, key)
                 marker = f"{key_type}:{key}"
                 if marker in seen:
                     continue
@@ -3187,6 +3192,22 @@ def is_supabase_service(jwt_meta: Optional[Dict]) -> bool:
     return False
 
 
+def is_n8n_api_token(value: str) -> bool:
+    """Legacy n8n_api_ prefix or current public-API JWT (iss=n8n, aud=public-api)."""
+    text = (value or "").strip()
+    if text.startswith("n8n_api_") and len(text) >= 20:
+        return True
+    return is_n8n_jwt(inspect_jwt(text))
+
+
+def refine_secret_type(key_type: str, key: str) -> str:
+    """Reclassify JWTs / unknown hits that are actually n8n public API keys."""
+    raw = (key or "").strip()
+    if is_n8n_api_token(raw):
+        return "n8n_api"
+    return key_type or ""
+
+
 def validate_azure_sas(token: str) -> Dict[str, Any]:
     """Local SAS parse: require sig=, classify by se= expiry. No HTTP."""
     text = (token or "").strip()
@@ -3792,6 +3813,8 @@ def classify_secret_type(value: str) -> Optional[str]:
     text = (value or "").strip()
     if not text:
         return None
+    if is_n8n_api_token(text):
+        return "n8n_api"
     for key_type, pattern in PATTERNS.items():
         if key_type in MCP_CLASSIFY_SKIP or key_type in INFORMATIONAL_TYPES:
             continue
@@ -4600,6 +4623,7 @@ def parse_trufflehog(output: bytes) -> List[Dict]:
         "anthropic":    "anthropic_key",
         "sendgrid":     "sendgrid",
         "hubspot":      "hubspot_api",
+        "n8n":          "n8n_api",
         "groq":         "groq_api",
         "figma":        "figma_token",
         "postman":      "postman_api",
@@ -4713,6 +4737,7 @@ def parse_trufflehog(output: bytes) -> List[Dict]:
                     key_type = "slack_webhook"
                 elif key_type == "unknown" and value.startswith("AIza") and len(value) >= 35:
                     key_type = "google_api"
+                key_type = refine_secret_type(key_type, value)
                 rec = {
                     "type": key_type,
                     "detector": data.get("DetectorName", ""),
@@ -4758,6 +4783,8 @@ GITLEAKS_RULE_MAP = {
     "sendgrid-api-token": "sendgrid",
     "hubspot-api-key": "hubspot_api",
     "hubspot-api-token": "hubspot_api",
+    "n8n": "n8n_api",
+    "n8n-api-key": "n8n_api",
     "slack-app-token": "slack_app_token",
     "figma": "figma_token",
     "postman": "postman_api",
@@ -4793,7 +4820,7 @@ def gitleaks_type_for(rule_id: str, secret: str) -> str:
         return "github_fine_pat"
     if mapped == "stripe_live" and (secret or "").startswith("sk_test_"):
         return "stripe_test"
-    return mapped
+    return refine_secret_type(mapped, secret)
 
 
 def findings_from_gitleaks(rows: List[Dict], scanner: str = "gitleaks") -> List[Dict]:
@@ -5262,12 +5289,42 @@ def _normalize_host(host: Optional[str]) -> str:
     return host.split("/")[0].strip() or ""
 
 
+def _n8n_instance_base(value: str) -> str:
+    """Normalize --n8n-url / Key Tester host to https://host[:port] without /api/v1."""
+    base = (value or "").strip().rstrip("/")
+    if not base:
+        return ""
+    if not re.match(r"^https?://", base, re.I):
+        base = "https://" + base
+    base = re.sub(r"/api/v\d+$", "", base, flags=re.I)
+    return base.rstrip("/")
+
+
+def infer_n8n_base(source_url: str) -> str:
+    """Pick an n8n Cloud (or n8n.*) host from the leak source when --n8n-url is unset."""
+    src = source_url or ""
+    m = re.search(
+        r"https?://([A-Za-z0-9.-]+\.app\.n8n\.cloud)(?::(\d+))?", src, re.I
+    )
+    if m:
+        host = m.group(1)
+        port = m.group(2)
+        return "https://" + host + (f":{port}" if port else "")
+    m = re.search(r"https?://(n8n(?:\.[A-Za-z0-9.-]+)?)(?::(\d+))?", src, re.I)
+    if m:
+        host = m.group(1)
+        port = m.group(2)
+        return "https://" + host + (f":{port}" if port else "")
+    return ""
+
+
 def _validator_domain(
     validator: ValidatorSpec,
     domain: str,
     shop_domain: str = "",
     vault_addr: str = "",
     grafana_url: str = "",
+    n8n_url: str = "",
 ) -> Optional[str]:
     """Pick the host for this validator, or None if a required host is missing."""
     if validator.needs_vault:
@@ -5279,6 +5336,8 @@ def _validator_domain(
         return base
     if validator.needs_grafana:
         return _normalize_host(grafana_url) or None
+    if validator.needs_n8n:
+        return _n8n_instance_base(n8n_url) or None
     if validator.needs_domain:
         return _normalize_host(shop_domain) or _normalize_host(domain) or None
     return domain
@@ -5325,7 +5384,7 @@ def _apply_http_verdict(
     )
     result["valid"] = is_valid
     result["note"] = note
-    if is_valid and body_text:
+    if is_valid and body_text and not validator.needs_n8n:
         result["response_preview"] = str(body_text)[:400]
     if str(result.get("type") or "").startswith("github"):
         attach_github_scopes(result, headers)
@@ -5353,6 +5412,7 @@ async def validate_one(session, finding: Dict, limiter: "DomainRateLimiter",
 
     vault_addr = vault_addr or finding.get("vault_addr") or ""
     grafana_url = grafana_url or finding.get("grafana_url") or ""
+    n8n_url = finding.get("n8n_url") or infer_n8n_base(str(finding.get("source_url") or ""))
 
     if validator.azure_sas_inspect:
         result.update(validate_azure_sas(finding.get("key") or ""))
@@ -5377,7 +5437,16 @@ async def validate_one(session, finding: Dict, limiter: "DomainRateLimiter",
     if validator.jwt_inspect:
         result.update(validate_jwt_inspect(finding.get("key") or ""))
         jwt_meta = result.get("jwt") if isinstance(result.get("jwt"), dict) else None
-        if finding.get("type") == "supabase_service" or is_supabase_service(jwt_meta):
+        n8n_follow = False
+        if is_n8n_jwt(jwt_meta) and VALIDATORS.get("n8n_api"):
+            finding["type"] = "n8n_api"
+            result["type"] = "n8n_api"
+            result["valid"] = False
+            result["validated"] = False
+            result["note"] = ""
+            validator = VALIDATORS["n8n_api"]
+            n8n_follow = True
+        elif finding.get("type") == "supabase_service" or is_supabase_service(jwt_meta):
             result["type"] = "supabase_service"
             if result.get("valid"):
                 result["note"] = "VALID Supabase service JWT; " + str(result.get("note") or "")
@@ -5389,7 +5458,8 @@ async def validate_one(session, finding: Dict, limiter: "DomainRateLimiter",
             kind = jwt_provider_kind(jwt_meta)
             if kind and finding.get("type") in {"jwt", "onepassword_connect", "monday_api"}:
                 result["type"] = kind
-        return result
+        if not n8n_follow:
+            return result
 
     # AWS STS — requires paired secret on the finding (+ session for ASIA)
     if validator.aws_sts:
@@ -5428,7 +5498,8 @@ async def validate_one(session, finding: Dict, limiter: "DomainRateLimiter",
         return result
 
     host = _validator_domain(
-        validator, domain, shop_domain, vault_addr=vault_addr, grafana_url=grafana_url
+        validator, domain, shop_domain,
+        vault_addr=vault_addr, grafana_url=grafana_url, n8n_url=n8n_url,
     )
     if validator.needs_domain and not host:
         result["note"] = "Skipped: pass --shopify-domain <store.myshopify.com>"
@@ -5438,6 +5509,9 @@ async def validate_one(session, finding: Dict, limiter: "DomainRateLimiter",
         return result
     if validator.needs_grafana and not host:
         result["note"] = "Skipped: pass --grafana-url grafana.example.com"
+        return result
+    if validator.needs_n8n and not host:
+        result["note"] = "Skipped: pass --n8n-url https://tenant.app.n8n.cloud"
         return result
 
     key = finding["key"]
@@ -5650,16 +5724,28 @@ def validate_sync_fallback(findings: List[Dict], domain: str,
         if validator.jwt_inspect:
             result.update(validate_jwt_inspect(f.get("key") or ""))
             jwt_meta = result.get("jwt") if isinstance(result.get("jwt"), dict) else None
-            if f.get("type") == "supabase_service" or is_supabase_service(jwt_meta):
+            if is_n8n_jwt(jwt_meta) and VALIDATORS.get("n8n_api"):
+                f["type"] = "n8n_api"
+                result["type"] = "n8n_api"
+                result["valid"] = False
+                result["validated"] = False
+                result["note"] = ""
+                validator = VALIDATORS["n8n_api"]
+            elif f.get("type") == "supabase_service" or is_supabase_service(jwt_meta):
                 result["type"] = "supabase_service"
                 if result.get("valid"):
                     result["note"] = "VALID Supabase service JWT; " + str(result.get("note") or "")
+                results.append(result)
+                continue
             elif f.get("type") == "supabase_anon" or is_supabase_anon(jwt_meta):
                 result["type"] = "supabase_anon"
                 if result.get("valid"):
                     result["note"] = "VALID Supabase anon JWT; " + str(result.get("note") or "")
-            results.append(result)
-            continue
+                results.append(result)
+                continue
+            else:
+                results.append(result)
+                continue
 
         if validator.aws_sts:
             secret = f.get("aws_secret") or ""
@@ -5690,9 +5776,10 @@ def validate_sync_fallback(findings: List[Dict], domain: str,
 
         vault_addr = f.get("vault_addr") or ""
         grafana_url = f.get("grafana_url") or ""
+        n8n_url = f.get("n8n_url") or infer_n8n_base(str(f.get("source_url") or ""))
         host = _validator_domain(
             validator, domain, shop_domain,
-            vault_addr=vault_addr, grafana_url=grafana_url,
+            vault_addr=vault_addr, grafana_url=grafana_url, n8n_url=n8n_url,
         )
         if validator.needs_domain and not host:
             result["note"] = "Skipped: pass --shopify-domain <store.myshopify.com>"
@@ -5704,6 +5791,10 @@ def validate_sync_fallback(findings: List[Dict], domain: str,
             continue
         if validator.needs_grafana and not host:
             result["note"] = "Skipped: pass --grafana-url grafana.example.com"
+            results.append(result)
+            continue
+        if validator.needs_n8n and not host:
+            result["note"] = "Skipped: pass --n8n-url https://tenant.app.n8n.cloud"
             results.append(result)
             continue
 
@@ -6417,6 +6508,11 @@ Examples:
                         help="Vault address for hvs/hvb token lookup-self")
     parser.add_argument("--grafana-url", metavar="HOST",
                         help="Grafana host for glsa_ token checks")
+    parser.add_argument(
+        "--n8n-url",
+        metavar="URL",
+        help="n8n instance for public API key checks (https://tenant.app.n8n.cloud)",
+    )
     parser.add_argument("--notify-webhook", metavar="URL",
                         help="POST redacted valid-key JSON to Slack/Discord/custom webhook")
     parser.add_argument("--no-notify", action="store_true",
@@ -6655,6 +6751,7 @@ def argv_from_options(opts: Dict[str, Any]) -> List[str]:
         "include_pattern": "--include-pattern",
         "vault_addr": "--vault-addr",
         "grafana_url": "--grafana-url",
+        "n8n_url": "--n8n-url",
         "notify_webhook": "--notify-webhook",
         "proxy": "--proxy",
         "proxy_auth": "--proxy-auth",
@@ -6816,7 +6913,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         log(f"Include pattern file not found: {args.include_pattern}", "error")
         return 1
     if args.domain_list and not Path(args.domain_list).exists() and (args.domain or "").strip():
-        # per-domain run with leftover flag should not happen; ignore
+        
         pass
     for cfg in args.config:
         if not Path(cfg).exists():
@@ -8376,6 +8473,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         validated = unique_findings
     else:
         log(f"Validating {len(unique_findings)} keys (concurrency={args.concurrency})...", "info")
+        n8n_flag = getattr(args, "n8n_url", None) or ""
+        if n8n_flag:
+            for f in unique_findings:
+                f.setdefault("n8n_url", n8n_flag)
         with eta_heartbeat(90):
             if AIOHTTP_AVAILABLE:
                 validated = asyncio.run(
@@ -8395,6 +8496,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                         f["vault_addr"] = args.vault_addr
                     if args.grafana_url:
                         f["grafana_url"] = args.grafana_url
+                    if args.n8n_url:
+                        f["n8n_url"] = args.n8n_url
                 validated = validate_sync_fallback(unique_findings, args.domain, shop_domain)
 
         valid_count = sum(1 for f in validated if f.get("valid"))

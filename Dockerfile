@@ -118,14 +118,14 @@ RUN if [ -x /opt/pd-bin/httpx ]; then \
       ln -s /opt/pd-bin/httpx /usr/local/bin/httpx-toolkit; \
     fi
 
-COPY reconpipe.py reconpipe_addons.py reconpipe_wave3.py reconpipegui.py /opt/reconpipe/
+COPY reconpipe.py reconpipe_addons.py reconpipe_wave3.py reconpipe_llm.py reconpipe_reports.py reconpipegui.py /opt/reconpipe/
 COPY config.yaml /opt/reconpipe/config.yaml
 COPY wordlists /opt/reconpipe/wordlists
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN sed -i 's/\r$//' /usr/local/bin/docker-entrypoint.sh \
  && chmod +x /usr/local/bin/docker-entrypoint.sh \
  && mkdir -p /work /root/.reconpipe \
- && python3 -m py_compile reconpipe.py reconpipe_addons.py reconpipe_wave3.py reconpipegui.py
+ && python3 -m py_compile reconpipe.py reconpipe_addons.py reconpipe_wave3.py reconpipe_llm.py reconpipe_reports.py reconpipegui.py
 
 WORKDIR /work
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]

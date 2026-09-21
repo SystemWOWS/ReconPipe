@@ -121,6 +121,12 @@ docker compose pull
 docker compose up -d
 ```
 
+If `gui-1` dies with `No module named 'reconpipe_llm'` (or similar), the image is older than the Python tree. Rebuild from this folder instead of pulling:
+
+```bash
+docker compose up -d --build
+```
+
 Pin a version:
 
 ```bash
@@ -455,7 +461,7 @@ Tabs:
 - **Console** — live log and stage tracker (`reconpipe.py` as a cancellable subprocess)
 - **Findings** — actionable / informational / exposures, redacted secrets, Reveal, re-test. **Report template** picker + **Generate report**: pentest / bug-bounty write-up (HackerOne, Bugcrowd, Intigriti style) or an executive briefing for a CEO/CTO meeting
 - **Vendors** — companies whose keys showed up, with a short about/website blurb, product type, live vs seen, and redacted fingerprints
-- **Key Tester** — paste one or more credentials, pick a type (auto-detected when the prefix is unique), live-check without a full scan. Includes HubSpot private-app tokens (`pat-na1-…` / `pat-eu1-…` / `pat-ap1-…`)
+- **Key Tester** — paste one or more credentials, pick a type (auto-detected when the prefix is unique), live-check without a full scan. Includes HubSpot private-app tokens (`pat-na1-…` / `pat-eu1-…` / `pat-ap1-…`) and n8n public API keys (legacy `n8n_api_…` or JWT with `iss=n8n` / `aud=public-api`; live-check needs the instance URL)
 - **Artifacts** — preview/download reports (including `vendors.html`, `report_pentest.md`, `report_executive.md` / `.html`, `remediation.md`) plus a zip when the scan finishes
 - **History** — past scans (`~/.reconpipe/history.yaml`) with Open / Rescan
 - **Settings** — dark mode, LLM provider (Ollama / OpenAI-compatible / OpenAI / Anthropic), model, base URL, API key, auto-run after scan, Test LLM, Generate report from a finished workspace
@@ -525,7 +531,7 @@ Shopify Admin tokens need a store host:
 python3 reconpipe.py -d example.com --shopify-domain store.myshopify.com
 ```
 
-Vault (`hvs`/`hvb`) and Grafana (`glsa_`) checks take `--vault-addr` and `--grafana-url`.
+Vault (`hvs`/`hvb`), Grafana (`glsa_`), and n8n public API keys take `--vault-addr`, `--grafana-url`, and `--n8n-url` (Cloud host like `https://tenant.app.n8n.cloud`).
 
 ---
 
@@ -548,7 +554,7 @@ ReconPipe stacks several engines. Hits are de-duplicated (SHA-256 of the secret)
 | Built-in JS parser                                        | Endpoints + assignments in downloaded JS                                                                                    |
 
 
-Covered families include cloud (AWS, GCP, Azure, OCI), git forges, payments (including Razorpay `rzp_live_` / Flutterwave `FLWSECK-`), email/SMS, Slack/Discord/Telegram (including Slack app tokens `xapp-`), CRM (HubSpot private-app `pat-na1-` / `pat-eu1-` / `pat-ap1-` tokens; live-check `GET https://api.hubapi.com/integrations/v1/me`), AI vendors (OpenAI `sk-` / `sk-proj-` / `sk-svcacct-`, Anthropic `sk-ant-api03-` / `sk-ant-admin01-`, Hugging Face `hf_`, Groq `gsk_`, xAI `xai-`, Perplexity `pplx-`, Fireworks `fw_`), design/data tooling (Figma `figd_`, Databricks `dapi`, Postman `PMAK-`, Sonar `squ_`, Cloudinary `cloudinary://`), PaaS (Vercel, Railway, Render, Fly, Heroku), data stores (Mongo, Postgres, Redis URIs), CI, observability, and generic `api_key=` assignments. Informational hits (publishable keys, client SDK IDs) are stored separately and are not treated as secrets.
+Covered families include cloud (AWS, GCP, Azure, OCI), git forges, payments (including Razorpay `rzp_live_` / Flutterwave `FLWSECK-`), email/SMS, Slack/Discord/Telegram (including Slack app tokens `xapp-`), CRM (HubSpot private-app `pat-na1-` / `pat-eu1-` / `pat-ap1-` tokens; live-check `GET https://api.hubapi.com/integrations/v1/me`), automation (n8n public API: legacy `n8n_api_` or JWT `iss=n8n` / `aud=public-api`; live-check `GET /api/v1/workflows?limit=1` with `X-N8N-API-KEY` against `--n8n-url`), AI vendors (OpenAI `sk-` / `sk-proj-` / `sk-svcacct-`, Anthropic `sk-ant-api03-` / `sk-ant-admin01-`, Hugging Face `hf_`, Groq `gsk_`, xAI `xai-`, Perplexity `pplx-`, Fireworks `fw_`), design/data tooling (Figma `figd_`, Databricks `dapi`, Postman `PMAK-`, Sonar `squ_`, Cloudinary `cloudinary://`), PaaS (Vercel, Railway, Render, Fly, Heroku), data stores (Mongo, Postgres, Redis URIs), CI, observability, and generic `api_key=` assignments. Informational hits (publishable keys, client SDK IDs) are stored separately and are not treated as secrets.
 
 Validators send `Referer: https://<target>/` so domain-restricted keys are more likely to exercise than fail as 403 from your IP. AWS access keys pair with nearby secrets for STS. OpenAI keys are checked with `GET https://api.openai.com/v1/models`, Anthropic with `GET https://api.anthropic.com/v1/models` (`x-api-key` + `anthropic-version: 2023-06-01`), Hugging Face with `GET https://huggingface.co/api/whoami-v2`. PayPal, WooCommerce, Mixpanel, and Algolia halves are paired the same way when they share a source. Database URIs are inspected locally — ReconPipe does not connect to leaked database hosts.
 

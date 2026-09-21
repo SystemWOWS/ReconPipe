@@ -274,6 +274,12 @@ VENDORS: Dict[str, Dict[str, str]] = {
         "website": "https://flutterwave.com/",
         "about": "African payments API; secret keys authorize charges.",
     },
+    "n8n": {
+        "name": "n8n",
+        "category": "Automation",
+        "website": "https://n8n.io/",
+        "about": "Workflow automation. A live public API key can list workflows and stored credentials on the instance (paid/self-hosted Public API).",
+    },
     "other": {
         "name": "Other / unclassified",
         "category": "General",
@@ -357,6 +363,7 @@ TYPE_VENDOR: Dict[str, Tuple[str, str]] = {
     "cloudinary_url": ("cloudinary", "cloudinary:// URL"),
     "razorpay_key": ("razorpay", "API key"),
     "flutterwave_secret": ("flutterwave", "Secret key"),
+    "n8n_api": ("n8n", "Public API key"),
     "source_map_exposure": ("other", "JavaScript source map"),
 }
 
@@ -407,6 +414,7 @@ PREFIX_VENDOR = (
     ("cloudinary", "cloudinary"),
     ("razorpay", "razorpay"),
     ("flutterwave", "flutterwave"),
+    ("n8n", "n8n"),
 )
 
 
