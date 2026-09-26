@@ -244,6 +244,55 @@ class LiveFindingsDashboardTests(unittest.TestCase):
         xs = {n["x"] for n in nodes}
         self.assertGreaterEqual(len(xs), 2)
 
+    def test_vendor_graph_is_static_svg(self):
+        groups = reports.group_findings_by_vendor(
+            [
+                {
+                    "type": "stripe_live",
+                    "key": "sk_live_" + "A" * 24,
+                    "valid": True,
+                    "source_url": "https://cdn.example.com/a.js",
+                },
+                {
+                    "type": "openai_key",
+                    "key": "sk-proj-not-a-real-openai-key-value",
+                    "valid": False,
+                    "source_url": "https://example.com/.env",
+                },
+            ],
+            redact=rp.redact_key,
+        )
+        model = reports.vendor_graph_model("example.com", groups)
+        self.assertEqual(model["vendors"], 2)
+        self.assertEqual(model["omitted"], 0)
+        kinds = [n["kind"] for n in model["nodes"]]
+        self.assertEqual(kinds[0], "root")
+        self.assertIn("vendor", kinds)
+        self.assertIn("key", kinds)
+        vendors = [n for n in model["nodes"] if n["kind"] == "vendor"]
+        self.assertGreater(vendors[0]["x"], model["nodes"][0]["cx"])
+        svg = reports.vendor_graph_svg("example.com", groups, model=model)
+        self.assertIn("<svg", svg)
+        self.assertIn('stroke="#ef4444"', svg)
+        self.assertIn('stroke="#166534"', svg)
+        self.assertNotIn("<script", svg.lower())
+        nasty = reports.vendor_graph_svg(
+            '<script>',
+            [{"id": "x", "name": "<b>", "live": 0, "total": 1, "keys": []}],
+        )
+        self.assertNotIn("<script>", nasty)
+        self.assertNotIn("<b>", nasty)
+        many = [
+            {"id": f"v{i}", "name": f"Vendor {i}", "live": 0, "total": 1, "keys": []}
+            for i in range(30)
+        ]
+        capped = reports.vendor_graph_model("example.com", many)
+        self.assertEqual(capped["vendors"], 20)
+        self.assertEqual(capped["omitted"], 10)
+        sig_a = reports.vendor_graph_signature("example.com", groups)
+        sig_b = reports.vendor_graph_signature("example.com", list(groups))
+        self.assertEqual(sig_a, sig_b)
+
 
 class NewPatternTests(unittest.TestCase):
     @classmethod

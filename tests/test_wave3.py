@@ -318,6 +318,73 @@ class Wave3HelperTests(unittest.TestCase):
         self.assertIn("--package", argv)
         self.assertIn("com.example.app", argv)
 
+    def test_apps_only_skips_remaining_host_enum(self):
+        opts = rp.apply_apps_only_options({
+            "domain": "flocksafety.com",
+            "spray": True,
+            "ipa": ["/work/mobile_uploads/app.ipa"],
+        })
+        for key in (
+            "skip_chaos",
+            "skip_subfinder",
+            "skip_amass",
+            "skip_assetfinder",
+            "skip_findomain",
+            "skip_dnsx",
+            "skip_naabu",
+            "skip_httpx",
+            "skip_whatweb",
+            "skip_gowitness",
+            "skip_gau",
+            "skip_discovery",
+            "skip_intel",
+        ):
+            self.assertTrue(opts[key], key)
+        self.assertFalse(opts["spray"])
+        argv = rp.argv_from_options(opts)
+        for flag in (
+            "--skip-assetfinder",
+            "--skip-findomain",
+            "--skip-dnsx",
+            "--skip-naabu",
+            "--skip-whatweb",
+            "--skip-gowitness",
+            "--ipa",
+        ):
+            self.assertIn(flag, argv)
+        self.assertNotIn("--spray", argv)
+        for key in rp.APPS_ONLY_SKIP_FLAGS:
+            flag = {
+                "skip_chaos": "--skip-chaos",
+                "skip_subfinder": "--skip-subfinder",
+                "skip_amass": "--skip-amass",
+                "skip_assetfinder": "--skip-assetfinder",
+                "skip_findomain": "--skip-findomain",
+                "skip_dnsx": "--skip-dnsx",
+                "skip_naabu": "--skip-naabu",
+                "skip_httpx": "--skip-httpx",
+                "skip_whatweb": "--skip-whatweb",
+                "skip_gowitness": "--skip-gowitness",
+                "skip_gau": "--skip-gau",
+                "skip_discovery": "--skip-discovery",
+                "skip_hakrawler": "--skip-hakrawler",
+                "skip_paramspider": "--skip-paramspider",
+                "skip_intel": "--skip-intel",
+                "skip_crtsh": "--skip-crtsh",
+                "skip_jsleak": "--skip-jsleak",
+                "skip_wayback_bodies": "--skip-wayback-bodies",
+                "skip_js_history": "--skip-js-history",
+                "skip_sensitive_paths": "--skip-sensitive-paths",
+                "skip_code_search": "--skip-code-search",
+                "skip_ci_logs": "--skip-ci-logs",
+                "skip_pastes": "--skip-pastes",
+                "skip_docker_hub": "--skip-docker-hub",
+                "skip_image_layers": "--skip-image-layers",
+                "skip_buckets": "--skip-buckets",
+                "skip_openapi": "--skip-openapi",
+            }[key]
+            self.assertIn(flag, argv, key)
+
     def test_certstream_and_crtsh_parsers(self):
         hosts = w3.crtsh_hosts_from_payload([
             {"name_value": "*.api.example.com\nwww.example.com"},

@@ -1156,6 +1156,217 @@ REPORT_TEMPLATES = {
 }
 
 
+_GRAPH_VENDOR_CAP = 20
+_GRAPH_KEY_CAP = 2
+_GRAPH_KEY_VENDOR_CAP = 8
+
+
+def _graph_clip(text: str, limit: int = 18) -> str:
+    cleaned = " ".join(str(text or "").split())
+    if len(cleaned) <= limit:
+        return cleaned
+    return cleaned[: limit - 1] + "…"
+
+
+def vendor_graph_signature(domain: str, groups: List[Dict[str, Any]]) -> Tuple:
+    """Cheap identity for the map so the GUI can skip identical redraws."""
+    parts = []
+    for g in groups or []:
+        if not isinstance(g, dict):
+            continue
+        keys = tuple(
+            (str(k.get("type") or ""), bool(k.get("valid")))
+            for k in (g.get("keys") or [])[:_GRAPH_KEY_CAP]
+            if isinstance(k, dict)
+        )
+        parts.append(
+            (
+                str(g.get("id") or ""),
+                int(g.get("live") or 0),
+                int(g.get("total") or 0),
+                keys,
+            )
+        )
+    parts.sort()
+    return (str(domain or ""), tuple(parts))
+
+
+def vendor_graph_model(domain: str, groups: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Left-to-right topology. No physics and no per-frame work."""
+    ranked = sorted(
+        [g for g in (groups or []) if isinstance(g, dict)],
+        key=lambda g: (
+            -int(g.get("live") or 0),
+            -int(g.get("total") or 0),
+            str(g.get("name") or ""),
+        ),
+    )
+    omitted = max(0, len(ranked) - _GRAPH_VENDOR_CAP)
+    ranked = ranked[:_GRAPH_VENDOR_CAP]
+    expand_keys = 0 < len(ranked) <= _GRAPH_KEY_VENDOR_CAP
+
+    node_w, node_h = 156, 48
+    gap_x, gap_y = 84, 18
+    pad = 36
+    root_d = 64
+
+    blocks: List[Tuple[Dict[str, Any], List[Dict[str, Any]], int]] = []
+    for g in ranked:
+        keys: List[Dict[str, Any]] = []
+        if expand_keys:
+            keys = [k for k in (g.get("keys") or []) if isinstance(k, dict)][:_GRAPH_KEY_CAP]
+        blocks.append((g, keys, max(1, len(keys))))
+
+    slots = sum(span for _, _, span in blocks) or 1
+    content_h = slots * node_h + max(0, slots - 1) * gap_y
+    height = max(168, pad * 2 + content_h)
+    root_cx = pad + root_d / 2
+    root_cy = height / 2
+    vendor_x = pad + root_d + gap_x
+    show_keys = expand_keys and any(keys for _, keys, _ in blocks)
+    key_x = vendor_x + node_w + gap_x
+    width = (key_x if show_keys else vendor_x) + node_w + pad
+
+    label = _graph_clip(domain or "target", 16)
+    nodes: List[Dict[str, Any]] = [
+        {
+            "id": "root",
+            "kind": "root",
+            "title": label,
+            "subtitle": (
+                f"{len(ranked)} compan{'y' if len(ranked) == 1 else 'ies'}"
+                if ranked
+                else "no companies yet"
+            ),
+            "cx": root_cx,
+            "cy": root_cy,
+            "d": root_d,
+            "live": 0,
+        }
+    ]
+    edges: List[Dict[str, float]] = []
+    y = max(pad, (height - content_h) / 2.0)
+    for g, keys, span in blocks:
+        block_h = span * node_h + max(0, span - 1) * gap_y
+        vid = str(g.get("id") or "")
+        live = int(g.get("live") or 0)
+        total = int(g.get("total") or 0)
+        vy = y + (block_h - node_h) / 2.0
+        nodes.append(
+            {
+                "id": vid,
+                "kind": "vendor",
+                "title": _graph_clip(str(g.get("name") or vid)),
+                "subtitle": f"LIVE {live}/{total}" if live else f"{total} seen",
+                "x": vendor_x,
+                "y": vy,
+                "w": node_w,
+                "h": node_h,
+                "live": live,
+            }
+        )
+        edges.append(
+            {
+                "x1": root_cx + root_d / 2.0,
+                "y1": root_cy,
+                "x2": float(vendor_x),
+                "y2": vy + node_h / 2.0,
+            }
+        )
+        for i, key in enumerate(keys):
+            ky = y + i * (node_h + gap_y)
+            nodes.append(
+                {
+                    "id": vid,
+                    "kind": "key",
+                    "title": _graph_clip(str(key.get("product") or key.get("type") or "key")),
+                    "subtitle": "LIVE" if key.get("valid") else _graph_clip(str(key.get("type") or ""), 16),
+                    "x": key_x,
+                    "y": ky,
+                    "w": node_w,
+                    "h": node_h,
+                    "live": 1 if key.get("valid") else 0,
+                }
+            )
+            edges.append(
+                {
+                    "x1": float(vendor_x + node_w),
+                    "y1": vy + node_h / 2.0,
+                    "x2": float(key_x),
+                    "y2": ky + node_h / 2.0,
+                }
+            )
+        y += block_h + gap_y
+
+    return {
+        "width": int(width),
+        "height": int(height),
+        "nodes": nodes,
+        "edges": edges,
+        "omitted": omitted,
+        "vendors": len(ranked),
+    }
+
+
+def vendor_graph_svg(
+    domain: str,
+    groups: List[Dict[str, Any]],
+    model: Optional[Dict[str, Any]] = None,
+) -> str:
+    """Static SVG topology. Trusted markup; labels are escaped."""
+    model = model if model is not None else vendor_graph_model(domain, groups)
+    w = int(model["width"])
+    h = int(model["height"])
+    parts: List[str] = [
+        f'<svg class="rp-topo" viewBox="0 0 {w} {h}" width="{w}" height="{h}" '
+        'xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Findings graph">'
+    ]
+    for edge in model["edges"]:
+        parts.append(
+            '<line x1="{x1:.1f}" y1="{y1:.1f}" x2="{x2:.1f}" y2="{y2:.1f}" '
+            'stroke="#3a3a3a" stroke-width="1.25"/>'.format(**edge)
+        )
+    for node in model["nodes"]:
+        vid = html.escape(str(node.get("id") or ""), quote=True)
+        title = html.escape(str(node.get("title") or ""), quote=True)
+        sub = html.escape(str(node.get("subtitle") or ""), quote=True)
+        live = int(node.get("live") or 0) > 0
+        if node.get("kind") == "root":
+            cx = float(node["cx"])
+            cy = float(node["cy"])
+            r = float(node["d"]) / 2.0
+            parts.append(
+                f'<g data-vid="{vid}">'
+                f'<circle cx="{cx:.1f}" cy="{cy:.1f}" r="{r:.1f}" fill="#070707" stroke="#9ca3af" stroke-width="1.5"/>'
+                f'<circle cx="{cx:.1f}" cy="{cy:.1f}" r="{r - 8:.1f}" fill="none" stroke="#374151" stroke-width="1"/>'
+                f'<text x="{cx:.1f}" y="{cy + r + 16:.1f}" text-anchor="middle" fill="#e5e7eb" '
+                f'font-size="11" font-family="Segoe UI,system-ui,sans-serif">{title}</text>'
+                f'<text x="{cx:.1f}" y="{cy + r + 30:.1f}" text-anchor="middle" fill="#6b7280" '
+                f'font-size="10" font-family="Segoe UI,system-ui,sans-serif">{sub}</text>'
+                "</g>"
+            )
+            continue
+        stroke = "#ef4444" if live else "#166534"
+        fill = "#140606" if live else "#07140c"
+        ink = "#f87171" if live else "#4ade80"
+        x = float(node["x"])
+        y = float(node["y"])
+        nw = float(node["w"])
+        nh = float(node["h"])
+        parts.append(
+            f'<g data-vid="{vid}">'
+            f'<rect x="{x:.1f}" y="{y:.1f}" width="{nw:.1f}" height="{nh:.1f}" rx="3" '
+            f'fill="{fill}" stroke="{stroke}" stroke-width="1.25"/>'
+            f'<text x="{x + 10:.1f}" y="{y + 20:.1f}" fill="{ink}" font-size="12" '
+            f'font-family="Segoe UI,system-ui,sans-serif">{title}</text>'
+            f'<text x="{x + 10:.1f}" y="{y + 36:.1f}" fill="#9ca3af" font-size="10" '
+            f'font-family="Segoe UI,system-ui,sans-serif">{sub}</text>'
+            "</g>"
+        )
+    parts.append("</svg>")
+    return "".join(parts)
+
+
 def vendor_scene_nodes(groups: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Layout company nodes for NiceGUI ui.scene (circle, height = hit count)."""
     items = [g for g in (groups or []) if isinstance(g, dict)]

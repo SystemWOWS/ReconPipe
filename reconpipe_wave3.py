@@ -2369,6 +2369,47 @@ CI_SKIP_FLAGS = (
 )
 
 
+# Domain on an Apps-only run only names the workspace and reports.
+# Host enum, resolution, port scan, and live fingerprinting stay off.
+APPS_ONLY_SKIP_FLAGS = (
+    "skip_chaos",
+    "skip_subfinder",
+    "skip_amass",
+    "skip_assetfinder",
+    "skip_findomain",
+    "skip_dnsx",
+    "skip_naabu",
+    "skip_httpx",
+    "skip_whatweb",
+    "skip_gowitness",
+    "skip_gau",
+    "skip_discovery",
+    "skip_hakrawler",
+    "skip_paramspider",
+    "skip_intel",
+    "skip_crtsh",
+    "skip_jsleak",
+    "skip_wayback_bodies",
+    "skip_js_history",
+    "skip_sensitive_paths",
+    "skip_code_search",
+    "skip_ci_logs",
+    "skip_pastes",
+    "skip_docker_hub",
+    "skip_image_layers",
+    "skip_buckets",
+    "skip_openapi",
+)
+
+
+def apply_apps_only_options(opts: Dict[str, Any]) -> Dict[str, Any]:
+    """Turn off live recon so an APK/IPA scan does not crawl the workspace domain."""
+    for name in APPS_ONLY_SKIP_FLAGS:
+        opts[name] = True
+    opts["spray"] = False
+    return opts
+
+
 def apply_ci_defaults(args: Any) -> Any:
     """Shift-left: scan local repo, skip live recon, keep SARIF + fail-on-valid."""
     for name in CI_SKIP_FLAGS:

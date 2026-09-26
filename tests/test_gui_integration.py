@@ -317,7 +317,9 @@ def test_gui_module_compiles_and_helpers():
     assert "ingest_workspace_findings" in src
     assert "findings_report.html" in src
     assert "3D map" in src
-    assert "ui.scene" in src
+    assert "vendor_graph_svg" in src
+    assert "App console" in src
+    assert "ui.scene" not in src
     assert "@ui.refreshable" in src
     assert "company_pack" in src
     assert "hit_tabs" in src

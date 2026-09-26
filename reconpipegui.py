@@ -1199,17 +1199,27 @@ def build_ui() -> None:
             padding: 12px 14px; height: 460px; overflow: auto; white-space: pre-wrap;
             contain: content;
           }
+          .rp-console-apps { height: 340px; }
+          .rp-topo-wrap {
+            background: #050505;
+            border: 1px solid #1f1f1f;
+            border-radius: 8px;
+            max-height: 640px;
+            overflow: auto;
+            contain: content;
+          }
+          .rp-topo-wrap [data-vid] { cursor: pointer; }
+          .rp-topo-wrap [data-vid]:hover rect,
+          .rp-topo-wrap [data-vid]:hover circle { stroke-width: 2.25; }
           .rp-title {
             font-weight: 700; letter-spacing: 0.02em; font-size: 17px;
             color: var(--rp-text-strong);
           }
           .rp-brand-mark {
-            width: 22px; height: 22px; border-radius: 6px;
-            background: linear-gradient(135deg, var(--rp-orange), #b8410a);
-            display: inline-flex; align-items: center; justify-content: center;
-            margin-right: 12px; box-shadow: 0 0 0 1px rgba(240,120,31,0.25), 0 2px 6px rgba(0,0,0,0.4);
+            width: 32px; height: 32px; border-radius: 7px;
+            object-fit: cover; display: block;
+            margin-right: 10px; flex: 0 0 auto;
           }
-          .rp-brand-mark::after { content: "\\1F511"; font-size: 12px; line-height: 1; }
           .rp-section {
             font-size: 11px; font-weight: 700; letter-spacing: 0.12em;
             text-transform: uppercase; color: var(--rp-orange);
@@ -1327,7 +1337,16 @@ def build_ui() -> None:
 
     with ui.header().classes("items-center justify-between px-4 no-wrap"):
         with ui.row().classes("items-center no-wrap"):
-            ui.element("span").classes("rp-brand-mark")
+            brand_icon = HERE / "assets" / "reconpipe.ico"
+            if brand_icon.is_file():
+                brand_url = app.add_static_file(
+                    local_file=brand_icon,
+                    url_path="/assets/reconpipe.ico",
+                )
+                ui.html(
+                    f'<img class="rp-brand-mark" src="{brand_url}" alt="ReconPipe">',
+                    sanitize=False,
+                )
             ui.label("ReconPipe").classes("rp-title")
         with ui.row().classes("items-center gap-3"):
             usage_html_el = ui.html(
@@ -1947,7 +1966,7 @@ def build_ui() -> None:
                         except Exception as exc:
                             form_error.text = str(exc)
 
-                    def launch_from_opts(opts: Dict[str, Any]) -> bool:
+                    def launch_from_opts(opts: Dict[str, Any], *, focus: str = "console") -> bool:
                         errs = validate_form(opts)
                         if errs:
                             form_error.text = " · ".join(errs)
@@ -1971,14 +1990,15 @@ def build_ui() -> None:
                         STATE._finalized_at = None
                         STATE._finding_sigs = None
                         STATE._dash_sig = None  
-                        try:
-                            console.clear()
-                        except Exception:
-                            pass
+                        for widget in (console, app_console):
+                            try:
+                                widget.clear()
+                            except Exception:
+                                pass
                         status_label.set_text("RUNNING")
                         status_dot.classes(replace="rp-status-dot run")
                         ui.notify("Pipeline started", type="positive")
-                        tabs.set_value(tab_console)
+                        tabs.set_value(tab_apps if focus == "apps" else tab_console)
                         update_stats(force=True)
                         return True
 
@@ -2313,7 +2333,8 @@ def build_ui() -> None:
                         )
                         app_no_validate.value = True
                         ui.label(
-                            "Apps-only still needs a domain for reports. "
+                            "The domain only names the workspace and reports. "
+                            "Apps only scans the package. "
                             "Untick it to attach the package to a full Scan-tab run."
                         ).classes("text-xs text-slate-500")
                         app_error = ui.label("").classes("text-red-400 text-sm")
@@ -2349,26 +2370,11 @@ def build_ui() -> None:
                             opts["ipa"] = ipa
                             opts["package"] = packages
                             if bool(app_only.value):
-                                opts["skip_chaos"] = True
-                                opts["skip_subfinder"] = True
-                                opts["skip_httpx"] = True
-                                opts["skip_gau"] = True
-                                opts["skip_discovery"] = True
-                                opts["skip_intel"] = True
-                                opts["skip_amass"] = True
-                                opts["skip_buckets"] = True
-                                opts["skip_code_search"] = True
-                                opts["skip_ci_logs"] = True
-                                opts["skip_pastes"] = True
-                                opts["skip_docker_hub"] = True
-                                opts["skip_image_layers"] = True
-                                opts["skip_openapi"] = True
-                                opts["skip_sensitive_paths"] = True
-                                opts["spray"] = False
+                                rp.apply_apps_only_options(opts)
                             if bool(app_no_validate.value):
                                 opts["no_validate"] = True
                             app_error.text = ""
-                            launch(opts)
+                            launch(opts, focus="apps")
 
                         with ui.row().classes("gap-2 mt-2"):
                             ui.button(
@@ -2383,6 +2389,30 @@ def build_ui() -> None:
                             ).props("flat")
 
                 with ui.column().classes("w-full lg:w-5/12 gap-3"):
+                    with ui.card().classes("w-full rp-card"):
+                        with ui.row().classes("w-full justify-between items-center"):
+                            ui.label("App console").classes("rp-section w-full")
+                            ui.button(
+                                "Clear",
+                                on_click=lambda: app_console.clear(),
+                                color="secondary",
+                            ).props("flat dense")
+                        app_console = ui.log(max_lines=100).classes(
+                            "rp-console rp-console-apps w-full"
+                        )
+                        app_stage_labels: Dict[int, Any] = {}
+                        with ui.row().classes("gap-3 flex-wrap mt-2"):
+                            for num, title in (
+                                (1, "1 Subdomains"),
+                                (2, "2 Live hosts"),
+                                (3, "3 URL discovery"),
+                                (4, "4 Secret scan"),
+                                (5, "5 Validation"),
+                                (6, "6 Save results"),
+                            ):
+                                app_stage_labels[num] = ui.label(title).classes(
+                                    "text-xs text-slate-500"
+                                )
                     with ui.card().classes("w-full rp-card"):
                         ui.label("What this does").classes("rp-section")
                         ui.label(
@@ -2979,77 +3009,9 @@ def build_ui() -> None:
 
                 with ui.tab_panel(sub_scene):
                     scene_meta = ui.label(
-                        "Click a company block to open its key pack"
+                        "Click a company node to open its key pack"
                     ).classes("text-sm text-slate-400")
-                    findings_scene_box: Dict[str, Any] = {"scene": None}
-
-                    def _draw_vendor_scene() -> None:
-                        scene = findings_scene_box.get("scene")
-                        groups = rp.rp_reports.group_findings_by_vendor(
-                            STATE.findings,
-                            STATE.exposures,
-                            STATE.informational,
-                            redact=rp.redact_key,
-                        )
-                        nodes = rp.rp_reports.vendor_scene_nodes(groups)
-                        n = len(nodes)
-                        scene_meta.set_text(
-                            f"{n} compan{'y' if n == 1 else 'ies'} — click a block for the key pack"
-                        )
-                        if scene is None:
-                            return
-                        try:
-                            scene.clear()
-                        except Exception:
-                            return
-                        try:
-                            scene.axes_helper()
-                        except Exception:
-                            pass
-                        for node in nodes:
-                            nid = "vendor:" + str(node["id"])
-                            col = str(node.get("color") or "#f0883e")
-                            h = float(node.get("h") or 0.8)
-                            x = float(node["x"])
-                            y = float(node["y"])
-                            box = scene.box(0.85, 0.85, h).material(col).move(
-                                x=x, y=y, z=h / 2.0
-                            )
-                            try:
-                                box.with_name(nid)
-                            except Exception:
-                                pass
-                            if node.get("live"):
-                                sph = scene.sphere(0.16).material("#3fb950").move(
-                                    x=x, y=y, z=h + 0.28
-                                )
-                                try:
-                                    sph.with_name(nid)
-                                except Exception:
-                                    pass
-                            try:
-                                scene.text(
-                                    str(node.get("name") or ""),
-                                    "color:#e6edf3;background:rgba(0,0,0,0.4);"
-                                    "padding:3px 8px;border-radius:4px",
-                                ).move(x=x, y=y, z=h + 0.55).with_name(nid)
-                            except Exception:
-                                pass
-
-                    def _on_scene_click(e) -> None:
-                        hits = getattr(e, "hits", None) or []
-                        name = ""
-                        for hit in hits:
-                            name = str(getattr(hit, "object_name", "") or "")
-                            if name.startswith("vendor:"):
-                                break
-                        if not name.startswith("vendor:"):
-                            return
-                        vid = name.split(":", 1)[1]
-                        try:
-                            company_pack.refresh(vid)
-                        except Exception:
-                            pass
+                    findings_scene_box: Dict[str, Any] = {"sig": None}
 
                     @ui.refreshable
                     def company_pack(vendor_id: str = "") -> None:
@@ -3077,30 +3039,81 @@ def build_ui() -> None:
                         ui.label(str(g.get("about") or "")).classes(
                             "text-sm text-slate-300 mt-1"
                         )
+                        keys = list(g.get("keys") or [])
+                        shown = keys[:12]
                         ui.label(
                             f"LIVE {g.get('live')}/{g.get('total')}"
                         ).classes("text-xs text-slate-400 mt-2")
-                        for k in g.get("keys") or []:
+                        for k in shown:
                             live = "LIVE" if k.get("valid") else "seen"
                             ui.label(
                                 f"{k.get('product')}  `{k.get('type')}`  {live}  "
                                 f"{k.get('fingerprint')}  "
                                 f"{str(k.get('source_url') or '')[:80]}"
                             ).classes("text-xs font-mono text-slate-400 break-all")
+                        if len(keys) > len(shown):
+                            ui.label(
+                                f"{len(keys) - len(shown)} more on the Vendors tab"
+                            ).classes("text-xs text-slate-500")
+
+                    def _on_graph_click(e: Any) -> None:
+                        vid = getattr(e, "args", "")
+                        if isinstance(vid, (list, tuple)):
+                            vid = vid[0] if vid else ""
+                        vid = str(vid or "")
+                        if not vid or vid == "root":
+                            return
+                        try:
+                            company_pack.refresh(vid)
+                        except Exception:
+                            pass
+
+                    def _draw_vendor_scene() -> None:
+                        groups = rp.rp_reports.group_findings_by_vendor(
+                            STATE.findings,
+                            STATE.exposures,
+                            STATE.informational,
+                            redact=rp.redact_key,
+                        )
+                        sig = rp.rp_reports.vendor_graph_signature(STATE.domain, groups)
+                        if sig == findings_scene_box.get("sig"):
+                            return
+                        model = rp.rp_reports.vendor_graph_model(STATE.domain, groups)
+                        n = int(model.get("vendors") or 0)
+                        omitted = int(model.get("omitted") or 0)
+                        extra = f" · {omitted} more not drawn" if omitted else ""
+                        scene_meta.set_text(
+                            f"{n} compan{'y' if n == 1 else 'ies'}{extra} — "
+                            "red is a live key, green is seen only. Click a node for the key pack."
+                        )
+                        try:
+                            graph_view.set_content(
+                                rp.rp_reports.vendor_graph_svg(
+                                    STATE.domain, groups, model=model
+                                )
+                            )
+                        except Exception:
+                            return
+                        findings_scene_box["sig"] = sig
 
                     with ui.row().classes("w-full gap-3 items-stretch"):
                         with ui.column().classes("w-full lg:w-7/12"):
-                            with ui.scene(
-                                width=640,
-                                height=460,
-                                on_click=_on_scene_click,
-                                grid=True,
-                            ).classes("w-full") as sc:
-                                findings_scene_box["scene"] = sc
-                                try:
-                                    sc.axes_helper()
-                                except Exception:
-                                    pass
+                            graph_view = ui.html("", sanitize=False).classes(
+                                "w-full rp-topo-wrap"
+                            )
+                            graph_view.on(
+                                "click",
+                                _on_graph_click,
+                                throttle=0.25,
+                                js_handler=(
+                                    "(e) => {"
+                                    " const n = e.target && e.target.closest"
+                                    " ? e.target.closest('[data-vid]') : null;"
+                                    " if (!n || !n.dataset.vid || n.dataset.vid === 'root') return;"
+                                    " emit(n.dataset.vid);"
+                                    "}"
+                                ),
+                            )
                         with ui.column().classes("w-full lg:w-5/12"):
                             ui.label("Company pack").classes("rp-section")
                             scene_meta
@@ -3930,16 +3943,17 @@ def build_ui() -> None:
         if not m:
             return
         n = int(m.group(1))
-        for i, lbl in stage_labels.items():
-            if i < n:
-                lbl.classes(replace="text-xs font-bold")
-                lbl.style("color: #6aa84f")
-            elif i == n:
-                lbl.classes(replace="text-xs font-bold")
-                lbl.style("color: #e85d04")
-            else:
-                lbl.classes(replace="text-xs")
-                lbl.style("color: #8a8a8a")
+        for labels in (stage_labels, app_stage_labels):
+            for i, lbl in labels.items():
+                if i < n:
+                    lbl.classes(replace="text-xs font-bold")
+                    lbl.style("color: #6aa84f")
+                elif i == n:
+                    lbl.classes(replace="text-xs font-bold")
+                    lbl.style("color: #e85d04")
+                else:
+                    lbl.classes(replace="text-xs")
+                    lbl.style("color: #8a8a8a")
 
     def on_tick() -> None:
         try:
@@ -3956,10 +3970,11 @@ def build_ui() -> None:
                 text = "\n".join(lines)
                 if len(text) > CONSOLE_PUSH_CHARS:
                     text = text[-CONSOLE_PUSH_CHARS:]
-                try:
-                    console.push(text)
-                except Exception:
-                    pass
+                for widget in (console, app_console):
+                    try:
+                        widget.push(text)
+                    except Exception:
+                        pass
             for ln in lines:
                 if "[/" in ln or "/6]" in ln:
                     detect_stage(ln)
@@ -4193,7 +4208,7 @@ def main() -> None:
         reload=False,
         show=show,
         native=native,
-        favicon="assets/reconpipe.ico",
+        favicon=str(HERE / "assets" / "reconpipe.ico"),
         dark=True,
         prod_js=True,
         show_welcome_message=False,

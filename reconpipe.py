@@ -589,6 +589,8 @@ annotate_repo_findings = wave3.annotate_repo_findings
 pair_generic_findings = wave3.pair_generic_findings
 proximity_partners = wave3.proximity_partners
 apply_ci_defaults = wave3.apply_ci_defaults
+apply_apps_only_options = wave3.apply_apps_only_options
+APPS_ONLY_SKIP_FLAGS = wave3.APPS_ONLY_SKIP_FLAGS
 crtsh_hosts_from_payload = wave3.crtsh_hosts_from_payload
 certstream_domains_from_message = wave3.certstream_domains_from_message
 hosts_matching_domain = wave3.hosts_matching_domain
@@ -7553,7 +7555,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         log("Running gowitness...", "info")
         run_cmd(build_gowitness_cmd(str(live_hosts_file), str(gw_dir)), timeout=240, discard_stdout=True)
 
-    if tools_status.get("wappalyzer") and live_list and not skip_completed_stage(resume_from, "httpx"):
+    # skip-httpx + skip-whatweb means live hosts are not a scan target
+    # (Apps only). Do not fingerprint the workspace domain.
+    if (
+        not (args.skip_httpx and args.skip_whatweb)
+        and tools_status.get("wappalyzer")
+        and live_list
+        and not skip_completed_stage(resume_from, "httpx")
+    ):
         wap_out = output_dir / "wappalyzer.json"
         rows: List[str] = []
         webanalyze_bin = addons.resolve_webanalyze_bin()
