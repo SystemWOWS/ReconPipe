@@ -795,14 +795,6 @@ Raise `min_confidence` in an overlay, disable `generic_secret`, or `--skip-secre
 
 Install pywebview and WebKit (see [Installation](#installation)), or pass `--native`. `--browser` forces a localhost tab.
 
-**Need a global** `reconpipe` **command**
-
-```bash
-chmod +x reconpipe.py
-sudo ln -sf "$(pwd)/reconpipe.py" /usr/local/bin/reconpipe
-reconpipe -d example.com
-```
-
 ---
 
 
