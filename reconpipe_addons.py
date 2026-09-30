@@ -59,7 +59,9 @@ SECRETS_PATTERNS_DB_URL = (
 )
 SECRETS_DB_SKIP_NAME = re.compile(
     r"\b(arn|s3 bucket|elb|rds|ec2|elasticache|api gateway|hostname|"
-    r"internal|external|cred file|filename|website|domain name)\b",
+    r"internal|external|cred file|filename|website|domain name|"
+    r"certificate pins?|cert(?:ificate)? pins?|pinning|public key pins?|spki|"
+    r"ethereum address|bitcoin address|btc address|solana address|wallet address)\b",
     re.I,
 )
 SECRETS_DB_SKIP_REGEX = re.compile(
@@ -2076,6 +2078,16 @@ def secrets_regex_compiles(pattern: str) -> bool:
     return True
 
 
+def secrets_db_is_bare_material(regex: str) -> bool:
+    """True when a rule is only a 40/64 hex blob, with no required label."""
+    body = re.sub(r"\(\?[imsx]+\)", "", (regex or "").strip())
+    body = body.replace(r"\b", "")
+    body = body.strip("^$")
+    body = re.sub(r"^\(\?:0x\)\??", "", body)
+    body = re.sub(r"^0x", "", body)
+    return bool(re.fullmatch(r"\[[^\]]+\]\{(?:40|42|64|66)\}", body))
+
+
 def secrets_db_is_duplicate(regex: str, existing: Dict[str, str]) -> bool:
     rx = (regex or "").strip()
     if not rx:
@@ -2110,6 +2122,8 @@ def filter_secrets_db_entries(
         name = row.get("name") or ""
         regex = (row.get("regex") or "").strip()
         if SECRETS_DB_SKIP_NAME.search(name) or SECRETS_DB_SKIP_REGEX.search(regex):
+            continue
+        if secrets_db_is_bare_material(regex):
             continue
         if not secrets_regex_compiles(regex):
             continue

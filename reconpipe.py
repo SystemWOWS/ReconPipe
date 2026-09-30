@@ -56,7 +56,6 @@ except ImportError:
     ClientError = Exception  
     BotoCoreError = Exception
 
-# Colors ( Might remove as it looks dumb, it's not 2010)
 class C:
     RED    = "\033[91m"
     GREEN  = "\033[92m"
@@ -67,17 +66,6 @@ class C:
     BOLD   = "\033[1m"
     DIM    = "\033[2m"
     RESET  = "\033[0m"
-
-BANNER = f"""
-{C.CYAN}{C.BOLD}
-  ██████╗ ███████╗ ██████╗ ██████╗ ███╗   ██╗██████╗ ██╗██████╗ ███████╗
-  ██╔══██╗██╔════╝██╔════╝██╔═══██╗████╗  ██║██╔══██╗██║██╔══██╗██╔════╝
-  ██████╔╝█████╗  ██║     ██║   ██║██╔██╗ ██║██████╔╝██║██████╔╝█████╗
-  ██╔══██╗██╔══╝  ██║     ██║   ██║██║╚██╗██║██╔═══╝ ██║██╔═══╝ ██╔══╝
-  ██║  ██║███████╗╚██████╗╚██████╔╝██║ ╚████║██║     ██║██║     ███████╗
-  ╚═╝  ╚═╝╚══════╝ ╚═════╝ ╚═════╝ ╚═╝  ╚═══╝╚═╝     ╚═╝╚═╝     ╚══════╝
-{C.RESET}{C.DIM}  Chaos → httpx → gau → TruffleHog → Async Validator | v1.0{C.RESET}
-"""
 
 # Secret patterns / validators / confidence — loaded from config.yaml (+ --config merges)
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "config.yaml"
@@ -3523,6 +3511,85 @@ def looks_fake(value: str) -> bool:
     return False
 
 
+_PIN_VALUE_PREFIX = re.compile(
+    r"(?i)^sha(?:1|256)/[A-Za-z0-9+/]{27,88}={0,2}$"
+)
+_PIN_B64 = re.compile(r"^[A-Za-z0-9+/]{27,88}={0,2}$")
+_PIN_HEX = re.compile(r"^[A-Fa-f0-9]{40}$|^[A-Fa-f0-9]{64}$")
+_PIN_CONTEXT = re.compile(
+    r"certificate\s*pins?|cert(?:ificate)?\s*pins?|\bpin-set\b|\bpinning\b|"
+    r"CertificatePinner|NSPinned|SPKI-SHA256|publicKeyHashes?|"
+    r"digest\s*=\s*[\"']SHA-?256|\bsha256/|\bsha1/",
+    re.I,
+)
+_PIN_PATH = re.compile(
+    r"network_security_config|certificatepinner|nspinned|trustkit|"
+    r"public_key_pins|pin-set|cert(?:ificate)?[_-]?pins?",
+    re.I,
+)
+_PIN_LABEL = re.compile(
+    r"certificate[_\s-]*pins?|cert(?:ificate)?[_\s-]*pins?|\bpinning\b|"
+    r"public[_\s-]*key[_\s-]*pins?|\bspki\b",
+    re.I,
+)
+_REAL_SECRET_PREFIX = re.compile(
+    r"^(?:sk_live_|sk_test_|sk-proj-|sk-ant-|AKIA|ASIA|ghp_|github_pat_|xox[baprs]-|eyJ)"
+)
+
+
+def is_certificate_pin(
+    value: str,
+    content: str = "",
+    start: int = 0,
+    end: int = 0,
+    source: str = "",
+) -> bool:
+    """True for public cert/SPKI pins. Those are not API keys."""
+    text = (value or "").strip().strip("'\"")
+    if not text or _REAL_SECRET_PREFIX.match(text):
+        return False
+    if _PIN_VALUE_PREFIX.match(text):
+        return True
+    window = ""
+    if content and end >= start:
+        window = content[max(0, start - 140): min(len(content), end + 140)]
+    pinned = bool(_PIN_CONTEXT.search(window) or _PIN_PATH.search(source or ""))
+    if not pinned:
+        return False
+    if _PIN_B64.match(text) or _PIN_HEX.match(text):
+        return True
+    return False
+
+
+def is_certificate_pin_finding(finding: Dict) -> bool:
+    label = " ".join(
+        str(finding.get(k) or "")
+        for k in ("type", "detector", "note", "likely_service")
+    )
+    if _PIN_LABEL.search(label):
+        return True
+    return is_certificate_pin(
+        str(finding.get("key") or ""),
+        source=str(
+            finding.get("source_url")
+            or finding.get("file")
+            or finding.get("source")
+            or ""
+        ),
+    )
+
+
+def drop_certificate_pins(findings: List[Dict]) -> Tuple[List[Dict], int]:
+    kept: List[Dict] = []
+    dropped = 0
+    for item in findings or []:
+        if is_certificate_pin_finding(item):
+            dropped += 1
+            continue
+        kept.append(item)
+    return kept, dropped
+
+
 def entropy(s: str) -> float:
     """Shannon entropy in bits/char over the observed alphabet."""
     if not s:
@@ -4087,6 +4154,10 @@ def custom_scan(urls_file: str, output_dir: Optional[Path] = None) -> List[Dict]
                     seen_pairs.add((h, url))
 
                     if looks_fake(key):
+                        baseline_record(baseline, h, key_type, url)
+                        continue
+
+                    if is_certificate_pin(key, page, m.start(), m.end(), url):
                         baseline_record(baseline, h, key_type, url)
                         continue
 
@@ -7041,8 +7112,6 @@ def run_domain_list(args: Any, argv: Optional[List[str]]) -> int:
 
 def main(argv: Optional[List[str]] = None) -> int:
     reset_log_counters()
-    print(BANNER)
-
     parser = build_parser()
     args = parser.parse_args(argv)
     apply_saved_keys(args)
@@ -8407,6 +8476,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                                 key = grp if grp is not None else raw
                                 if looks_fake(key):
                                     continue
+                                if is_certificate_pin(key, content_text, m.start(), m.end(), str(f_path)):
+                                    continue
                                 if key_type == "mapbox_token" and not is_mapbox_token(key):
                                     continue
                                 if key_type in INFORMATIONAL_TYPES:
@@ -8578,6 +8649,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                                 key = grp if grp is not None else raw
                                 if looks_fake(key) or key_type in INFORMATIONAL_TYPES:
                                     continue
+                                if is_certificate_pin(key, content_text, m.start(), m.end(), str(f_path)):
+                                    continue
                                 raw_findings.append({
                                     "type": key_type,
                                     "key": key,
@@ -8656,6 +8729,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         if dropped_scope:
             log(
                 f"Scope filter: dropped {dropped_scope} off-target finding(s)",
+                "info",
+            )
+        raw_findings, dropped_pins = drop_certificate_pins(raw_findings)
+        if dropped_pins:
+            log(
+                f"Dropped {dropped_pins} certificate pin(s) — public hashes, not keys",
                 "info",
             )
         raw_findings, informational = split_informational(raw_findings)

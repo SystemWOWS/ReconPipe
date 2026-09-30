@@ -183,6 +183,44 @@ patterns:
   razorpay_key: rzp_(?:live|test)_[A-Za-z0-9]{14,}
   flutterwave_secret: FLWSECK[_-](?:TEST[_-])?[A-Za-z0-9]{10,}
   n8n_api: n8n_api_[A-Za-z0-9_-]{12,}
+  evm_private_key: (?i)(?:private[_-]?key|priv[_-]?key|eth(?:ereum)?[_-]?(?:priv|private)|wallet[_-]?private|deployer[_-]?key|secret[_-]?key)['\" \t:=]{0,16}['\"]?(?:0x)?([a-fA-F0-9]{64})(?![a-fA-F0-9])
+  solana_private_key: (?i)(?:solana[_-]?(?:private[_-]?key|secret|keypair)|phantom[_-]?(?:secret|key))['\" \t:=]{0,16}['\"]?([1-9A-HJ-NP-Za-km-z]{87,88})(?![1-9A-HJ-NP-Za-km-z])
+  btc_wif: (?i)(?:\bwif\b|bitcoin[_-]?(?:private|priv|key)|btc[_-]?(?:priv|private))['\" \t:=]{0,16}['\"]?([5KL][1-9A-HJ-NP-Za-km-z]{50,51})(?![1-9A-HJ-NP-Za-km-z])
+  bip39_mnemonic: (?i)(?:mnemonic|seed[_-]?phrase|recovery[_-]?phrase|secret[_-]?phrase)['\" \t:=]{0,12}((?:[a-z]{3,8}[^A-Za-z0-9]+){11,23}[a-z]{3,8})
+  chain_xprv: (?<![1-9A-HJ-NP-Za-km-z])(?:[xyztu]prv)[1-9A-HJ-NP-Za-km-z]{100,112}(?![1-9A-HJ-NP-Za-km-z])
+  chain_xpub: (?<![1-9A-HJ-NP-Za-km-z])(?:[xyztu]pub)[1-9A-HJ-NP-Za-km-z]{100,112}(?![1-9A-HJ-NP-Za-km-z])
+  infura_api: https?://[a-z0-9.-]*infura\.io/(?:v3|v2)/([a-fA-F0-9]{32})(?![a-fA-F0-9])
+  infura_ipfs: https?://[^:\s"']+:[^@\s"']+@ipfs\.infura\.io
+  alchemy_api: https?://[a-z0-9.-]*g\.alchemy\.com/(?:v2|v3)/([A-Za-z0-9_-]{20,80})(?![A-Za-z0-9_-])
+  quicknode_token: https?://[a-z0-9.-]+\.quiknode\.pro/([A-Za-z0-9_-]{20,})(?![A-Za-z0-9_-])
+  helius_api: helius-rpc\.com/(?:\?api-key=|v0/)([A-Za-z0-9_-]{20,})(?![A-Za-z0-9_-])
+  ankr_rpc: https?://rpc\.ankr\.com/[a-z0-9_-]+/([a-fA-F0-9]{32,})(?![a-fA-F0-9])
+  chainstack_rpc: https?://[a-z0-9.-]+\.(?:core\.chainstack\.com|p2pify\.com)/([A-Za-z0-9]{16,})(?![A-Za-z0-9])
+  getblock_rpc: https?://go\.getblock\.io/([a-fA-F0-9]{16,})(?![a-fA-F0-9])
+  blast_rpc: https?://[a-z0-9.-]+\.blastapi\.io/([A-Za-z0-9-]{16,})(?![A-Za-z0-9-])
+  drpc_key: drpc\.org/[^?\s"']*\?[^"'\s]*dkey=([A-Za-z0-9_-]{16,})(?![A-Za-z0-9_-])
+  thegraph_api: gateway\.thegraph\.com/api/([A-Za-z0-9]{20,})/subgraphs
+  coingecko_api: \bCG-[A-Za-z0-9_-]{20,}\b
+  coinmarketcap_api: (?i)(?:coinmarketcap|cmc[_-]?api)[_-]?(?:api[_-]?)?key['\" \t:=]{0,12}['\"]?([a-fA-F0-9-]{32,36})(?![a-fA-F0-9-])
+  etherscan_api: (?i)(?:etherscan|bscscan|polygonscan|arbiscan|snowtrace|basescan|optimistic[_-]?etherscan)[_-]?(?:api[_-]?)?key['\" \t:=]{0,12}['\"]?([A-Z0-9]{34})(?![A-Z0-9])
+  moralis_api: (?i)moralis[_-]?(?:api[_-]?)?key['\" \t:=]{0,12}['\"]?([A-Za-z0-9._-]{40,})(?![A-Za-z0-9._-])
+  opensea_api: (?i)opensea[_-]?(?:api[_-]?)?key['\" \t:=]{0,12}['\"]?([a-fA-F0-9]{32})(?![a-fA-F0-9])
+  pinata_api: (?i)pinata[_-]?(?:api[_-]?(?:key|secret)|jwt|secret)['\" \t:=]{0,12}['\"]?([A-Za-z0-9._-]{20,})(?![A-Za-z0-9._-])
+  thirdweb_secret: (?i)thirdweb[_-]?(?:secret|api[_-]?key)['\" \t:=]{0,12}['\"]?([A-Za-z0-9_-]{20,})(?![A-Za-z0-9_-])
+  privy_secret: (?i)privy[_-]?(?:app[_-]?)?secret['\" \t:=]{0,12}['\"]?([A-Za-z0-9_-]{20,})(?![A-Za-z0-9_-])
+  tenderly_api: (?i)tenderly[_-]?(?:access[_-]?(?:key|token)|api[_-]?key)['\" \t:=]{0,12}['\"]?([A-Za-z0-9_-]{20,})(?![A-Za-z0-9_-])
+  binance_api: (?i)binance[_-]?(?:api[_-]?)?key['\" \t:=]{0,12}['\"]?([A-Za-z0-9]{64})(?![A-Za-z0-9])
+  binance_secret: (?i)binance[_-]?(?:api[_-]?)?secret['\" \t:=]{0,12}['\"]?([A-Za-z0-9]{64})(?![A-Za-z0-9])
+  trongrid_api: (?i)(?:TRON-PRO-API-KEY|trongrid[_-]?(?:api[_-]?)?key)['\" \t:=]{0,12}['\"]?([A-Za-z0-9-]{20,})(?![A-Za-z0-9-])
+  oneinch_api: (?i)(?:1inch|oneinch)[_-]?(?:api[_-]?)?key['\" \t:=]{0,12}['\"]?([A-Za-z0-9]{20,})(?![A-Za-z0-9])
+  zerox_api: (?i)(?:0x[_-]?api[_-]?key|zeroex[_-]?(?:api[_-]?)?key)['\" \t:=]{0,12}['\"]?([A-Za-z0-9-]{20,})(?![A-Za-z0-9-])
+  dune_api: (?i)dune[_-]?(?:api[_-]?)?key['\" \t:=]{0,12}['\"]?([A-Za-z0-9]{20,})(?![A-Za-z0-9])
+  covalent_api: (?i)(?:covalent|goldrush)[_-]?(?:api[_-]?)?key['\" \t:=]{0,12}['\"]?((?:ckey|cqt)_[A-Za-z0-9]{16,}|[A-Za-z0-9]{32,})(?![A-Za-z0-9])
+  walletconnect_project: (?i)(?:wallet[_-]?connect[_-]?project[_-]?id|wc[_-]?project[_-]?id)['\" \t:=]{0,16}['\"]?([a-fA-F0-9]{32})(?![a-fA-F0-9])
+  web3_rpc: (?i)\b((?:[a-z0-9-]+\.)*(?:infura\.io|g\.alchemy\.com|quiknode\.pro|helius-rpc\.com|llamarpc\.com|publicnode\.com|drpc\.org|blastapi\.io|chainstack\.com|getblock\.io|nownodes\.io|trongrid\.io|p2pify\.com))\b
+  web3_sdk: (?i)\b(WalletConnect|@solana/web3\.js|rainbowkit|web3auth|Uniswap|SushiSwap|PancakeSwap|Aave|dYdX|EigenLayer|Raydium|Camelot|TraderJoe|GMX|Morpho|Pendle|Hyperliquid)\b
+  defi_contract: (?i)\b(0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D|0xE592427A0AEce92De3Edee1F18E0157C05861564|0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45|0x3fC91A3afd70395Cd496C647d5a6CC9D4B2b7FAD|0x000000000022D473030F116dDEE9F6B43aC78BA3|0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2|0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48|0xdAC17F958D2ee523a2206206994597C13D831ec7|0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2|0x1111111254EEB25477B68fb85Ed929f73A960582|0xd9e1cE17f2641f24aE83637ab66a2cca9C378B9F|0x10ED43C718714eb63d5aA57B78B54704E256024E|0x00000000000000ADc04C56Bf30aC9d3c0aAF14dC|JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4|675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8)\b
+  ens_name: (?i)\b([a-z0-9][a-z0-9-]{2,31}\.eth)\b
 confidence:
   google_api: 90
   google_oauth: 85
@@ -370,6 +408,44 @@ confidence:
   razorpay_key: 93
   flutterwave_secret: 90
   n8n_api: 94
+  evm_private_key: 96
+  solana_private_key: 94
+  btc_wif: 94
+  bip39_mnemonic: 90
+  chain_xprv: 97
+  chain_xpub: 70
+  infura_api: 92
+  infura_ipfs: 90
+  alchemy_api: 92
+  quicknode_token: 90
+  helius_api: 90
+  ankr_rpc: 88
+  chainstack_rpc: 88
+  getblock_rpc: 86
+  blast_rpc: 86
+  drpc_key: 86
+  thegraph_api: 90
+  coingecko_api: 88
+  coinmarketcap_api: 80
+  etherscan_api: 86
+  moralis_api: 84
+  opensea_api: 82
+  pinata_api: 84
+  thirdweb_secret: 84
+  privy_secret: 86
+  tenderly_api: 82
+  binance_api: 90
+  binance_secret: 94
+  trongrid_api: 82
+  oneinch_api: 82
+  zerox_api: 80
+  dune_api: 80
+  covalent_api: 80
+  walletconnect_project: 60
+  web3_rpc: 55
+  web3_sdk: 50
+  defi_contract: 70
+  ens_name: 45
 validators:
   google_api:
     url: https://www.googleapis.com/geolocation/v1/geolocate?key={key}
@@ -1796,6 +1872,12 @@ informational_types:
   sentry_dsn: Client Sentry DSN — typically public in frontend bundles
   launchdarkly_sdk: LaunchDarkly client-side SDK key
   oci_api_key: OCI tenancy OCID (identifier, not a private key)
+  chain_xpub: Extended public key — reveals addresses, does not spend
+  walletconnect_project: WalletConnect project id embedded in the client
+  web3_rpc: Web3 RPC hostname — a provider is in the app
+  web3_sdk: Web3 or DeFi library / protocol name in the app
+  defi_contract: Known DeFi or token contract address
+  ens_name: ENS name (.eth)
 exposure_types:
   source_map_exposure: Public JavaScript source map (.map) — not a credential
 severity:
@@ -1933,6 +2015,44 @@ severity:
   razorpay_key: high
   flutterwave_secret: critical
   n8n_api: critical
+  evm_private_key: critical
+  solana_private_key: critical
+  btc_wif: critical
+  bip39_mnemonic: critical
+  chain_xprv: critical
+  chain_xpub: low
+  infura_api: high
+  infura_ipfs: high
+  alchemy_api: high
+  quicknode_token: high
+  helius_api: high
+  ankr_rpc: high
+  chainstack_rpc: high
+  getblock_rpc: medium
+  blast_rpc: medium
+  drpc_key: medium
+  thegraph_api: high
+  coingecko_api: medium
+  coinmarketcap_api: medium
+  etherscan_api: medium
+  moralis_api: high
+  opensea_api: medium
+  pinata_api: high
+  thirdweb_secret: high
+  privy_secret: high
+  tenderly_api: medium
+  binance_api: critical
+  binance_secret: critical
+  trongrid_api: medium
+  oneinch_api: medium
+  zerox_api: medium
+  dune_api: medium
+  covalent_api: medium
+  walletconnect_project: low
+  web3_rpc: low
+  web3_sdk: low
+  defi_contract: low
+  ens_name: low
   aws_access_key: critical
   aws_secret: critical
   gcp_service_acct: critical
@@ -1969,9 +2089,30 @@ revocation:
   razorpay_key: https://dashboard.razorpay.com/app/keys
   flutterwave_secret: https://dashboard.flutterwave.com/dashboard/settings/apis
   n8n_api: https://docs.n8n.io/connect/n8n-api/authentication/#delete-an-api-key
+  infura_api: https://app.infura.io/dashboard
+  alchemy_api: https://dashboard.alchemy.com/apps
+  quicknode_token: https://dashboard.quicknode.com/endpoints
+  helius_api: https://dashboard.helius.dev/
+  thegraph_api: https://thegraph.com/studio/
+  coingecko_api: https://www.coingecko.com/en/developers/dashboard
+  etherscan_api: https://etherscan.io/myapikey
+  binance_api: https://www.binance.com/en/my/settings/api-management
+  binance_secret: https://www.binance.com/en/my/settings/api-management
+  moralis_api: https://admin.moralis.io/web3apis
+  pinata_api: https://app.pinata.cloud/keys
+  thirdweb_secret: https://thirdweb.com/dashboard
+  privy_secret: https://dashboard.privy.io/
 compliance:
   stripe_live:
   - PCI-DSS
+  - SOC2
+  evm_private_key:
+  - SOC2
+  bip39_mnemonic:
+  - SOC2
+  chain_xprv:
+  - SOC2
+  binance_secret:
   - SOC2
   stripe_restricted:
   - PCI-DSS

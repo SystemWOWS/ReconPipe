@@ -969,6 +969,117 @@ class Wave2PipelineTests(unittest.TestCase):
             self.assertGreaterEqual(n, 1)
             self.assertTrue(dest.is_file())
 
+    def test_certificate_pins_are_not_keys(self):
+        pin = "sha256/" + "A" * 43 + "="
+        xml = (
+            '<pin-set><pin digest="SHA-256">'
+            "7HIpactkIAq2Y49orFOOQKurWxmmSFZhBCoQYcRhJ3Y="
+            "</pin></pin-set>"
+        )
+        self.assertTrue(rp.is_certificate_pin(pin))
+        self.assertTrue(
+            rp.is_certificate_pin(
+                "7HIpactkIAq2Y49orFOOQKurWxmmSFZhBCoQYcRhJ3Y=",
+                xml,
+                xml.index("7HI"),
+                xml.index("7HI") + 44,
+                "mobile_extract/res/xml/network_security_config.xml",
+            )
+        )
+        self.assertFalse(
+            rp.is_certificate_pin("sk_live_" + "A" * 24, xml, 0, 10, "app.js")
+        )
+        kept, dropped = rp.drop_certificate_pins([
+            {"type": "spd_certificate_pins", "key": pin, "source_url": "a.xml"},
+            {"type": "stripe_live", "key": "sk_live_" + "B" * 24, "source_url": "a.js"},
+        ])
+        self.assertEqual(dropped, 1)
+        self.assertEqual(kept[0]["type"], "stripe_live")
+        rows = rp.filter_secrets_db_entries(
+            [
+                {
+                    "name": "Certificate Pins",
+                    "regex": r"sha256/[A-Za-z0-9+/]{43}=",
+                    "confidence": "high",
+                },
+                {
+                    "name": "Adafruit IO Key",
+                    "regex": r"\b(aio_[a-zA-Z0-9]{28})\b",
+                    "confidence": "high",
+                },
+            ],
+            {},
+        )
+        self.assertEqual([row["name"] for row in rows], ["Adafruit IO Key"])
+
+    def test_web3_patterns_match_keys_not_hashes(self):
+        def captured(name, text):
+            rx = re.compile(rp.PATTERNS[name])
+            match = rx.search(text)
+            self.assertIsNotNone(match, name)
+            return match.group(match.lastindex) if match.lastindex else match.group(0)
+
+        hex64 = "0123456789abcdef" * 4
+        self.assertIsNone(re.compile(rp.PATTERNS["evm_private_key"]).search(hex64))
+        self.assertEqual(captured("evm_private_key", f'PRIVATE_KEY="0x{hex64}"'), hex64)
+        b58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+        self.assertEqual(
+            captured("solana_private_key", "solana_private_key=" + (b58 * 2)[:88]),
+            (b58 * 2)[:88],
+        )
+        self.assertTrue(
+            captured("btc_wif", "bitcoin_private=" + "K" + (b58 * 2)[:51]).startswith("K")
+        )
+        phrase = (
+            "mnemonic: legal winner thank year wave sausage worth useful "
+            "legal winner thank yellow"
+        )
+        self.assertIn("legal winner", captured("bip39_mnemonic", phrase))
+        xprv = "xprv" + (b58 * 3)[:107]
+        self.assertTrue(captured("chain_xprv", xprv).startswith("xprv"))
+        project = "a1b2c3d4" * 4
+        self.assertEqual(
+            captured("infura_api", f"https://mainnet.infura.io/v3/{project}"),
+            project,
+        )
+        self.assertEqual(
+            captured("coingecko_api", "CG-" + "Ab3xYz90QWERTYUIOP12"),
+            "CG-Ab3xYz90QWERTYUIOP12",
+        )
+        router = "0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D"
+        self.assertEqual(captured("defi_contract", f"router={router}"), router)
+        self.assertIsNone(
+            re.compile(rp.PATTERNS["defi_contract"]).search("0x" + "ab" * 20)
+        )
+        self.assertIn(
+            "Uniswap",
+            captured("web3_sdk", 'const dex = "Uniswap"'),
+        )
+        self.assertEqual(
+            rp.finding_severity({"type": "evm_private_key"}),
+            "critical",
+        )
+        self.assertEqual(rp.finding_severity({"type": "defi_contract"}), "low")
+        vid, _label = rp.rp_reports.vendor_for_type("alchemy_api")
+        self.assertEqual(vid, "alchemy")
+        dropped = rp.filter_secrets_db_entries(
+            [
+                {"name": "Hex blob", "regex": r"[a-fA-F0-9]{64}", "confidence": "high"},
+                {
+                    "name": "Ethereum Address",
+                    "regex": r"0x[a-fA-F0-9]{40}",
+                    "confidence": "high",
+                },
+                {
+                    "name": "Adafruit IO Key",
+                    "regex": r"\b(aio_[a-zA-Z0-9]{28})\b",
+                    "confidence": "high",
+                },
+            ],
+            {},
+        )
+        self.assertEqual([row["name"] for row in dropped], ["Adafruit IO Key"])
+
 
 class ToolPreflightTests(unittest.TestCase):
     def _exe(self, directory: Path, name: str) -> Path:
